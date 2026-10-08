@@ -139,7 +139,7 @@ _WHITESPACE_RE = re.compile(r"\s+")
 _EDGE_CONTENT_TAG_RE = re.compile(r"^\s*<(?:unk|foreign|overlap)>", re.IGNORECASE)
 
 
-def _has_edge_content_tag(raw_text: str | None) -> bool:
+def has_edge_content_tag(raw_text: str | None) -> bool:
     """True when a label starts or ends with a content-bearing annotation tag.
 
     Such rows supervise onset/offset truncation once the tag is stripped, so
@@ -187,9 +187,10 @@ def _capitalize_sentence_starts(text: str) -> str:
     acronym rather than a boundary.
     """
 
-    def repl(match: re.Match) -> str:
+    def repl(match: re.Match[str]) -> str:
         if _SPELLED_LETTER_RUN_RE.search(text[: match.start()]):
-            return match.group(0)
+            whole: str = match.group(0)
+            return whole
         return f"{match.group(1)} {match.group(2).upper()}"
 
     return _SENT_START_LOWERCASE_RE.sub(repl, text)
@@ -209,7 +210,7 @@ def _post_truecase_cleanup(text: str) -> str:
 # unescapes HTML entities (&amp; → &), and folds smart quotes (' " → ' ");
 # NFKC further normalizes composed/decomposed forms (café vs cafe + ◌́) and
 # width variants (full-width Latin → half-width). Applied first in
-# _normalize_label so downstream regexes see canonical ASCII-leaning text.
+# normalize_label so downstream regexes see canonical ASCII-leaning text.
 #
 # Truecase (`truecase`, imported above): NLTK-backed statistical recasing for
 # transcripts that arrive in mono-case form (all-upper or zero-caps).
@@ -301,7 +302,7 @@ def _recase_monocase_text(text: str) -> str:
 # to test for an empty label and once to build the sample. Cache sized well
 # above the largest training batch so the second call is always a hit.
 @functools.lru_cache(maxsize=4096)
-def _normalize_label(raw_text: str | None, text_case: str | None = None) -> str:
+def normalize_label(raw_text: str | None, text_case: str | None = None) -> str:
     """Canonicalize a training transcript label to cased+punct form.
 
     Pipeline (in order):

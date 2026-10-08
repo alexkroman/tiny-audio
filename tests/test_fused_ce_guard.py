@@ -10,36 +10,39 @@ smoke run or a deliberate unfused run is never blocked.
 
 import logging
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import patch
 
 import pytest
+from omegaconf import DictConfig
 
 from scripts.train import _require_fused_cross_entropy
 from tiny_audio import asr_modeling
+from tiny_audio.asr_modeling import ASRModel
 
 
-def _model(accepts: bool, vocab: int = 248320, name: str = "Qwen3_5ForCausalLM"):
+def _model(accepts: bool, vocab: int = 248320, name: str = "Qwen3_5ForCausalLM") -> ASRModel:
     """Minimal stand-in: the guard reads only these three attributes."""
     lm_cls = type(name, (), {"config": SimpleNamespace(vocab_size=vocab)})
     lm = lm_cls()
-    return SimpleNamespace(_lm_accepts_skip_logits=accepts, language_model=lm)
+    return cast(ASRModel, SimpleNamespace(_lm_accepts_skip_logits=accepts, language_model=lm))
 
 
-def _cfg(**training):
-    base = {"use_liger": True, "per_device_train_batch_size": 48}
+def _cfg(**training: object) -> DictConfig:
+    base: dict[str, object] = {"use_liger": True, "per_device_train_batch_size": 48}
     base.update(training)
-    return SimpleNamespace(training=base)
+    return cast(DictConfig, SimpleNamespace(training=base))
 
 
 class TestRaisesWhereItCosts:
-    def test_raises_on_cuda_with_a_large_vocab(self):
+    def test_raises_on_cuda_with_a_large_vocab(self) -> None:
         with (
             patch("torch.cuda.is_available", return_value=True),
             pytest.raises(RuntimeError, match="fused linear cross-entropy is NOT active"),
         ):
             _require_fused_cross_entropy(_model(False), _cfg())
 
-    def test_the_message_is_actionable(self):
+    def test_the_message_is_actionable(self) -> None:
         with (
             patch("torch.cuda.is_available", return_value=True),
             pytest.raises(RuntimeError) as exc,
@@ -53,30 +56,32 @@ class TestRaisesWhereItCosts:
 
 
 class TestEscapeHatches:
-    def test_silent_when_fused_ce_is_active(self):
+    def test_silent_when_fused_ce_is_active(self) -> None:
         with patch("torch.cuda.is_available", return_value=True):
             _require_fused_cross_entropy(_model(True), _cfg())
 
-    def test_silent_off_cuda(self):
+    def test_silent_off_cuda(self) -> None:
         """mac / CPU smoke runs: liger is a linux-only dependency."""
         with patch("torch.cuda.is_available", return_value=False):
             _require_fused_cross_entropy(_model(False), _cfg())
 
-    def test_silent_when_liger_is_deliberately_off(self):
+    def test_silent_when_liger_is_deliberately_off(self) -> None:
         with patch("torch.cuda.is_available", return_value=True):
             _require_fused_cross_entropy(_model(False), _cfg(use_liger=False))
 
-    def test_allow_unfused_ce_overrides(self):
+    def test_allow_unfused_ce_overrides(self) -> None:
         with patch("torch.cuda.is_available", return_value=True):
             _require_fused_cross_entropy(_model(False), _cfg(allow_unfused_ce=True))
 
-    def test_silent_on_a_small_vocab(self):
+    def test_silent_on_a_small_vocab(self) -> None:
         """The logits tensor is not the dominant term below ~100k."""
         with patch("torch.cuda.is_available", return_value=True):
             _require_fused_cross_entropy(_model(False, vocab=49152), _cfg())
 
 
-def test_linear_attention_notice_is_info_on_inference_load(caplog):
+def test_linear_attention_notice_is_info_on_inference_load(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """A from_pretrained load is inference: the slower torch path is not actionable there."""
     caplog.set_level(logging.INFO, logger=asr_modeling.logger.name)
     asr_modeling._log_linear_attention_backends(logging.INFO)

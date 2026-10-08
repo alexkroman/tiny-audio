@@ -1,15 +1,25 @@
-"""Static types shared by ASRModel's loaders: loader kwargs and decoder protocols.
+"""Static types shared by the asr_* modules: audio aliases, loader kwargs, protocols.
 
-Pure typing scaffolding with no behaviour of its own: the `TypedDict`s describe
+Typing scaffolding with no behaviour of its own: the `TypedDict`s describe
 the keyword arguments ASRModel forwards to `from_pretrained` / `cached_file`,
-and the protocol classes describe the decoder surfaces it calls.
+and the protocol classes describe surfaces with several implementations (or
+test fakes) and no common library base that declares them.
 """
 
-from typing import TYPE_CHECKING, Any, Protocol, TypedDict
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any, Protocol, TypedDict, TypeVar
 
+import numpy.typing as npt
 import torch
-from transformers import PretrainedConfig, PreTrainedModel
+from transformers import BatchFeature, PreTrainedModel
 from transformers.generation.utils import GenerateOutput, GenerationMixin
+
+# One waveform (array, tensor or list of samples), or a batch of them.
+Waveform = npt.ArrayLike | torch.Tensor
+AudioInput = Waveform | Sequence[Waveform]
+
+# A `state_dict(destination=...)` mapping, returned as the caller's own type.
+StateDictT = TypeVar("StateDictT", bound=dict[str, Any])
 
 if TYPE_CHECKING:
 
@@ -54,13 +64,45 @@ class HubFileKwargs(TypedDict, total=False):
     revision: str
 
 
-class PerLayerInputsTextModel(Protocol):
-    """A Gemma 4 style text model, which builds its per-layer inputs (PLE) itself."""
+class AudioFeatureExtractor(Protocol):
+    """A concrete audio feature extractor's `__call__` (e.g. Whisper's).
 
-    config: PretrainedConfig
+    `SequenceFeatureExtractor` declares no `__call__`, though every concrete
+    extractor has one; cast an extractor to this to call it.
+    """
 
-    def get_per_layer_inputs(
-        self, input_ids: torch.Tensor, inputs_embeds: torch.Tensor | None
-    ) -> torch.Tensor:
-        """Per-layer embeddings for `input_ids` (or recovered from `inputs_embeds`)."""
+    def __call__(
+        self,
+        raw_speech: AudioInput,
+        /,
+        *,
+        sampling_rate: int,
+        return_attention_mask: bool,
+        return_tensors: str,
+        padding: bool | str = ...,
+        **kwargs: Any,
+    ) -> BatchFeature:
+        """Featurize raw audio into `input_features` (plus `attention_mask`)."""
+        ...
+
+
+class OutputLengthProjector(Protocol):
+    """The projector surface the token-count check needs."""
+
+    def get_output_length(self, input_length: torch.Tensor) -> torch.Tensor:
+        """Projector output length for encoder output length `input_length`."""
+        ...
+
+
+class LoadStateDictResult(Protocol):
+    """What `load_state_dict` reports back (torch's `_IncompatibleKeys`)."""
+
+    @property
+    def missing_keys(self) -> Sequence[str]:
+        """Model keys the state dict did not provide."""
+        ...
+
+    @property
+    def unexpected_keys(self) -> Sequence[str]:
+        """State-dict keys the model has no slot for."""
         ...

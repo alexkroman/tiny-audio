@@ -13,13 +13,13 @@ from .asr import (
     LocalEvaluator,
     LocalStreamingEvaluator,
     SmallestEvaluator,
-    SwiftSDKEvaluator,
 )
 from .base import (
     EvalResult,
     Evaluator,
     setup_assemblyai,
 )
+from .swift_sdk import SwiftSDKEvaluator
 
 __all__ = [
     "AppleSpeechEvaluator",

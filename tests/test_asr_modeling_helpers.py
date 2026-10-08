@@ -4,7 +4,10 @@ Module-level functions are called directly; instance methods that only touch
 the tokenizer or projector are invoked unbound against a stand-in `self`.
 """
 
+from collections.abc import Iterator
+from pathlib import Path
 from types import SimpleNamespace
+from typing import NoReturn, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -12,89 +15,100 @@ import torch
 from conftest import stub
 from transformers import BatchEncoding
 
-from tiny_audio.asr_modeling import (
-    ASRModel,
-    _assert_audio_token_counts,
-    _gather_audio_embeds,
-    _has_sliding_window_attention,
-    _resolve_attn_implementation,
-)
+from tiny_audio.asr_attention import _has_sliding_window_attention, resolve_attn_implementation
+from tiny_audio.asr_modeling import ASRModel, _assert_audio_token_counts, _gather_audio_embeds
 
 
 class TestResolveAttnImplementation:
     """FA2 degrades to sdpa off-CUDA, and everything degrades to eager on MPS."""
 
     @pytest.fixture(autouse=True)
-    def no_accelerators(self, monkeypatch):
+    def no_accelerators(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
         monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
 
     @pytest.mark.parametrize("requested", [None, "eager", "sdpa"])
-    def test_non_fa2_requests_pass_through(self, requested):
-        assert _resolve_attn_implementation(requested) == requested
+    def test_non_fa2_requests_pass_through(self, requested: str | None) -> None:
+        assert resolve_attn_implementation(requested) == requested
 
-    def test_fa2_without_cuda_is_sdpa(self):
-        assert _resolve_attn_implementation("flash_attention_2") == "sdpa"
+    def test_fa2_without_cuda_is_sdpa(self) -> None:
+        assert resolve_attn_implementation("flash_attention_2") == "sdpa"
 
-    def test_fa2_with_cuda_but_no_flash_attn_is_sdpa(self, monkeypatch):
+    def test_fa2_with_cuda_but_no_flash_attn_is_sdpa(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
         monkeypatch.setattr("transformers.utils.is_flash_attn_2_available", lambda: False)
-        assert _resolve_attn_implementation("flash_attention_2") == "sdpa"
+        assert resolve_attn_implementation("flash_attention_2") == "sdpa"
 
-    def test_fa2_with_cuda_and_flash_attn_is_kept(self, monkeypatch):
+    def test_fa2_with_cuda_and_flash_attn_is_kept(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
         monkeypatch.setattr("transformers.utils.is_flash_attn_2_available", lambda: True)
-        assert _resolve_attn_implementation("flash_attention_2") == "flash_attention_2"
+        assert resolve_attn_implementation("flash_attention_2") == "flash_attention_2"
 
     @pytest.mark.parametrize("requested", [None, "sdpa", "flash_attention_2"])
-    def test_mps_forces_eager(self, monkeypatch, requested):
+    def test_mps_forces_eager(self, monkeypatch: pytest.MonkeyPatch, requested: str | None) -> None:
         """Without a model id there is nothing to check, so MPS stays conservative."""
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
-        assert _resolve_attn_implementation(requested) == "eager"
+        assert resolve_attn_implementation(requested) == "eager"
 
     @pytest.mark.parametrize("requested", [None, "sdpa"])
-    def test_mps_keeps_request_without_sliding_window(self, monkeypatch, requested):
+    def test_mps_keeps_request_without_sliding_window(
+        self, monkeypatch: pytest.MonkeyPatch, requested: str | None
+    ) -> None:
         """Qwen3.5's case: no sliding-window layer, so eager is not needed."""
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
-        monkeypatch.setattr(
-            "tiny_audio.asr_modeling._has_sliding_window_attention", lambda _: False
-        )
-        assert _resolve_attn_implementation(requested, "some/model") == requested
+
+        def no_window(_: str) -> bool:
+            return False
+
+        monkeypatch.setattr("tiny_audio.asr_attention._has_sliding_window_attention", no_window)
+        assert resolve_attn_implementation(requested, "some/model") == requested
 
     @pytest.mark.parametrize("requested", [None, "sdpa"])
-    def test_mps_forces_eager_with_sliding_window(self, monkeypatch, requested):
+    def test_mps_forces_eager_with_sliding_window(
+        self, monkeypatch: pytest.MonkeyPatch, requested: str | None
+    ) -> None:
         """Gemma 4's case: Metal sdpa is wrong for cached sliding-window decode."""
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
-        monkeypatch.setattr("tiny_audio.asr_modeling._has_sliding_window_attention", lambda _: True)
-        assert _resolve_attn_implementation(requested, "some/model") == "eager"
 
-    def test_mps_fa2_still_degrades_to_sdpa(self, monkeypatch):
+        def window(_: str) -> bool:
+            return True
+
+        monkeypatch.setattr("tiny_audio.asr_attention._has_sliding_window_attention", window)
+        assert resolve_attn_implementation(requested, "some/model") == "eager"
+
+    def test_mps_fa2_still_degrades_to_sdpa(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A config pinning FA2 must not survive just because eager was skipped."""
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
-        monkeypatch.setattr(
-            "tiny_audio.asr_modeling._has_sliding_window_attention", lambda _: False
-        )
-        assert _resolve_attn_implementation("flash_attention_2", "some/model") == "sdpa"
+
+        def no_window(_: str) -> bool:
+            return False
+
+        monkeypatch.setattr("tiny_audio.asr_attention._has_sliding_window_attention", no_window)
+        assert resolve_attn_implementation("flash_attention_2", "some/model") == "sdpa"
 
 
 class TestHasSlidingWindowAttention:
     """Read from the config, since the answer is needed before the model loads."""
 
     @pytest.fixture(autouse=True)
-    def clear_cache(self):
+    def clear_cache(self) -> Iterator[None]:
         _has_sliding_window_attention.cache_clear()
         yield
         _has_sliding_window_attention.cache_clear()
 
     @staticmethod
-    def _patch(monkeypatch, **attrs):
+    def _patch(monkeypatch: pytest.MonkeyPatch, **attrs: object) -> None:
         config = SimpleNamespace(**attrs)
+
+        def from_pretrained(*a: object, **k: object) -> SimpleNamespace:
+            return config
+
         monkeypatch.setattr(
-            "tiny_audio.asr_modeling.AutoConfig.from_pretrained",
-            lambda *a, **k: config,
+            "tiny_audio.asr_attention.AutoConfig.from_pretrained",
+            from_pretrained,
         )
 
-    def test_gemma4_style_layer_types(self, monkeypatch):
+    def test_gemma4_style_layer_types(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """google/gemma-4-E2B-it ships sliding_window 512 AND these layer_types."""
         self._patch(
             monkeypatch,
@@ -103,7 +117,7 @@ class TestHasSlidingWindowAttention:
         )
         assert _has_sliding_window_attention("gemma") is True
 
-    def test_qwen35_style_no_window(self, monkeypatch):
+    def test_qwen35_style_no_window(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Qwen/Qwen3.5-2B: linear + full attention, sliding_window None."""
         self._patch(
             monkeypatch,
@@ -112,23 +126,25 @@ class TestHasSlidingWindowAttention:
         )
         assert _has_sliding_window_attention("qwen35") is False
 
-    def test_inert_window_is_vetoed_by_use_sliding_window(self, monkeypatch):
+    def test_inert_window_is_vetoed_by_use_sliding_window(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Qwen2 style: a non-null window that the model never actually applies."""
         self._patch(monkeypatch, sliding_window=4096, use_sliding_window=False)
         assert _has_sliding_window_attention("qwen2") is False
 
-    def test_bare_sliding_window_counts(self, monkeypatch):
+    def test_bare_sliding_window_counts(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._patch(monkeypatch, sliding_window=512)
         assert _has_sliding_window_attention("other") is True
 
-    def test_unreadable_config_is_treated_as_sliding(self, monkeypatch):
+    def test_unreadable_config_is_treated_as_sliding(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Unknown architecture keeps the conservative eager path."""
 
-        def boom(*_a, **_k):
+        def boom(*_a: object, **_k: object) -> NoReturn:
             msg = "no network"
             raise OSError(msg)
 
-        monkeypatch.setattr("tiny_audio.asr_modeling.AutoConfig.from_pretrained", boom)
+        monkeypatch.setattr("tiny_audio.asr_attention.AutoConfig.from_pretrained", boom)
         assert _has_sliding_window_attention("missing/model") is True
 
 
@@ -139,12 +155,15 @@ class _MaskOnDevice:
     `_assert_sdpa_safe_on_mps` only needs `.device`, `.shape` and `== 0`.
     """
 
-    def __init__(self, rows, device):
+    def __init__(self, rows: list[list[int]], device: str) -> None:
         self._tensor = torch.tensor(rows)
         self.device = torch.device(device)
         self.shape = self._tensor.shape
 
-    def __eq__(self, other):
+    # Elementwise like Tensor.__eq__, which object.__eq__'s signature cannot express.
+    def __eq__(  # pyright: ignore[reportIncompatibleMethodOverride]
+        self, other: torch.Tensor | int
+    ) -> torch.Tensor:
         return self._tensor == other
 
     # Like a real Tensor, hash by identity even though __eq__ is elementwise.
@@ -155,43 +174,43 @@ class TestAssertSdpaSafeOnMps:
     """Metal's sdpa NaNs any left-padded row; refuse rather than emit '!!!!!!'."""
 
     @staticmethod
-    def _call(impl, mask):
+    def _call(impl: str, mask: _MaskOnDevice | None) -> None:
         model = stub(
             language_model=SimpleNamespace(config=SimpleNamespace(_attn_implementation=impl))
         )
-        ASRModel._assert_sdpa_safe_on_mps(model, mask)
+        ASRModel._assert_sdpa_safe_on_mps(model, cast(torch.Tensor | None, mask))
 
-    def test_padded_batch_on_mps_with_sdpa_raises(self):
+    def test_padded_batch_on_mps_with_sdpa_raises(self) -> None:
         mask = _MaskOnDevice([[1, 1, 1], [0, 1, 1]], "mps")
         with pytest.raises(ValueError, match="left-padded batch"):
             self._call("sdpa", mask)
 
-    def test_unpadded_batch_passes(self):
+    def test_unpadded_batch_passes(self) -> None:
         """Batch 1 and uniform-length batches pad nothing, which is the eval path."""
         self._call("sdpa", _MaskOnDevice([[1, 1, 1], [1, 1, 1]], "mps"))
 
-    def test_eager_is_allowed_to_pad(self):
+    def test_eager_is_allowed_to_pad(self) -> None:
         self._call("eager", _MaskOnDevice([[1, 1, 1], [0, 1, 1]], "mps"))
 
-    def test_off_mps_is_allowed_to_pad(self):
+    def test_off_mps_is_allowed_to_pad(self) -> None:
         """The bug is Metal-specific; CPU/fp32 is exact and CUDA is unaffected."""
         self._call("sdpa", _MaskOnDevice([[1, 1, 1], [0, 1, 1]], "cpu"))
 
-    def test_no_mask_passes(self):
+    def test_no_mask_passes(self) -> None:
         self._call("sdpa", None)
 
 
 class TestGatherAudioEmbeds:
     """`max_tokens` skips the device sync but must give identical results."""
 
-    def test_max_tokens_matches_sync_path(self):
+    def test_max_tokens_matches_sync_path(self) -> None:
         embeds = torch.arange(2 * 4 * 3, dtype=torch.float32).reshape(2, 4, 3)
         counts = torch.tensor([2, 4])
         assert torch.equal(
             _gather_audio_embeds(embeds, counts), _gather_audio_embeds(embeds, counts, max_tokens=4)
         )
 
-    def test_explicit_max_tokens_beyond_length_zero_pads(self):
+    def test_explicit_max_tokens_beyond_length_zero_pads(self) -> None:
         embeds = torch.ones(1, 2, 3)
         out = _gather_audio_embeds(embeds, torch.tensor([5]), max_tokens=5)
         assert out.shape == (5, 3)
@@ -203,31 +222,34 @@ class TestAssertAudioTokenCounts:
     """The per-sample count check that guards masked_scatter."""
 
     @staticmethod
-    def projector():
+    def projector() -> MagicMock:
+        def output_length(n: int) -> int:
+            return (n - 4) // 4 + 1
+
         proj = MagicMock()
-        proj.get_output_length.side_effect = lambda n: (n - 4) // 4 + 1
+        proj.get_output_length.side_effect = output_length
         return proj
 
-    def test_consistent_counts_pass(self):
+    def test_consistent_counts_pass(self) -> None:
         embeds = torch.zeros(2, 5, 8)
         counts = torch.tensor([5, 3])
         _assert_audio_token_counts(embeds, counts, self.projector())
         _assert_audio_token_counts(embeds, counts, self.projector(), max_tokens=5)
 
-    def test_prompt_longer_than_projector_output_raises(self):
+    def test_prompt_longer_than_projector_output_raises(self) -> None:
         with pytest.raises(ValueError, match="Projector produced 5 audio frames"):
             _assert_audio_token_counts(torch.zeros(1, 5, 8), torch.tensor([6]), self.projector())
 
-    def test_max_tokens_is_checked_instead_of_counts(self):
+    def test_max_tokens_is_checked_instead_of_counts(self) -> None:
         with pytest.raises(ValueError, match="expects up to 9"):
             _assert_audio_token_counts(
                 torch.zeros(1, 5, 8), torch.tensor([1]), self.projector(), max_tokens=9
             )
 
-    def test_empty_batch_passes(self):
+    def test_empty_batch_passes(self) -> None:
         _assert_audio_token_counts(torch.zeros(0, 5, 8), torch.tensor([]), self.projector())
 
-    def test_encoder_lengths_agreeing_with_prompt_pass(self):
+    def test_encoder_lengths_agreeing_with_prompt_pass(self) -> None:
         # encoder lengths 20 and 8 -> projector 5 and 2 tokens.
         _assert_audio_token_counts(
             torch.zeros(2, 5, 8),
@@ -236,7 +258,7 @@ class TestAssertAudioTokenCounts:
             encoder_valid_lengths=torch.tensor([20, 8]),
         )
 
-    def test_encoder_lengths_disagreeing_with_prompt_raise_with_rows(self):
+    def test_encoder_lengths_disagreeing_with_prompt_raise_with_rows(self) -> None:
         with pytest.raises(ValueError, match=r"Rows \[1\]: prompt expects \[3\]"):
             _assert_audio_token_counts(
                 torch.zeros(2, 5, 8),
@@ -245,7 +267,7 @@ class TestAssertAudioTokenCounts:
                 encoder_valid_lengths=torch.tensor([20, 8]),
             )
 
-    def test_encoder_lengths_of_wrong_shape_are_ignored(self):
+    def test_encoder_lengths_of_wrong_shape_are_ignored(self) -> None:
         # A shape mismatch means the encoder mask isn't per-sample; skip the
         # cross-check rather than compare apples to oranges.
         _assert_audio_token_counts(
@@ -259,7 +281,7 @@ class TestAssertAudioTokenCounts:
 class TestLeftPadPromptRows:
     """Generation prompts are left-padded so nothing sits before the first token."""
 
-    def test_pads_on_the_left_with_pad_token(self):
+    def test_pads_on_the_left_with_pad_token(self) -> None:
         fake = stub(tokenizer=SimpleNamespace(pad_token_id=9, eos_token_id=2))
         ids, mask = ASRModel._left_pad_prompt_rows(
             fake, [torch.tensor([1, 2]), torch.tensor([3])], torch.device("cpu")
@@ -267,7 +289,7 @@ class TestLeftPadPromptRows:
         assert ids.tolist() == [[1, 2], [9, 3]]
         assert mask.tolist() == [[1, 1], [0, 1]]
 
-    def test_falls_back_to_eos_then_zero(self):
+    def test_falls_back_to_eos_then_zero(self) -> None:
         fake = stub(tokenizer=SimpleNamespace(pad_token_id=None, eos_token_id=2))
         ids, _ = ASRModel._left_pad_prompt_rows(
             fake, [torch.tensor([1, 2]), torch.tensor([3])], torch.device("cpu")
@@ -284,7 +306,7 @@ class TestLeftPadPromptRows:
 class TestRenderAudioPrompt:
     """Placeholder count and instruction land in one user turn."""
 
-    def test_content_and_template_kwargs(self):
+    def test_content_and_template_kwargs(self) -> None:
         tokenizer = MagicMock()
         tokenizer.apply_chat_template.return_value = BatchEncoding(
             {"input_ids": torch.tensor([[1, 2, 3]], dtype=torch.int32)}
@@ -298,7 +320,7 @@ class TestRenderAudioPrompt:
         assert row.tolist() == [1, 2, 3]
         assert row.dtype == torch.long
 
-    def test_empty_instruction_leaves_placeholders_alone(self):
+    def test_empty_instruction_leaves_placeholders_alone(self) -> None:
         tokenizer = MagicMock()
         tokenizer.apply_chat_template.return_value = BatchEncoding({"input_ids": torch.tensor([1])})
         fake = stub(tokenizer=tokenizer, audio_token="<a>", TRANSCRIBE_PROMPT="")
@@ -309,10 +331,16 @@ class TestRenderAudioPrompt:
 class TestGetNumAudioTokens:
     """The batch-max token count chains encoder lengths into the projector."""
 
-    def test_uses_longest_sample(self):
+    def test_uses_longest_sample(self) -> None:
+        def encoder_lengths(mask: torch.Tensor) -> torch.Tensor:
+            return torch.tensor([10, 20])
+
+        def output_length(n: int) -> int:
+            return (n - 4) // 4 + 1
+
         fake = stub(
-            _compute_encoder_output_lengths=lambda mask: torch.tensor([10, 20]),
-            projector=SimpleNamespace(get_output_length=lambda n: (n - 4) // 4 + 1),
+            _compute_encoder_output_lengths=encoder_lengths,
+            projector=SimpleNamespace(get_output_length=output_length),
         )
         assert ASRModel._get_num_audio_tokens(fake, torch.ones(2, 40)) == 5
 
@@ -326,7 +354,7 @@ class TestCreateOrUpdateModelCard:
     the adapter-bearing language model.
     """
 
-    def test_delegates_to_peft_language_model(self, tmp_path):
+    def test_delegates_to_peft_language_model(self, tmp_path: Path) -> None:
         card_fn = MagicMock()
         fake = stub(language_model=SimpleNamespace(create_or_update_model_card=card_fn))
 
@@ -334,13 +362,13 @@ class TestCreateOrUpdateModelCard:
 
         card_fn.assert_called_once_with(str(tmp_path))
 
-    def test_no_adapter_is_a_noop(self, tmp_path):
+    def test_no_adapter_is_a_noop(self, tmp_path: Path) -> None:
         """A stale peft README from an earlier run must not take the save down."""
         fake = stub(language_model=SimpleNamespace())
 
         ASRModel.create_or_update_model_card(fake, tmp_path)
         assert list(tmp_path.iterdir()) == []  # nothing written without an adapter
 
-    def test_method_is_reachable_on_the_class(self):
+    def test_method_is_reachable_on_the_class(self) -> None:
         """nn.Module.__getattr__ is what raised; guard the attribute itself."""
         assert callable(getattr(ASRModel, "create_or_update_model_card", None))

@@ -1,45 +1,53 @@
 """Tests for DataCollator label masking behavior."""
 
+from typing import Any, cast
+
 import numpy as np
 import pytest
 import torch
-from transformers import AutoTokenizer, WhisperFeatureExtractor
+from transformers import AutoTokenizer, PreTrainedTokenizerBase, WhisperFeatureExtractor
 
-from scripts.train import DataCollator
+from scripts.train_collator import DataCollator
 
 
 class MockProjector:
     """Mock projector that mimics stride-2 downsampling."""
 
-    def get_output_length(self, input_length: int) -> int:
+    def get_output_length(self, input_length: torch.Tensor) -> torch.Tensor:
         return input_length // 2
 
 
 @pytest.fixture
-def projector():
+def projector() -> MockProjector:
     """Create a mock projector."""
     return MockProjector()
 
 
 @pytest.fixture
-def tokenizer():
+def tokenizer() -> PreTrainedTokenizerBase:
     """Load the SmolLM tokenizer with <audio> token added."""
-    tok = AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM2-135M-Instruct")
+    tok: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(
+        "HuggingFaceTB/SmolLM2-135M-Instruct"
+    )
     # Add <audio> token like ASRModel does
-    existing_special = getattr(tok, "additional_special_tokens", None) or []
+    existing_special: list[str] = getattr(tok, "additional_special_tokens", None) or []
     if "<audio>" not in existing_special:
         tok.add_special_tokens({"additional_special_tokens": [*existing_special, "<audio>"]})
     return tok
 
 
 @pytest.fixture
-def feature_extractor():
+def feature_extractor() -> WhisperFeatureExtractor:
     """Load Whisper feature extractor."""
     return WhisperFeatureExtractor.from_pretrained("openai/whisper-tiny")
 
 
 @pytest.fixture
-def collator(tokenizer, feature_extractor, projector):
+def collator(
+    tokenizer: PreTrainedTokenizerBase,
+    feature_extractor: WhisperFeatureExtractor,
+    projector: MockProjector,
+) -> DataCollator:
     """Create DataCollator instance."""
     return DataCollator(
         tokenizer=tokenizer,
@@ -49,7 +57,7 @@ def collator(tokenizer, feature_extractor, projector):
     )
 
 
-def create_sample(text: str, duration_sec: float = 1.0, sample_rate: int = 16000):
+def create_sample(text: str, duration_sec: float = 1.0, sample_rate: int = 16000) -> dict[str, Any]:
     """Create a sample with dummy audio."""
     num_samples = int(duration_sec * sample_rate)
     audio_array = np.random.randn(num_samples).astype(np.float32) * 0.1
@@ -62,7 +70,9 @@ def create_sample(text: str, duration_sec: float = 1.0, sample_rate: int = 16000
 class TestLabelMasking:
     """Test that label masking works correctly using trl's DataCollatorForCompletionOnlyLM."""
 
-    def test_assistant_content_is_unmasked(self, collator, tokenizer):
+    def test_assistant_content_is_unmasked(
+        self, collator: DataCollator, tokenizer: PreTrainedTokenizerBase
+    ) -> None:
         """Verify that assistant content tokens have valid labels (not -100)."""
         text = "Hello world this is a test."
         samples = [create_sample(text)]
@@ -84,13 +94,15 @@ class TestLabelMasking:
 
         # Decode the unmasked tokens
         unmasked_tokens = [input_ids[i] for i in unmasked_positions]
-        unmasked_text = tokenizer.decode(unmasked_tokens, skip_special_tokens=True)
+        unmasked_text = cast(str, tokenizer.decode(unmasked_tokens, skip_special_tokens=True))
 
         # The transcription text should be in the unmasked portion
         err = f"Transcription not found in unmasked text: {unmasked_text}"
         assert "hello" in unmasked_text.lower(), err
 
-    def test_stop_token_is_unmasked(self, collator, tokenizer):
+    def test_stop_token_is_unmasked(
+        self, collator: DataCollator, tokenizer: PreTrainedTokenizerBase
+    ) -> None:
         """Verify that <|im_end|> stop token is included in labels."""
         text = "Test transcription."
         samples = [create_sample(text)]
@@ -112,7 +124,9 @@ class TestLabelMasking:
         err = "No <|im_end|> token found in labels - model won't learn to stop"
         assert len(unmasked_im_end) > 0, err
 
-    def test_system_and_user_prompts_are_masked(self, collator, tokenizer):
+    def test_system_and_user_prompts_are_masked(
+        self, collator: DataCollator, tokenizer: PreTrainedTokenizerBase
+    ) -> None:
         """Verify that system prompt and user content are masked (-100)."""
         text = "Transcription content here."
         samples = [create_sample(text)]
@@ -136,7 +150,9 @@ class TestLabelMasking:
         assert len(audio_positions) > 0, "No audio tokens found"
         assert all(labels[i] == -100 for i in audio_positions), "Audio tokens should be masked"
 
-    def test_label_token_alignment(self, collator, tokenizer):
+    def test_label_token_alignment(
+        self, collator: DataCollator, tokenizer: PreTrainedTokenizerBase
+    ) -> None:
         """Verify that unmasked labels match corresponding input_ids."""
         text = "Alignment test."
         samples = [create_sample(text)]
@@ -156,14 +172,16 @@ class TestLabelMasking:
 class TestAudioTokens:
     """Test that audio tokens are correctly inserted to match projector output."""
 
-    def test_audio_token_count_matches_encoder_output(self, collator, tokenizer):
+    def test_audio_token_count_matches_encoder_output(
+        self, collator: DataCollator, tokenizer: PreTrainedTokenizerBase
+    ) -> None:
         """Verify number of <audio> tokens matches expected encoder output length."""
         samples = [create_sample("Test transcription.", duration_sec=1.0)]
 
         batch = collator(samples)
 
         # Get the audio token ID
-        audio_token_id = tokenizer.convert_tokens_to_ids("<audio>")
+        audio_token_id = cast(int, tokenizer.convert_tokens_to_ids("<audio>"))
 
         # Count audio tokens in input_ids
         num_audio_tokens = (batch["input_ids"] == audio_token_id).sum().item()
@@ -178,13 +196,15 @@ class TestAudioTokens:
             f"expected {expected_audio_tokens} (real_mel_len={real_mel_len})"
         )
 
-    def test_audio_tokens_not_just_one(self, collator, tokenizer):
+    def test_audio_tokens_not_just_one(
+        self, collator: DataCollator, tokenizer: PreTrainedTokenizerBase
+    ) -> None:
         """Verify we have many audio tokens, not just a single placeholder."""
         samples = [create_sample("Test.", duration_sec=1.0)]
 
         batch = collator(samples)
 
-        audio_token_id = tokenizer.convert_tokens_to_ids("<audio>")
+        audio_token_id = cast(int, tokenizer.convert_tokens_to_ids("<audio>"))
         num_audio_tokens = (batch["input_ids"] == audio_token_id).sum().item()
 
         # Should have many audio tokens (Whisper outputs ~1500 for 30s, ~50 for 1s)
@@ -193,13 +213,15 @@ class TestAudioTokens:
             "This suggests audio embeddings would be discarded."
         )
 
-    def test_audio_tokens_are_masked(self, collator, tokenizer):
+    def test_audio_tokens_are_masked(
+        self, collator: DataCollator, tokenizer: PreTrainedTokenizerBase
+    ) -> None:
         """Verify audio tokens are masked in labels (not trained on)."""
         samples = [create_sample("Test.", duration_sec=1.0)]
 
         batch = collator(samples)
 
-        audio_token_id = tokenizer.convert_tokens_to_ids("<audio>")
+        audio_token_id = cast(int, tokenizer.convert_tokens_to_ids("<audio>"))
         labels = batch["labels"][0]
         input_ids = batch["input_ids"][0]
 
@@ -213,7 +235,7 @@ class TestAudioTokens:
 class TestBatchProcessing:
     """Test batch processing behavior."""
 
-    def test_multiple_samples(self, collator):
+    def test_multiple_samples(self, collator: DataCollator) -> None:
         """Verify collator handles multiple samples correctly."""
         samples = [
             create_sample("First transcription."),
@@ -227,7 +249,7 @@ class TestBatchProcessing:
         assert batch["labels"].shape[0] == 3
         assert batch["input_features"].shape[0] == 3
 
-    def test_audio_features_shape(self, collator):
+    def test_audio_features_shape(self, collator: DataCollator) -> None:
         """Verify audio features have correct shape."""
         samples = [create_sample("Test.", duration_sec=2.0)]
 
@@ -241,7 +263,7 @@ class TestBatchProcessing:
 class TestAudioTokenCountsExposed:
     """Collator must expose audio_token_counts so the model does not recompute them."""
 
-    def test_audio_token_counts_in_batch(self, collator):
+    def test_audio_token_counts_in_batch(self, collator: DataCollator) -> None:
         samples = [
             create_sample("hello", duration_sec=1.0),
             create_sample("world how are you", duration_sec=2.0),
@@ -264,7 +286,7 @@ class TestExtractAudioArraysFilters:
     hardcoded. It has been retuned before (30.0 -> 19.0, to cut mel-spec peak
     memory) and hardcoding it left these tests asserting the old window."""
 
-    def test_drops_post_normalize_empty_text(self, collator):
+    def test_drops_post_normalize_empty_text(self, collator: DataCollator) -> None:
         # Switchboard ships ~2% of rows where the whole label is `<noise>` —
         # passes the .strip() check but normalizes to empty, producing an
         # empty assistant turn that teaches the model to emit nothing.
@@ -274,7 +296,7 @@ class TestExtractAudioArraysFilters:
         assert len(arrays) == 1
         assert kept[0]["text"] == "hello world"
 
-    def test_drops_audio_over_max_duration(self, collator):
+    def test_drops_audio_over_max_duration(self, collator: DataCollator) -> None:
         # Over-cap audio is silently truncated by the feature extractor while
         # the label keeps its full transcript, so the row teaches the model to
         # hallucinate the unheard tail — observed in EdAcc (max 46s) and
@@ -285,20 +307,20 @@ class TestExtractAudioArraysFilters:
         assert len(arrays) == 1
         assert kept[0]["text"] == "normal length"
 
-    def test_keeps_audio_at_max_duration_boundary(self, collator):
+    def test_keeps_audio_at_max_duration_boundary(self, collator: DataCollator) -> None:
         # The cap is strictly greater-than, so exactly _MAX_AUDIO_SECONDS passes.
         ok = create_sample("at the cap", duration_sec=DataCollator._MAX_AUDIO_SECONDS)
         arrays, _ = collator._extract_audio_arrays([ok])
         assert len(arrays) == 1
 
-    def test_keeps_audio_at_min_duration_boundary(self, collator):
+    def test_keeps_audio_at_min_duration_boundary(self, collator: DataCollator) -> None:
         # Mirror of the upper bound: the floor is strictly less-than, so a clip
         # of exactly _MIN_AUDIO_SECONDS is kept while anything under is dropped.
         ok = create_sample("at the floor", duration_sec=DataCollator._MIN_AUDIO_SECONDS)
         arrays, _ = collator._extract_audio_arrays([ok])
         assert len(arrays) == 1
 
-    def test_drops_audio_under_min_duration(self, collator):
+    def test_drops_audio_under_min_duration(self, collator: DataCollator) -> None:
         # Sub-floor clips are boundary-cut segments and isolated backchannels
         # where the audio span and the reference transcript don't line up.
         good = create_sample("normal length", duration_sec=1.0)
@@ -307,7 +329,7 @@ class TestExtractAudioArraysFilters:
         assert len(arrays) == 1
         assert kept[0]["text"] == "normal length"
 
-    def test_drops_pre_normalize_empty_text(self, collator):
+    def test_drops_pre_normalize_empty_text(self, collator: DataCollator) -> None:
         # Existing behavior — empty-string labels were already dropped.
         good = create_sample("hi", duration_sec=1.0)
         empty = create_sample("", duration_sec=1.0)

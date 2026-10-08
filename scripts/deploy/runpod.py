@@ -490,7 +490,7 @@ def plan(
     image: Annotated[str, typer.Option("--image", help=IMAGE_HELP)] = DEFAULT_IMAGE,
     as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output")] = False,
     overrides: Annotated[list[str] | None, typer.Argument(help=OVERRIDES_HELP)] = None,
-):
+) -> None:
     """Estimate GPU memory + disk for a config and emit a pod create command."""
     deploy_plan.plan_command(
         experiment=experiment,
@@ -519,7 +519,7 @@ def up(
         bool, typer.Option("--dry-run", help="Print the pod create command without running it")
     ] = False,
     overrides: Annotated[list[str] | None, typer.Argument(help=OVERRIDES_HELP)] = None,
-):
+) -> None:
     """Size a config, then create a pod on the first GPU type with capacity."""
     deploy_plan.provision_command(
         experiment=experiment,
@@ -538,7 +538,7 @@ def wait(
     timeout: Annotated[
         int, typer.Option("--timeout", help="Give up after this many seconds")
     ] = 900,
-):
+) -> None:
     """Block until a pod exposes SSH, then print `<ip> <port>`."""
     deploy_plan.wait_command(pod_id=pod_id, timeout_s=timeout)
 
@@ -554,7 +554,7 @@ def deploy(
     skip_deps: Annotated[
         bool, typer.Option("--skip-deps", help="Skip Python dependency installation")
     ] = False,
-):
+) -> None:
     """Deploy ASR project to a RunPod instance."""
     conn = connect(host, port)
 
@@ -686,7 +686,7 @@ def train(
         str, typer.Option("--hf-token", envvar="HF_TOKEN", help=HF_TOKEN_HELP)
     ] = "",
     overrides: Annotated[list[str] | None, typer.Argument(help=OVERRIDES_HELP)] = None,
-):
+) -> None:
     """Start training on a remote RunPod instance in a tmux session."""
     conn = connect(host, port)
 
@@ -730,7 +730,7 @@ def attach(
         bool, typer.Option("--logs", help="Show recent logs instead of attaching")
     ] = False,
     lines: Annotated[int, typer.Option("--lines", help="Number of log lines to show")] = 100,
-):
+) -> None:
     """Attach to, list, or view logs from a tmux session on a remote RunPod instance."""
     conn = connect(host, port)
 
@@ -814,7 +814,7 @@ def eval_model(
         list[str] | None,
         typer.Argument(help="Extra arguments passed through to `ta eval` on the pod"),
     ] = None,
-):
+) -> None:
     """Run ASR evaluation on a remote RunPod instance.
 
     Examples:
@@ -866,7 +866,7 @@ def eval_model(
 
 
 @app.command()
-def checkpoint(host: HostArg, port: PortArg):
+def checkpoint(host: HostArg, port: PortArg) -> None:
     """Find the latest checkpoint on a remote training server."""
     conn = connect(host, port)
 

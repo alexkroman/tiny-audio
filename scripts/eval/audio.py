@@ -5,17 +5,50 @@ import io
 import json
 import re
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar, Protocol, TypeGuard, runtime_checkable
 
 import librosa
 import numpy as np
+import numpy.typing as npt
 import soundfile as sf
 import torch
 from huggingface_hub import hf_hub_download
 from transformers.models.whisper.english_normalizer import EnglishTextNormalizer
 
+AudioArray = npt.NDArray[np.floating[Any] | np.signedinteger[Any]]
 
-def audio_to_wav_bytes(audio_array: np.ndarray | torch.Tensor, sample_rate: int) -> bytes:
+
+@runtime_checkable
+class DecodedAudioSamples(Protocol):
+    """torchcodec.AudioSamples: an already-decoded waveform."""
+
+    data: torch.Tensor
+    sample_rate: float
+
+
+@runtime_checkable
+class LazyAudioDecoder(Protocol):
+    """torchcodec.AudioDecoder: decodes on `get_all_samples()`."""
+
+    def get_all_samples(self) -> DecodedAudioSamples: ...
+
+
+@runtime_checkable
+class _ArrayAudio(Protocol):
+    array: AudioArray
+    sampling_rate: int
+
+
+@runtime_checkable
+class _PathAudio(Protocol):
+    path: str | None
+
+
+def is_str_dict(value: object) -> TypeGuard[dict[str, Any]]:
+    return isinstance(value, dict)
+
+
+def audio_to_wav_bytes(audio_array: AudioArray | torch.Tensor, sample_rate: int) -> bytes:
     """Convert audio array to WAV bytes using soundfile."""
     if isinstance(audio_array, torch.Tensor):
         audio_array = audio_array.numpy()
@@ -33,39 +66,42 @@ def _read_path_to_wav(path: str) -> bytes:
     return audio_to_wav_bytes(audio_array, sample_rate)
 
 
-def prepare_wav_bytes(wav_data) -> bytes:
+def prepare_wav_bytes(wav_data: object) -> bytes:
     """Convert various audio formats to WAV bytes."""
     # torchcodec.AudioDecoder (lazy decoder emitted by recent `datasets`):
     # call get_all_samples() to materialize, then encode.
-    if hasattr(wav_data, "get_all_samples"):
+    if isinstance(wav_data, LazyAudioDecoder):
         samples = wav_data.get_all_samples()
         return audio_to_wav_bytes(samples.data, int(samples.sample_rate))
 
     # torchcodec.AudioSamples (already-decoded form).
-    if hasattr(wav_data, "data") and hasattr(wav_data, "sample_rate"):
+    if isinstance(wav_data, DecodedAudioSamples):
         return audio_to_wav_bytes(wav_data.data, int(wav_data.sample_rate))
 
-    if isinstance(wav_data, dict):
+    if is_str_dict(wav_data):
         if "array" in wav_data and "sampling_rate" in wav_data:
             return audio_to_wav_bytes(wav_data["array"], wav_data["sampling_rate"])
         if "bytes" in wav_data:
-            return wav_data["bytes"]
+            raw: bytes = wav_data["bytes"]
+            return raw
         if wav_data.get("path"):
             return _read_path_to_wav(wav_data["path"])
     else:
-        if hasattr(wav_data, "array") and hasattr(wav_data, "sampling_rate"):
+        if isinstance(wav_data, _ArrayAudio):
             return audio_to_wav_bytes(wav_data.array, wav_data.sampling_rate)
 
-        if hasattr(wav_data, "path") and wav_data.path:
+        if isinstance(wav_data, _PathAudio) and wav_data.path:
             return _read_path_to_wav(wav_data.path)
 
     msg = f"Unsupported audio format: {type(wav_data)}"
     raise ValueError(msg)
 
 
-def as_16k_array(audio) -> np.ndarray:
+def as_16k_array(audio: object) -> AudioArray:
     """Decode any container `prepare_wav_bytes` accepts to a 16 kHz array."""
-    if isinstance(audio, dict) and ("array" in audio or "raw" in audio):
+    array: AudioArray
+    sample_rate: float
+    if is_str_dict(audio) and ("array" in audio or "raw" in audio):
         array = audio["array"] if "array" in audio else audio["raw"]
         sample_rate = audio.get("sampling_rate", 16000)
     else:
@@ -98,7 +134,7 @@ class TextNormalizer:
     - "kinda" -> "kind of"
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._normalizer = _english_normalizer()
 
     _SPELLING_FIXES: ClassVar[dict[str, str]] = {

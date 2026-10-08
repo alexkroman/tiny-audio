@@ -10,6 +10,7 @@ from __future__ import annotations
 import functools
 import json
 import subprocess
+from typing import Any
 
 
 def runpodctl_json(*args: str) -> str:
@@ -90,7 +91,7 @@ NETWORK_VOLUME_DATACENTERS = frozenset(
 
 
 @functools.cache
-def datacenter_catalog() -> tuple:
+def datacenter_catalog() -> tuple[dict[str, Any], ...]:
     """`runpodctl datacenter list`, fetched once per process.
 
     Cached because GPU selection probes this for every candidate GPU type, and
@@ -100,7 +101,8 @@ def datacenter_catalog() -> tuple:
     """
     try:
         out = runpodctl_json("datacenter", "list")
-        return tuple(json.loads(out[out.index("[") :]))
+        rows: list[dict[str, Any]] = json.loads(out[out.index("[") :])
+        return tuple(rows)
     except Exception:
         return ()
 
@@ -121,7 +123,7 @@ def datacenters_for_gpu(
     smaller set which no API field exposes; see NETWORK_VOLUME_DATACENTERS.
     """
     catalog = datacenter_catalog()
-    hits = [
+    hits: list[tuple[str, str, str]] = [
         (dc["id"], dc.get("location", "?"), gpu.get("stockStatus", ""))
         for dc in catalog
         for gpu in dc.get("gpuAvailability", [])

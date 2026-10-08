@@ -1,7 +1,9 @@
 """Base evaluator classes and shared utilities."""
 
 import os
+from collections.abc import Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, TypedDict
 
 import assemblyai as aai
 import attrs
@@ -16,10 +18,39 @@ from scripts.eval.speaker_metrics import has_speakers, plain_text, speaker_metri
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 console = Console()
 
+Metrics = dict[str, float]
+DatasetRow = Mapping[str, Any]
+
+
+class Confidence(TypedDict, total=False):
+    """Per-sample greedy-decode confidence stats (see EvalResult)."""
+
+    mean_top1_logprob: float
+    mean_margin: float
+    num_tokens: int
+
+
+class EvaluatorOptions(TypedDict, total=False):
+    """`Evaluator.__init__` keywords, forwarded by subclasses through `**kwargs`."""
+
+    audio_field: str
+    text_field: str
+    num_workers: int
+
+
+class Sample(TypedDict):
+    """One scoreable row: the dataset's audio value and its reference text."""
+
+    audio: object
+    reference: str
+
+
+Transcription = tuple[str, float, Confidence | None]
+
 
 def setup_assemblyai(
     api_key: str, model: str, speaker_labels: bool = False, base_url: str | None = None
-):
+) -> aai.Transcriber:
     """Initialize AssemblyAI transcriber with given model."""
     aai.settings.api_key = api_key
     if base_url:
@@ -73,7 +104,7 @@ def _scoring_text(text: str) -> str:
     return plain_text(text) if has_speakers(text) else text
 
 
-def _is_skipped_reference(reference) -> bool:
+def _is_skipped_reference(reference: object) -> bool:
     """Filter out unscoreable samples (TEDLIUM markers, inaudible)."""
     if not isinstance(reference, str):
         return False
@@ -93,7 +124,7 @@ class Evaluator:
         self.normalizer = TextNormalizer()
         self.results: list[EvalResult] = []
 
-    def transcribe(self, audio) -> tuple[str, float, dict | None]:
+    def transcribe(self, audio: object) -> Transcription:
         """Transcribe audio, returning (text, inference_time, confidence).
 
         `confidence` is None for evaluators that cannot expose per-token
@@ -102,13 +133,13 @@ class Evaluator:
         """
         raise NotImplementedError
 
-    def _process_sample(self, sample_data: tuple[int, dict]) -> tuple[int, EvalResult]:
+    def _process_sample(self, sample_data: tuple[int, Sample]) -> tuple[int, EvalResult]:
         """Process a single sample. Returns (index, result) for ordering."""
         idx, sample = sample_data
         reference = sample["reference"]
         audio = sample["audio"]
 
-        confidence: dict | None = None
+        confidence: Confidence | None = None
         try:
             prediction, inference_time, confidence = self.transcribe(audio)
         except Exception as e:
@@ -118,16 +149,16 @@ class Evaluator:
         norm_pred = self.normalizer.normalize(_scoring_text(prediction))
         norm_ref = self.normalizer.normalize(_scoring_text(reference))
         sample_wer = jiwer.wer(norm_ref, norm_pred) * 100 if norm_ref else 0.0
-        confidence = confidence or {}
+        stats: Confidence = confidence or {}
 
         return idx, EvalResult(
             prediction,
             reference,
             sample_wer,
             inference_time,
-            mean_top1_logprob=confidence.get("mean_top1_logprob"),
-            mean_margin=confidence.get("mean_margin"),
-            num_tokens=confidence.get("num_tokens"),
+            mean_top1_logprob=stats.get("mean_top1_logprob"),
+            mean_margin=stats.get("mean_margin"),
+            num_tokens=stats.get("num_tokens"),
             norm_prediction=norm_pred,
             norm_reference=norm_ref,
         )
@@ -145,7 +176,7 @@ class Evaluator:
 
     def evaluate(
         self,
-        dataset,
+        dataset: Iterable[DatasetRow],
         max_samples: int | None = None,
         *,
         audio_field: str | None = None,
@@ -182,7 +213,7 @@ class Evaluator:
 
         return self.results
 
-    def _iter_dataset_samples(self, dataset):
+    def _iter_dataset_samples(self, dataset: Iterable[DatasetRow]) -> Iterator[Sample]:
         """Yield (audio, reference) for samples that pass the skip filter."""
         for sample in dataset:
             reference = sample[self.text_field]
@@ -210,9 +241,11 @@ class Evaluator:
         refs, preds = zip(*pairs, strict=True)
         return jiwer.wer(list(refs), list(preds)) * 100
 
-    def _collect_samples(self, dataset, max_samples: int | None) -> list[dict]:
+    def _collect_samples(
+        self, dataset: Iterable[DatasetRow], max_samples: int | None
+    ) -> list[Sample]:
         """Collect samples for parallel processing."""
-        samples_to_process = []
+        samples_to_process: list[Sample] = []
         target = max_samples or "all"
         console.print(f"[dim]Collecting samples (target: {target})...[/dim]")
         for s in self._iter_dataset_samples(dataset):
@@ -228,7 +261,9 @@ class Evaluator:
         )
         return samples_to_process
 
-    def _evaluate_sequential_lazy(self, dataset, max_samples: int | None) -> None:
+    def _evaluate_sequential_lazy(
+        self, dataset: Iterable[DatasetRow], max_samples: int | None
+    ) -> None:
         """Run sequential evaluation lazily (no pre-collection)."""
         for idx, sample_data in enumerate(self._iter_dataset_samples(dataset), start=1):
             _, result = self._process_sample((idx, sample_data))
@@ -245,7 +280,7 @@ class Evaluator:
             if max_samples and idx >= max_samples:
                 break
 
-    def _evaluate_parallel(self, samples: list[dict]) -> None:
+    def _evaluate_parallel(self, samples: list[Sample]) -> None:
         """Run parallel evaluation using thread pool."""
         console.print(f"[bold]Running parallel evaluation with {self.num_workers} workers[/bold]")
 
@@ -274,12 +309,12 @@ class Evaluator:
 
         self.results = [results_map[i] for i in sorted(results_map.keys())]
 
-    def compute_metrics(self) -> dict:
+    def compute_metrics(self) -> Metrics:
         """Compute final metrics."""
         if not self.results:
             return {"wer": 0.0, "avg_time": 0.0, "num_samples": 0}
 
-        metrics = {
+        metrics: Metrics = {
             "wer": self._corpus_wer(self.results),
             "avg_time": sum(r.time for r in self.results) / len(self.results),
             "num_samples": len(self.results),
@@ -319,7 +354,7 @@ class Evaluator:
 
         return metrics
 
-    def _speaker_metrics(self) -> dict:
+    def _speaker_metrics(self) -> Metrics:
         """cpWER and speaker-count accuracy, when the references carry speakers.
 
         cpWER matches hypothesis to reference speakers one-to-one to minimise
@@ -334,7 +369,7 @@ class Evaluator:
             [r.prediction for r in self.results],
             self.normalizer.normalize,
         )
-        out = {}
+        out: Metrics = {}
         for key, value in scores.items():
             if key in ("n", "wer"):
                 continue

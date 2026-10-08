@@ -4,33 +4,22 @@ import os
 from typing import TYPE_CHECKING, Any
 
 import nltk
-import torch
 
 if TYPE_CHECKING:
     from .asr_modeling import ASRModel
     from .asr_pipeline import ASRPipeline
-    from .diarization import _get_device as _best_device
+    from .diarization import get_device as _best_device
 else:
     try:
         # For remote execution, imports are relative
         from .asr_modeling import ASRModel
         from .asr_pipeline import ASRPipeline
-        from .diarization import _get_device as _best_device
+        from .diarization import get_device as _best_device
     except ImportError:
         # For local execution, imports are not relative
         from asr_modeling import ASRModel
         from asr_pipeline import ASRPipeline
-        from diarization import _get_device as _best_device
-
-
-def _module_to(module: torch.nn.Module, device: torch.device) -> None:
-    """`module.to(device)`, in place.
-
-    `PreTrainedModel.to` is wrapped with `functools.wraps`, which type checkers
-    can't bind as a method; typed as `nn.Module` the call resolves. Same method
-    at runtime: it moves the module in place and returns it.
-    """
-    module.to(device)
+        from diarization import get_device as _best_device
 
 
 class EndpointHandler:
@@ -67,7 +56,8 @@ class EndpointHandler:
         # flash_attn is missing.
         self.model = ASRModel.from_pretrained(path)
         self.device = _best_device()
-        _module_to(self.model, self.device)
+        # PreTrainedModel.to is functools.wraps'd, which pyright cannot bind as a method.
+        self.model.to(self.device)  # pyright: ignore[reportArgumentType]
         self.model.eval()
 
         self.pipe = ASRPipeline(
@@ -94,4 +84,5 @@ class EndpointHandler:
         # Pass through any parameters from request, let model config provide defaults
         params = data.get("parameters", {})
 
-        return self.pipe(inputs, **params)
+        result: dict[str, Any] | list[dict[str, Any]] = self.pipe(inputs, **params)
+        return result

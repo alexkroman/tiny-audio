@@ -40,7 +40,7 @@ def find_model_dirs(
         Sorted list of matching directory paths.
     """
     exclude = [ex for ex in (exclude or []) if ex]
-    dirs = []
+    dirs: list[Path] = []
     for d in outputs_dir.iterdir():
         if not d.is_dir():
             continue

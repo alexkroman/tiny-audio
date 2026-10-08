@@ -49,7 +49,7 @@ def deploy(
     private: Annotated[
         bool, typer.Option("--private", help="Create the Space as private (if creating new)")
     ] = False,
-):
+) -> None:
     """Deploy demo files to a Hugging Face Space."""
     repo_id = extract_repo_id(repo_id)
 

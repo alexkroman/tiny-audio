@@ -31,10 +31,11 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import html
 import sys
+from collections.abc import Callable, Mapping, Sequence
 from itertools import groupby
 from operator import itemgetter
 from pathlib import Path
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, NotRequired, TypedDict, cast
 
 import gradio as gr
 import soundfile
@@ -44,7 +45,31 @@ from gradio import themes
 from transformers import pipeline
 
 
-def gpu_seconds(audio, kwargs):
+class Word(TypedDict):
+    """One aligned word from the pipeline's `words` output."""
+
+    word: str
+    start: float
+    end: float
+    speaker: NotRequired[str]
+
+
+class SpeakerWord(TypedDict):
+    """A word from a diarized result, where every word carries its speaker."""
+
+    word: str
+    start: float
+    end: float
+    speaker: str
+
+
+class SpeakerSegment(TypedDict):
+    start: float
+    end: float
+    speaker: str
+
+
+def gpu_seconds(audio: str, kwargs: Mapping[str, Any]) -> int:
     """GPU time to reserve for one request, from the audio's length.
 
     ZeroGPU charges each visitor's daily quota the RESERVED duration up front,
@@ -61,27 +86,27 @@ def gpu_seconds(audio, kwargs):
     return int(min(120, max(20, 10 + per_second * seconds)))
 
 
-def gpu(fn):
+def gpu[F: Callable[..., Any]](fn: F) -> F:
     return zero_gpu(duration=gpu_seconds)(fn) if zero_gpu else fn
 
 
 app = typer.Typer(add_completion=False)
 
 
-def format_timestamp(seconds):
+def format_timestamp(seconds: float) -> str:
     """Format seconds as MM:SS.ms"""
     mins = int(seconds // 60)
     secs = seconds % 60
     return f"{mins:02d}:{secs:05.2f}"
 
 
-def speaker_label(speaker):
+def speaker_label(speaker: str) -> str:
     """The pipeline's "SPEAKER_0" as "Speaker 1" for people; anything else unchanged."""
     prefix, _, index = (speaker or "").rpartition("_")
     return f"Speaker {int(index) + 1}" if prefix == "SPEAKER" and index.isdigit() else speaker
 
 
-def word_rows(words):
+def word_rows(words: Sequence[Word] | None) -> list[list[str]]:
     """Word timestamps as table rows: start, end, speaker, word."""
     return [
         [
@@ -107,7 +132,7 @@ SPEAKER_COLORS = [
 ]
 
 
-def speaker_turns(words):
+def speaker_turns(words: Sequence[SpeakerWord] | None) -> list[tuple[str, float, float, str]]:
     """Consecutive words of one speaker as turns: (speaker, start, end, text)."""
     turns: list[tuple[str, float, float, str]] = []
     for speaker, group in groupby(words or [], key=itemgetter("speaker")):
@@ -116,7 +141,7 @@ def speaker_turns(words):
     return turns
 
 
-def conversation_html(words):
+def conversation_html(words: Sequence[SpeakerWord] | None) -> str:
     """Speaker-attributed transcript: one color-coded block per speaker turn.
 
     Styled inline rather than through the app's CSS: on Spaces this block
@@ -147,7 +172,7 @@ def conversation_html(words):
     )
 
 
-def segment_rows(segments):
+def segment_rows(segments: Sequence[SpeakerSegment] | None) -> list[list[str]]:
     """Speaker segments as table rows: start, end, speaker."""
     return [
         [
@@ -182,24 +207,118 @@ Model: <a href="https://huggingface.co/{model}" target="_blank">{model}</a></p>
 """
 
 
-def create_demo(model_path="mazesmazes/tiny-audio"):
-    """Create Gradio demo interface using transformers pipeline."""
-
-    # Determine device
-    device: int | str
+def pick_device() -> int | str:
+    """The pipeline device: CUDA index 0, Apple "mps", or -1 for CPU."""
     if torch.cuda.is_available():
-        device = 0
-    elif torch.backends.mps.is_available():
-        device = "mps"
-    else:
-        device = -1
+        return 0
+    if torch.backends.mps.is_available():
+        return "mps"
+    return -1
+
+
+def pipeline_kwargs(
+    show_timestamps: bool, show_diarization: bool, num_speakers: float, max_speakers: float
+) -> dict[str, Any]:
+    """Pipeline call options for the requested outputs and speaker-count hints."""
+    kwargs: dict[str, Any] = {}
+    if show_timestamps:
+        kwargs["return_timestamps"] = True
+    if show_diarization:
+        kwargs["return_speakers"] = True
+        # An exact count, or an upper bound, caps the speakers Nemotron
+        # keeps; the exact count wins if both are set. 0 means auto.
+        if num_speakers and int(num_speakers) > 0:
+            kwargs["num_speakers"] = int(num_speakers)
+        elif max_speakers and int(max_speakers) > 0:
+            kwargs["max_speakers"] = int(max_speakers)
+    return kwargs
+
+
+def warn_partial_failures(result: Mapping[str, Any]) -> None:
+    """Surface a failed timestamp or diarization stage as a UI warning."""
+    if "timestamp_error" in result:
+        gr.Warning(f"Word timestamps failed: {result['timestamp_error']}")
+    if "diarization_error" in result:
+        gr.Warning(f"Diarization failed: {result['diarization_error']}")
+
+
+def toggle_speaker_controls(on: bool) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Show the speaker-count sliders only while diarization is on: they only matter then."""
+    return gr.update(visible=on), gr.update(visible=on)
+
+
+def build_options() -> tuple[gr.Checkbox, gr.Checkbox, gr.Slider, gr.Slider]:
+    """The output toggles and speaker-count sliders, in one group."""
+    with gr.Group():
+        show_timestamps = gr.Checkbox(
+            label="Word timestamps",
+            info="Align each word to the audio",
+            value=False,
+        )
+        show_diarization = gr.Checkbox(
+            label="Speaker diarization",
+            info="Label who spoke when",
+            value=False,
+        )
+        num_speakers = gr.Slider(
+            label="Number of speakers",
+            info="Exact count if you know it; 0 detects it automatically",
+            value=0,
+            minimum=0,
+            maximum=8,
+            step=1,
+            visible=False,
+        )
+        max_speakers = gr.Slider(
+            label="Maximum speakers",
+            info="Upper bound when the exact count is unknown; 0 means no limit",
+            value=0,
+            minimum=0,
+            maximum=8,
+            step=1,
+            visible=False,
+        )
+    return show_timestamps, show_diarization, num_speakers, max_speakers
+
+
+def build_output_tabs() -> tuple[gr.Tabs, gr.Textbox, gr.HTML, gr.Dataframe, gr.Dataframe]:
+    """The result tabs: transcript, conversation, word and speaker tables."""
+    with gr.Tabs(selected="transcript") as tabs:
+        with gr.Tab("Transcript", id="transcript"):
+            output_text = gr.Textbox(
+                show_label=False,
+                placeholder="Your transcript will appear here.",
+                lines=12,
+                buttons=["copy"],
+            )
+        with gr.Tab("Conversation", id="conversation"):
+            conversation_output = gr.HTML(conversation_html(None))
+        with gr.Tab("Words", id="words"):
+            timestamps_output = gr.Dataframe(
+                headers=["Start", "End", "Speaker", "Word"],
+                show_label=False,
+                interactive=False,
+                max_height=420,
+            )
+        with gr.Tab("Speakers", id="speakers"):
+            diarization_output = gr.Dataframe(
+                headers=["Start", "End", "Speaker"],
+                show_label=False,
+                interactive=False,
+                max_height=420,
+            )
+    return tabs, output_text, conversation_output, timestamps_output, diarization_output
+
+
+def create_demo(model_path: str = "mazesmazes/tiny-audio") -> gr.Blocks:
+    """Create Gradio demo interface using transformers pipeline."""
 
     # Load pipeline - uses custom ASRPipeline from the model repo
     pipe = pipeline(
         "automatic-speech-recognition",
         model=model_path,
         trust_remote_code=True,
-        device=device,
+        device=pick_device(),
     )
     # Load the aligner and diarizer now, not on the first request: on ZeroGPU
     # each request runs in a forked worker, so a model first loaded there is
@@ -209,45 +328,38 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
     pipeline_module.NemotronDiarizer.get_instance()
 
     @gpu
-    def run_pipeline(audio, kwargs) -> dict[str, Any]:
+    def run_pipeline(audio: str, kwargs: dict[str, Any]) -> dict[str, Any]:
         # One audio input gives one result dict; transformers annotates the
         # pipeline's __call__ with the batched (list) return type.
         return cast(dict[str, Any], pipe(audio, **kwargs))
 
-    def process_audio(audio, show_timestamps, show_diarization, num_speakers=0, max_speakers=0):
+    def process_audio(
+        audio: str | None,
+        show_timestamps: bool,
+        show_diarization: bool,
+        num_speakers: float = 0,
+        max_speakers: float = 0,
+    ) -> tuple[str, str, list[list[str]], list[list[str]], gr.Tabs]:
         """Process audio file for transcription."""
         if audio is None:
             msg = "Record or upload some audio first."
             raise gr.Error(msg)
 
-        # Build kwargs
-        kwargs: dict[str, Any] = {}
-        if show_timestamps:
-            kwargs["return_timestamps"] = True
-        if show_diarization:
-            kwargs["return_speakers"] = True
-            # An exact count, or an upper bound, caps the speakers Nemotron
-            # keeps; the exact count wins if both are set. 0 means auto.
-            if num_speakers and int(num_speakers) > 0:
-                kwargs["num_speakers"] = int(num_speakers)
-            elif max_speakers and int(max_speakers) > 0:
-                kwargs["max_speakers"] = int(max_speakers)
+        kwargs = pipeline_kwargs(show_timestamps, show_diarization, num_speakers, max_speakers)
 
         # Transcribe the audio (on the GPU, on ZeroGPU)
         result = run_pipeline(audio, kwargs)
-
-        if "timestamp_error" in result:
-            gr.Warning(f"Word timestamps failed: {result['timestamp_error']}")
-        if "diarization_error" in result:
-            gr.Warning(f"Diarization failed: {result['diarization_error']}")
+        warn_partial_failures(result)
 
         words = word_rows(result.get("words")) if show_timestamps or show_diarization else []
         segments = segment_rows(result.get("speaker_segments")) if show_diarization else []
         conversation = conversation_html(result.get("words") if show_diarization else None)
         # Open the conversation view when there are speakers to show.
         tab = gr.Tabs(selected="conversation" if show_diarization else "transcript")
-        return result.get("text", ""), conversation, words, segments, tab
+        text: str = result.get("text", "")
+        return text, conversation, words, segments, tab
 
+    demo: gr.Blocks
     with gr.Blocks(title="Tiny Audio") as demo:
         gr.HTML(HEADER.format(model=model_path))
 
@@ -259,80 +371,33 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
                     label="Audio",
                 )
 
-                with gr.Group():
-                    show_timestamps = gr.Checkbox(
-                        label="Word timestamps",
-                        info="Align each word to the audio",
-                        value=False,
-                    )
-                    show_diarization = gr.Checkbox(
-                        label="Speaker diarization",
-                        info="Label who spoke when",
-                        value=False,
-                    )
-                    num_speakers = gr.Slider(
-                        label="Number of speakers",
-                        info="Exact count if you know it; 0 detects it automatically",
-                        value=0,
-                        minimum=0,
-                        maximum=8,
-                        step=1,
-                        visible=False,
-                    )
-                    max_speakers = gr.Slider(
-                        label="Maximum speakers",
-                        info="Upper bound when the exact count is unknown; 0 means no limit",
-                        value=0,
-                        minimum=0,
-                        maximum=8,
-                        step=1,
-                        visible=False,
-                    )
+                show_timestamps, show_diarization, num_speakers, max_speakers = build_options()
 
                 process_btn = gr.Button("Transcribe", variant="primary", size="lg")
 
-            with gr.Column(scale=3, min_width=400), gr.Tabs(selected="transcript") as tabs:
-                with gr.Tab("Transcript", id="transcript"):
-                    output_text = gr.Textbox(
-                        show_label=False,
-                        placeholder="Your transcript will appear here.",
-                        lines=12,
-                        buttons=["copy"],
-                    )
-                with gr.Tab("Conversation", id="conversation"):
-                    conversation_output = gr.HTML(conversation_html(None))
-                with gr.Tab("Words", id="words"):
-                    timestamps_output = gr.Dataframe(
-                        headers=["Start", "End", "Speaker", "Word"],
-                        show_label=False,
-                        interactive=False,
-                        max_height=420,
-                    )
-                with gr.Tab("Speakers", id="speakers"):
-                    diarization_output = gr.Dataframe(
-                        headers=["Start", "End", "Speaker"],
-                        show_label=False,
-                        interactive=False,
-                        max_height=420,
-                    )
+            with gr.Column(scale=3, min_width=400):
+                tabs, output_text, conversation_output, timestamps_output, diarization_output = (
+                    build_output_tabs()
+                )
 
-        # The speaker controls only matter when diarization is on
-        show_diarization.change(
-            fn=lambda on: (gr.update(visible=on), gr.update(visible=on)),
+        # gradio attaches event listeners at runtime and only writes the .pyi
+        # stubs declaring them on its first import, so a fresh install has none.
+        show_diarization.change(  # pyright: ignore[reportAttributeAccessIssue]
+            fn=toggle_speaker_controls,
             inputs=show_diarization,
             outputs=[num_speakers, max_speakers],
             api_visibility="private",
         )
         inputs = [audio_input, show_timestamps, show_diarization, num_speakers, max_speakers]
         outputs = [output_text, conversation_output, timestamps_output, diarization_output, tabs]
-        process_btn.click(fn=process_audio, inputs=inputs, outputs=outputs, api_name="transcribe")
+        process_btn.click(  # pyright: ignore[reportAttributeAccessIssue]
+            fn=process_audio, inputs=inputs, outputs=outputs, api_name="transcribe"
+        )
 
         if EXAMPLE.exists():
             gr.Examples(
                 examples=[[str(EXAMPLE), True, True, 0, 0]],
                 inputs=inputs,
-                outputs=outputs,
-                fn=process_audio,
                 label="Try a two-person meeting (AMI Meeting Corpus, CC BY 4.0)",
                 cache_examples=False,
             )
@@ -348,7 +413,7 @@ def main(
     ] = "mazesmazes/tiny-audio",
     port: Annotated[int, typer.Option("--port", "-p", help="Server port")] = 7860,
     share: Annotated[bool, typer.Option("--share", help="Create public share link")] = False,
-):
+) -> None:
     """Launch ASR Gradio demo."""
     demo = create_demo(model)
     demo.launch(server_port=port, share=share, server_name="0.0.0.0", theme=THEME, css=CSS)

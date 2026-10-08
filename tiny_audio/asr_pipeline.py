@@ -1,13 +1,18 @@
 """ASR pipeline for audio-to-text transcription with optional timestamps and diarization."""
 
 import re
+from collections.abc import Iterator, MutableMapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 import numpy as np
+import numpy.typing as npt
 import torch
 import transformers
 from transformers.pipelines.audio_utils import ffmpeg_read
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizerBase, SequenceFeatureExtractor
 
 if TYPE_CHECKING:
     from .alignment import QwenForcedAligner
@@ -41,11 +46,15 @@ CHUNK_MIN_S = 8.0
 
 
 def chunk_bounds(
-    audio: np.ndarray, sample_rate: int, max_s: float = CHUNK_MAX_S, min_s: float = CHUNK_MIN_S
+    audio: npt.NDArray[np.float32],
+    sample_rate: int,
+    max_s: float = CHUNK_MAX_S,
+    min_s: float = CHUNK_MIN_S,
 ) -> list[tuple[int, int]]:
     """Sample ranges of at most `max_s`, each cut at the quietest 100 ms frame after `min_s`."""
     frame = int(0.1 * sample_rate)
-    bounds, start, n = [], 0, len(audio)
+    bounds: list[tuple[int, int]] = []
+    start, n = 0, len(audio)
     while n - start > max_s * sample_rate:
         lo = start + int(min_s * sample_rate)
         hi = start + int(max_s * sample_rate)
@@ -66,7 +75,7 @@ def chunk_bounds(
 SILENCE_RMS = 1e-5
 
 
-def is_silent(audio: np.ndarray) -> bool:
+def is_silent(audio: npt.NDArray[np.float32]) -> bool:
     """True for digital silence (or an empty array): nothing for the model to hear."""
     return audio.size == 0 or float(np.sqrt(np.mean(np.square(audio)))) < SILENCE_RMS
 
@@ -77,38 +86,56 @@ _TRAILING_CHAR_RE = re.compile(rf"(.)\1{{{_MIN_REPEATS - 1},}}$")
 _TRAILING_WORD_RE = re.compile(rf"\b(\w+)(?:\s+\1){{{_MIN_REPEATS - 1},}}\s*$", re.IGNORECASE)
 
 
+class _RawAudio(TypedDict):
+    """A waveform and its sampling rate, as `_extract_audio` reads them."""
+
+    array: npt.ArrayLike
+    sampling_rate: int
+
+
+class _DiarizationParams(TypedDict):
+    """Speaker-count hints forwarded to `NemotronDiarizer.top_speakers`."""
+
+    num_speakers: int | None
+    max_speakers: int | None
+
+
 class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
     """ASR Pipeline for audio-to-text transcription."""
 
     model: ASRModel
 
-    def __init__(self, model: ASRModel, **kwargs):
+    def __init__(self, model: ASRModel, **kwargs: Any) -> None:
         """Initialize ASR pipeline.
 
         Args:
             model: ASRModel instance for transcription
             **kwargs: Additional arguments (feature_extractor, tokenizer, device)
         """
-        feature_extractor = kwargs.pop("feature_extractor", None)
-        tokenizer = kwargs.pop("tokenizer", model.tokenizer)
+        feature_extractor: SequenceFeatureExtractor | None = kwargs.pop("feature_extractor", None)
+        tokenizer: PreTrainedTokenizerBase | None = kwargs.pop("tokenizer", model.tokenizer)
 
         if feature_extractor is None:
             feature_extractor = model.get_processor().feature_extractor
 
         super().__init__(
-            model=model, feature_extractor=feature_extractor, tokenizer=tokenizer, **kwargs
+            model=model,
+            feature_extractor=feature_extractor,
+            # Annotated as the slow `PreTrainedTokenizer`, but any tokenizer works.
+            tokenizer=tokenizer,  # pyright: ignore[reportArgumentType]
+            **kwargs,
         )
 
     def _sanitize_parameters(
         self,
-        chunk_length_s=None,
-        stride_length_s=None,
-        ignore_warning=None,
-        decoder_kwargs=None,
-        return_timestamps=None,
-        return_language=None,
-        **kwargs,
-    ):
+        chunk_length_s: float | None = None,
+        stride_length_s: float | None = None,
+        ignore_warning: bool | None = None,
+        decoder_kwargs: dict[str, Any] | None = None,
+        return_timestamps: bool | str | None = None,
+        return_language: bool | None = None,
+        **kwargs: Any,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         """Intercept our custom parameters before parent class validates them."""
         # Remove our custom parameters so parent doesn't see them.
         # `return_timestamps` means word timestamps here (handled in __call__),
@@ -134,11 +161,11 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
     # in the parent); a batch the parent handles yields a list. Hence `Any`.
     def __call__(
         self,
-        inputs,
-        *args,
-        num_workers=None,
-        batch_size=None,
-        **kwargs,
+        inputs: Any,
+        *args: Any,
+        num_workers: int | None = None,
+        batch_size: int | None = None,
+        **kwargs: Any,
     ) -> Any:
         """Transcribe audio with optional word-level timestamps and speaker diarization.
 
@@ -164,16 +191,16 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         if batch_size is not None:
             kwargs["batch_size"] = batch_size
         # Extract our params before super().__call__ (which will also call _sanitize_parameters)
-        return_timestamps = kwargs.pop("return_timestamps", False)
-        return_speakers = kwargs.pop("return_speakers", False)
-        user_prompt = kwargs.pop("user_prompt", None)
+        return_timestamps: bool = kwargs.pop("return_timestamps", False)
+        return_speakers: bool = kwargs.pop("return_speakers", False)
+        user_prompt: str | None = kwargs.pop("user_prompt", None)
         if kwargs.pop("min_speakers", None) is not None:
             msg = (
                 "min_speakers is not supported: Nemotron-3-Diarization decides how many "
                 "speakers it hears. Pass num_speakers (exact) or max_speakers instead."
             )
             raise ValueError(msg)
-        diarization_params = {
+        diarization_params: _DiarizationParams = {
             "num_speakers": kwargs.pop("num_speakers", None),
             "max_speakers": kwargs.pop("max_speakers", None),
         }
@@ -186,7 +213,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         # exception anywhere in the call leaves the custom prompt in place for
         # every later call on this pipeline, and the eval harness swallows that
         # exception and keeps scoring against the wrong prompt.
-        original_prompt = None
+        original_prompt: str | None = None
         if user_prompt:
             original_prompt = self.model.TRANSCRIBE_PROMPT
             self.model.TRANSCRIBE_PROMPT = user_prompt
@@ -204,7 +231,9 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             if original_prompt is not None:
                 self.model.TRANSCRIBE_PROMPT = original_prompt
 
-    def _transcribe_plain(self, inputs, **kwargs):
+    def _transcribe_plain(
+        self, inputs: Any, **kwargs: Any
+    ) -> dict[str, Any] | list[dict[str, Any]]:
         """Transcribe in the same chunks as `_transcribe_timed`, without timing words.
 
         One call over a whole recording returns only its first
@@ -223,7 +252,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         if len(bounds) == 1:
             return self._transcribe_chunk(array, sr, **kwargs)
         result: dict[str, Any] = {}
-        texts = []
+        texts: list[str] = []
         for s, e in bounds:
             out = self._transcribe_chunk(array[s:e], sr, **kwargs)
             texts.append(out["text"])
@@ -234,23 +263,26 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         result["text"] = " ".join(t for t in texts if t)
         return result
 
-    def _transcribe_chunk(self, chunk: np.ndarray, sample_rate: int, **kwargs) -> dict:
+    def _transcribe_chunk(
+        self, chunk: npt.NDArray[np.float32], sample_rate: int, **kwargs: Any
+    ) -> dict[str, Any]:
         """One model call on one chunk; digital silence is "" without calling the model."""
         if is_silent(chunk):
             return {"text": ""}
-        # One input in, one dict out; the parent is typed for batches as well.
+        # One input in, one dict out; the parent is annotated as always returning a list.
         return cast(
-            "dict", super().__call__({"raw": chunk, "sampling_rate": sample_rate}, **kwargs)
+            "dict[str, Any]",
+            super().__call__({"raw": chunk, "sampling_rate": sample_rate}, **kwargs),
         )
 
     def _transcribe_timed(
         self,
-        inputs,
+        inputs: Any,
         *,
         return_speakers: bool,
-        diarization_params: dict,
-        **kwargs,
-    ):
+        diarization_params: _DiarizationParams,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         """Transcribe in chunks, time every word, and label speakers if requested.
 
         Chunks of 8-18 s cut at quiet points are transcribed one by one and each
@@ -268,7 +300,9 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         sr = audio.get("sampling_rate", 16000)
 
         bounds = chunk_bounds(array, sr)
-        texts = [self._transcribe_chunk(array[s:e], sr, **kwargs)["text"] for s, e in bounds]
+        texts: list[str] = [
+            self._transcribe_chunk(array[s:e], sr, **kwargs)["text"] for s, e in bounds
+        ]
         result: dict[str, Any] = {"text": " ".join(t for t in texts if t)}
 
         try:
@@ -299,18 +333,19 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
 
         return result
 
-    def _extract_audio(self, inputs) -> dict | None:
+    def _extract_audio(self, inputs: object) -> _RawAudio | None:
         """Extract audio array from various input formats using HF utilities."""
         if isinstance(inputs, dict):
-            if "array" in inputs:
+            sample = inputs
+            if "array" in sample:
                 return {
-                    "array": inputs["array"],
-                    "sampling_rate": inputs.get("sampling_rate", 16000),
+                    "array": sample["array"],
+                    "sampling_rate": sample.get("sampling_rate", 16000),
                 }
-            if "raw" in inputs:
+            if "raw" in sample:
                 return {
-                    "array": inputs["raw"],
-                    "sampling_rate": inputs.get("sampling_rate", 16000),
+                    "array": sample["raw"],
+                    "sampling_rate": sample.get("sampling_rate", 16000),
                 }
         elif isinstance(inputs, str):
             # File path - load audio using ffmpeg (same as HF pipeline)
@@ -325,7 +360,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
 
         return None
 
-    def preprocess(self, *args, **preprocess_params):
+    def preprocess(self, *args: Any, **preprocess_params: Any) -> Iterator[dict[str, Any]]:
         """Preprocess audio inputs for the model.
 
         Args:
@@ -340,9 +375,10 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         # Handle dict with "array" key (from datasets)
         if isinstance(inputs, dict) and "array" in inputs:
             assert self.feature_extractor is not None  # always set by __init__
+            sample = inputs
             inputs = {
-                "raw": inputs["array"],
-                "sampling_rate": inputs.get("sampling_rate", self.feature_extractor.sampling_rate),
+                "raw": sample["array"],
+                "sampling_rate": sample.get("sampling_rate", self.feature_extractor.sampling_rate),
             }
 
         # Inference-only lead-in silence. See prepend_lead_in for the
@@ -361,19 +397,20 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         )
         if lead_in > 0 and isinstance(inputs, dict) and "raw" in inputs:
             assert self.feature_extractor is not None  # always set by __init__
-            inputs = dict(inputs)
-            inputs["raw"] = prepend_lead_in(
-                inputs["raw"],
-                inputs.get("sampling_rate", self.feature_extractor.sampling_rate),
+            padded: dict[str, Any] = dict(inputs)
+            padded["raw"] = prepend_lead_in(
+                padded["raw"],
+                padded.get("sampling_rate", self.feature_extractor.sampling_rate),
                 lead_in,
             )
+            inputs = padded
 
         for item in super().preprocess(inputs, **preprocess_params):
             if "is_last" not in item:
                 item["is_last"] = True
             yield item
 
-    def _forward(self, *args, **generate_kwargs):
+    def _forward(self, *args: Any, **generate_kwargs: Any) -> dict[str, Any]:
         """Run model forward pass to generate transcription.
 
         Args:
@@ -390,7 +427,9 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             ``top1_logprob`` / ``top2_logprob`` tensors when scores were
             requested.
         """
-        model_inputs = _single_input(args, generate_kwargs, "model_inputs")
+        model_inputs: MutableMapping[str, Any] = _single_input(
+            args, generate_kwargs, "model_inputs"
+        )
         # Extract audio features and is_last flag
         is_last = model_inputs.pop("is_last", True) if isinstance(model_inputs, dict) else True
 
@@ -442,7 +481,8 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                 torch.topk(torch.log_softmax(step_logits[0].float(), dim=-1), k=2).values
                 for step_logits in scores
             ]
-            for top1, top2 in torch.stack(per_step).tolist():
+            steps: list[list[float]] = np.asarray(torch.stack(per_step).cpu()).tolist()
+            for top1, top2 in steps:
                 top1_logprobs.append(top1)
                 top2_logprobs.append(top2)
         return {
@@ -454,11 +494,11 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
 
     def postprocess(
         self,
-        model_outputs,
-        decoder_kwargs=None,
-        return_timestamps=None,
-        return_language=None,
-        **kwargs,
+        model_outputs: dict[str, Any] | list[dict[str, Any]],
+        decoder_kwargs: dict[str, Any] | None = None,
+        return_timestamps: bool | str | None = None,
+        return_language: bool | None = None,
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """Convert model output tokens to text.
 
@@ -490,10 +530,13 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
 
         # Filter out eos tokens that the tokenizer doesn't recognize as special
         # (generation_config.eos_token_id may differ from tokenizer.eos_token_id)
-        eos_ids = self.model.generation_config.eos_token_id
+        eos_ids: int | list[int] | None = getattr(
+            self.model.generation_config, "eos_token_id", None
+        )
         if eos_ids is not None:
             eos_set = set(eos_ids) if isinstance(eos_ids, list) else {eos_ids}
-            tokens = [t for t in tokens.tolist() if t not in eos_set]
+            token_ids: list[int] = np.asarray(tokens).tolist()
+            tokens = [t for t in token_ids if t not in eos_set]
 
         assert self.tokenizer is not None  # always set by __init__
         decoded = self.tokenizer.decode(tokens, skip_special_tokens=True)

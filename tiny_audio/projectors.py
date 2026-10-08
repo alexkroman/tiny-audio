@@ -92,7 +92,7 @@ class MLPAudioProjector(nn.Module):
     path from encoder to decoder and a frozen encoder that cannot adapt to it.
     """
 
-    def __init__(self, config):
+    def __init__(self, config: object) -> None:
         """Initialize MLP projector.
 
         Args:
@@ -100,14 +100,14 @@ class MLPAudioProjector(nn.Module):
         """
         super().__init__()
 
-        encoder_dim = getattr(config, "encoder_dim", 768)
-        llm_dim = getattr(config, "llm_dim", 2048)
-        self.k = getattr(config, "projector_pool_stride", 4)
+        encoder_dim: int = getattr(config, "encoder_dim", 768)
+        llm_dim: int = getattr(config, "llm_dim", 2048)
+        self.k: int = getattr(config, "projector_pool_stride", 4)
 
         # Frame stacking: concat k adjacent frames then project
         in_dim = encoder_dim * self.k
         # Hidden dim defaults to llm_dim, can be overridden via config
-        hidden_dim = getattr(config, "projector_hidden_dim", None) or llm_dim
+        hidden_dim: int = getattr(config, "projector_hidden_dim", None) or llm_dim
         self.input_norm = LlamaRMSNorm(in_dim, eps=1e-6)
         self.linear_1 = nn.Linear(in_dim, hidden_dim)
         self.act = nn.GELU()

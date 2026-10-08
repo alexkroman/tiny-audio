@@ -55,7 +55,6 @@ LINT_COMMANDS = [
     ["zizmor", "--offline", ".github/workflows"],
 ]
 TYPE_CHECK_COMMANDS = [
-    ["mypy", *CODE_PATHS],
     # Paths come from `[tool.pyright] include`.
     ["pyright"],
 ]
@@ -85,6 +84,8 @@ DEAD_CODE_COMMAND = [
     "vulture",
     "tiny_audio",
     "scripts",
+    # Protocol / type-stub parameter names; see the file's docstring.
+    "quality/vulture_whitelist.py",
     "--min-confidence",
     DEAD_CODE_MIN_CONFIDENCE,
 ]
@@ -227,13 +228,13 @@ def run_all(*commands: list[str]) -> int:
 
 
 @app.command()
-def lint():
+def lint() -> None:
     """Run linters (Poetry + Python + YAML + TOML + GitHub Actions + Markdown + JSON)."""
     raise typer.Exit(run_all(*lint_commands()))
 
 
 @app.command("format")
-def format_code():
+def format_code() -> None:
     """Format code with black, ruff, mdformat, taplo and pretty-format-json."""
     run("black", *CODE_PATHS)
     run("ruff", "format", *CODE_PATHS)
@@ -249,37 +250,37 @@ def format_code():
 
 
 @app.command("type-check")
-def type_check():
-    """Run type checkers (mypy and pyright)."""
+def type_check() -> None:
+    """Run the type checker (pyright, strict)."""
     raise typer.Exit(run_all(*TYPE_CHECK_COMMANDS))
 
 
 @app.command()
-def test():
+def test() -> None:
     """Run pytest with the coverage floor and per-file floors enforced."""
     raise typer.Exit(run_all(TEST_COMMAND, COVERAGE_FLOORS_COMMAND))
 
 
 @app.command()
-def coverage():
+def coverage() -> None:
     """Run tests with coverage report (adds an HTML report under htmlcov/)."""
     raise typer.Exit(run(*TEST_COMMAND, "--cov-report=html"))
 
 
 @app.command()
-def check():
+def check() -> None:
     """Run all checks (lint, types, security, dead code, duplication, ratchets, deps, docs)."""
     raise typer.Exit(run_all(*check_commands()))
 
 
 @app.command()
-def build():
+def build() -> None:
     """Build package (wheel and sdist) and validate both."""
     raise typer.Exit(build_and_check())
 
 
 @app.command()
-def precommit():
+def precommit() -> None:
     """Pre-commit quality gate (format, check, test with coverage floor, build)."""
     format_code()
     raise typer.Exit(
@@ -288,37 +289,37 @@ def precommit():
 
 
 @app.command("install-hooks")
-def install_hooks():
+def install_hooks() -> None:
     """Install pre-commit hooks."""
     raise typer.Exit(run("pre-commit", "install"))
 
 
 @app.command()
-def security():
+def security() -> None:
     """Run security checks with bandit."""
     raise typer.Exit(run(*SECURITY_COMMAND))
 
 
 @app.command("dead-code")
-def dead_code():
+def dead_code() -> None:
     """Find dead/unused code with vulture."""
     raise typer.Exit(run(*DEAD_CODE_COMMAND))
 
 
 @app.command()
-def duplication():
+def duplication() -> None:
     """Find copy-pasted code with pylint's duplicate-code check."""
     raise typer.Exit(run(*DUPLICATION_COMMAND))
 
 
 @app.command()
-def deps():
+def deps() -> None:
     """Find unused, missing and transitive-only dependencies with deptry."""
     raise typer.Exit(run(*DEPS_COMMAND))
 
 
 @app.command()
-def docstrings():
+def docstrings() -> None:
     """Check docstring coverage with interrogate (verbose, per-file table)."""
     raise typer.Exit(run_all(*[[*cmd, "-v"] for cmd in DOCSTRINGS_COMMANDS]))
 

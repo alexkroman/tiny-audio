@@ -3,7 +3,11 @@
 from dataclasses import dataclass
 from typing import cast
 
-from datasets import Audio, IterableDataset, load_dataset
+from datasets import (
+    Audio,
+    IterableDataset,
+    load_dataset,
+)
 
 
 @dataclass
@@ -149,7 +153,7 @@ def load_eval_dataset(
     split: str,
     config_override: str | None = None,
     shuffle: bool = True,
-):
+) -> IterableDataset:
     """Load any dataset by name with unified interface.
 
     Args:

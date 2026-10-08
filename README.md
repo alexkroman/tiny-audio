@@ -339,7 +339,8 @@ tiny-audio/
 ├── tiny_audio/              # Core library
 │   ├── asr_modeling.py      # ASRModel: encoder + projector + decoder
 │   ├── asr_layers.py        # MPS-safe embeddings, encoder top-layer unfreezing
-│   ├── asr_types.py         # Loader TypedDicts and decoder typing protocols
+│   ├── asr_attention.py     # attn_implementation choice (FA2 / sdpa / eager)
+│   ├── asr_types.py         # Typing aliases, protocols and TypedDicts
 │   ├── asr_config.py        # ASRConfig: all model settings
 │   ├── asr_pipeline.py      # HuggingFace pipeline for inference
 │   ├── asr_processing.py    # ASRProcessor: audio/text preprocessing
@@ -386,7 +387,7 @@ poetry run pytest -k "test_forward" -v    # By name pattern
 poetry run ta dev format      # Format code (black, ruff, mdformat)
 poetry run ta dev lint        # Lint + format check (poetry check --lock, ruff, black, yamllint, taplo,
                               #   actionlint, zizmor, mdformat --check)
-poetry run ta dev type-check  # Type check (mypy, pyright)
+poetry run ta dev type-check  # Type check (pyright, strict)
 poetry run ta dev check       # Lint + type-check + security + dead code + duplication + ratchets
                               #   + deptry + docstrings
 poetry run ta dev precommit   # Full quality gate

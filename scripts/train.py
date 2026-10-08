@@ -5,15 +5,13 @@ import contextlib
 import logging
 import os
 import subprocess
-import warnings
-from collections.abc import Callable
+from collections.abc import Mapping, Sequence
 from dataclasses import fields
 from pathlib import Path
 from types import ModuleType
-from typing import Any, cast
+from typing import Any
 
 import hydra
-import numpy as np
 import torch
 import wandb
 from datasets import (
@@ -34,39 +32,28 @@ from transformers import (
     TrainingArguments,
 )
 from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
-from transformers.trainer_pt_utils import get_parameter_names
-from trl.import_utils import TRLExperimentalWarning
-
-from scripts.labels import (
-    TEXT_CASE_CASED,
-    TEXT_CASE_MONO,
-    _has_edge_content_tag,
-    _normalize_label,
+from transformers.trainer_pt_utils import (
+    get_parameter_names,
 )
+
+from scripts.labels import TEXT_CASE_CASED, TEXT_CASE_MONO
+from scripts.train_collator import TRANSCRIBE_PROMPT_PUNCT, DataCollator
 from scripts.train_config import register_configs
-from tiny_audio.asr_config import (
-    DEFAULT_ENCODER_CONV_LAYERS,
-    ASRConfig,
-    compute_encoder_output_length,
-)
+from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
-
-# trl.experimental warns (TRLExperimentalWarning) the first time it is
-# imported; DataCollatorForChatML is the only thing used from it.
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore", TRLExperimentalWarning)
-    from trl.experimental.utils import DataCollatorForChatML
 
 # liger is a linux-only optional dependency (see pyproject.toml); without it
 # training falls back to stock kernels and unfused cross-entropy.
+_liger_transformers: ModuleType | None
+_liger_import_error: ImportError | None
 try:
     from liger_kernel import transformers as liger_transformers
 except ImportError as exc:
-    LIGER_TRANSFORMERS: ModuleType | None = None
-    _LIGER_IMPORT_ERROR: ImportError | None = exc
+    _liger_transformers = None
+    _liger_import_error = exc
 else:
-    LIGER_TRANSFORMERS = liger_transformers
-    _LIGER_IMPORT_ERROR = None
+    _liger_transformers = liger_transformers
+    _liger_import_error = None
 
 for _noisy in ("httpx", "httpcore", "urllib3", "huggingface_hub.file_download"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
@@ -78,36 +65,10 @@ logger = logging.getLogger(__name__)
 # @hydra.main composes the config.
 register_configs()
 
-TRANSCRIBE_PROMPT = "Transcribe the speech to text"
-# Used for sources whose transcripts natively carry punctuation, selected per
-# row via the `text_punct` dataset field. Granite Speech 4.1 documents exactly
-# this mechanism -- its model card says punctuation and truecasing are chosen
-# "with a simple prompt change", and its usage example is literally
-# "<|audio|>transcribe the speech with proper punctuation and capitalization."
-# Qwen3-ASR does the equivalent through a system turn plus an assistant prefill.
-#
-# Without the split, the unpunctuated share of multiasr trains the model to
-# SUPPRESS punctuation under the same prompt the punctuated share uses to
-# produce it. Identical conditioning, contradictory targets: the model can
-# only learn a hedge, and every dropped mark scores as an error against
-# punctuated references.
-#
-# Share re-measured 2026-09-20: 12.1% plain-prompt (TEDLIUM ~194,900 + AMI
-# 147,504) against 87.9% punct-prompt, NOT the ~25%/~75% this comment used to
-# claim. Two of the four sources it named -- Peoples and Switchboard -- have
-# left the mix entirely, and the TEDLIUM leading-<unk> filter shrank a third.
-# The split still earns its keep at 12.1%, but the real format heterogeneity
-# now lives INSIDE the punct-prompt majority: 39.5% of SPGISpeech rows start
-# lowercase and 41.5% end without terminal punctuation (mid-stream 5-15s
-# window cuts), i.e. ~6% of the whole mix teaching "begin mid-sentence, no
-# final period" under the punctuation prompt. That is invisible to WER -- the
-# eval normalizer strips case and punctuation from both sides -- and shows up
-# only in orthographic_wer, the same blind spot that hid the %-stripping bug.
-# Measure before acting.
-TRANSCRIBE_PROMPT_PUNCT = "Transcribe the speech with proper punctuation and capitalization"
 
-
-def _resolve_transcribe_prompt(configured: str | None, datasets: list) -> str | None:
+def _resolve_transcribe_prompt(
+    configured: str | None, datasets: Sequence[Mapping[str, Any]]
+) -> str | None:
     """Pick the inference prompt a checkpoint is saved with.
 
     `transcribe_prompt` never reaches training -- `_build_sample` routes each
@@ -131,11 +92,101 @@ def _resolve_transcribe_prompt(configured: str | None, datasets: list) -> str | 
     return None
 
 
-# `Dataset.add_column` annotates `new_fingerprint: str` as a required argument,
-# but its @fingerprint_transform wrapper computes the fingerprint whenever the
-# caller leaves it out, which is how it is meant to be called. This is that
-# runtime signature, called exactly as `ds.add_column(name, column)` would be.
-_add_column = cast(Callable[[Dataset, str, list[Any]], Dataset], Dataset.add_column)
+def _add_source_policy_columns(ds: Dataset, dataset_cfg: DictConfig, dataset_path: str) -> Dataset:
+    """Attach the source's declared `_text_case` / `_text_punct` as constant columns."""
+    # text_case: declares whether this source's transcripts already carry
+    # case ("cased") or arrive mono-case and need recasing ("mono").
+    # Stored per row so normalize_label does not have to re-derive a
+    # source property from a single row's characters.
+    # Omit it to keep the legacy per-row heuristic.
+    text_case = dataset_cfg.get("text_case")
+    if text_case is not None:
+        if text_case not in (TEXT_CASE_MONO, TEXT_CASE_CASED):
+            msg = (
+                f"text_case must be {TEXT_CASE_MONO!r} or {TEXT_CASE_CASED!r}, "
+                f"got {text_case!r} for {dataset_path}"
+            )
+            raise ValueError(msg)
+        # @fingerprint_transform computes `new_fingerprint` when it is omitted,
+        # though `add_column` annotates it as a required argument.
+        ds = ds.add_column("_text_case", [text_case] * len(ds))  # pyright: ignore[reportCallIssue]
+
+    # text_punct: declares whether this source's transcripts carry
+    # punctuation. Deliberately separate from text_case -- they are not the
+    # same axis, and conflating them gets Gigaspeech wrong, which is
+    # ALL-CAPS (text_case: mono) yet natively punctuated. Omit it and the
+    # row gets the plain prompt, i.e. today's behaviour.
+    text_punct = dataset_cfg.get("text_punct")
+    if text_punct is not None:
+        if not isinstance(text_punct, bool):
+            msg = f"text_punct must be a bool, got {text_punct!r} for {dataset_path}"
+            raise ValueError(msg)
+        # @fingerprint_transform computes `new_fingerprint` when it is omitted,
+        # though `add_column` annotates it as a required argument.
+        ds = ds.add_column(  # pyright: ignore[reportCallIssue]
+            "_text_punct", [text_punct] * len(ds)
+        )
+    return ds
+
+
+def _not_excluded(
+    v: Any, wanted: set[object] | None, above: float | None, below: float | None
+) -> bool:
+    """`exclude_where`'s row predicate: False for a value the rule excludes."""
+    excluded = (
+        (wanted is not None and v in wanted)
+        or (v is not None and above is not None and v > above)
+        or (v is not None and below is not None and v < below)
+    )
+    return not excluded
+
+
+def _validate_exclude_where(ds: Dataset, exclude_where: DictConfig, dataset_path: str) -> None:
+    """Reject an `exclude_where` rule with no criteria or a column the source lacks."""
+    column = exclude_where.get("column")
+    has_criteria = bool(exclude_where.get("values")) or any(
+        exclude_where.get(bound) is not None for bound in ("above", "below")
+    )
+    if not column or not has_criteria:
+        msg = (
+            f"exclude_where needs 'column' plus at least one of "
+            f"'values' / 'above' / 'below', got {exclude_where!r} "
+            f"for {dataset_path}"
+        )
+        raise ValueError(msg)
+    if column not in ds.column_names:
+        # Fail loudly: a silently-ignored filter would train on the
+        # rows you believe you excluded, and the mix table would lie.
+        msg = (
+            f"exclude_where column {column!r} not in {dataset_path} "
+            f"(available: {sorted(ds.column_names)})"
+        )
+        raise ValueError(msg)
+
+
+def _resolve_excluded_values(
+    names: list[Any], feature: object, column: str, dataset_path: str
+) -> set[object] | None:
+    """Map `exclude_where.values` onto the column's stored values (None if unset)."""
+    if not names:
+        return None
+    # Gigaspeech's `source` is a ClassLabel, so its rows hold ints
+    # (0=audiobook, 1=podcast, 2=youtube), NOT the label strings the
+    # datasets-server `statistics` endpoint renders. Comparing rows
+    # against the human-readable names matches nothing and silently
+    # dropped 0 of 910,140 rows. Resolve names -> ids so the config
+    # stays readable, and reject a name the column does not define.
+    if not isinstance(feature, ClassLabel):
+        return set(names)
+    # Report every bad name at once rather than dying on the first.
+    unknown = sorted(n for n in names if n not in feature.names)
+    if unknown:
+        msg = (
+            f"exclude_where value {unknown} not a label of {column!r} in "
+            f"{dataset_path} (defined: {feature.names})"
+        )
+        raise ValueError(msg)
+    return {feature.str2int(n) for n in names}
 
 
 class DatasetLoader:
@@ -156,6 +207,7 @@ class DatasetLoader:
         self.epoch_expansion = int(self.config.get("epoch_expansion", 1) or 1)
 
     def _prepare_split(self, dataset_cfg: DictConfig, split: str) -> Dataset:
+        """Load one split of one source and reduce it to the columns training reads."""
         dataset_path = dataset_cfg.get("path")
         if not dataset_path:
             msg = "Dataset path is required"
@@ -182,52 +234,13 @@ class DatasetLoader:
         # Pre-filter the table has no indices mapping, so add_column is a
         # zero-copy horizontal concat and the filters below simply carry the
         # new columns along. Same rows, same values, nothing written.
-        # text_case: declares whether this source's transcripts already carry
-        # case ("cased") or arrive mono-case and need recasing ("mono").
-        # Stored per row so _normalize_label does not have to re-derive a
-        # source property from a single row's characters.
-        # Omit it to keep the legacy per-row heuristic.
-        text_case = dataset_cfg.get("text_case")
-        if text_case is not None:
-            if text_case not in (TEXT_CASE_MONO, TEXT_CASE_CASED):
-                msg = (
-                    f"text_case must be {TEXT_CASE_MONO!r} or {TEXT_CASE_CASED!r}, "
-                    f"got {text_case!r} for {dataset_path}"
-                )
-                raise ValueError(msg)
-            ds = _add_column(ds, "_text_case", [text_case] * len(ds))
-
-        # text_punct: declares whether this source's transcripts carry
-        # punctuation. Deliberately separate from text_case -- they are not the
-        # same axis, and conflating them gets Gigaspeech wrong, which is
-        # ALL-CAPS (text_case: mono) yet natively punctuated. Omit it and the
-        # row gets the plain prompt, i.e. today's behaviour.
-        text_punct = dataset_cfg.get("text_punct")
-        if text_punct is not None:
-            if not isinstance(text_punct, bool):
-                msg = f"text_punct must be a bool, got {text_punct!r} for {dataset_path}"
-                raise ValueError(msg)
-            ds = _add_column(ds, "_text_punct", [text_punct] * len(ds))
-
-        # CommonVoice strict-validated filter: Mozilla's `train` split is
-        # already up-vote validated (up_votes >= 2 AND up_votes > down_votes),
-        # but still admits clips with non-zero down_votes. Filtering to
-        # down_votes == 0 cuts the small tail of community-flagged
-        # audio/transcript mismatches. Applied to all CV splits (train +
-        # eval) for consistency with the TEDLIUM marker-filter pattern
-        # below. Guarded on column presence in case a future mirror strips
-        # the voting metadata.
-        if "common_voice" in dataset_path.lower() and "down_votes" in ds.column_names:
-            ds = ds.filter(
-                lambda dv: dv == 0,
-                num_proc=self.num_proc,
-                input_columns="down_votes",
-            )
+        ds = _add_source_policy_columns(ds, dataset_cfg, dataset_path)
+        ds = self._filter_common_voice_down_votes(ds, dataset_path)
 
         # Declarative row filter on a source-metadata column, e.g.
         #   exclude_where: {column: source, values: [audiobook]}
         #   exclude_where: {column: audio_duration, above: 19.0}
-        # It must run HERE, before the keep_cols pruning below drops every
+        # It must run HERE, before _select_training_columns drops every
         # column that is not audio/text/_text_case/_text_punct -- by then the
         # column you want to filter on no longer exists.
         #
@@ -241,91 +254,88 @@ class DatasetLoader:
         # unchanged. Rows are swapped, not lost.
         exclude_where = dataset_cfg.get("exclude_where")
         if exclude_where is not None:
-            column = exclude_where.get("column")
-            names = list(exclude_where.get("values") or [])
-            # Numeric bounds, added 2026-09-20 for LibriHeavy. Semantics follow
-            # the key's name: this EXCLUDES rows, so `above: 19.0` drops rows
-            # whose value exceeds 19.0 (it is not a keep-ceiling).
-            above = exclude_where.get("above")
-            below = exclude_where.get("below")
-            if not column or (not names and above is None and below is None):
-                msg = (
-                    f"exclude_where needs 'column' plus at least one of "
-                    f"'values' / 'above' / 'below', got {exclude_where!r} "
-                    f"for {dataset_path}"
-                )
-                raise ValueError(msg)
-            if column not in ds.column_names:
-                # Fail loudly: a silently-ignored filter would train on the
-                # rows you believe you excluded, and the mix table would lie.
-                msg = (
-                    f"exclude_where column {column!r} not in {dataset_path} "
-                    f"(available: {sorted(ds.column_names)})"
-                )
-                raise ValueError(msg)
-            # Gigaspeech's `source` is a ClassLabel, so its rows hold ints
-            # (0=audiobook, 1=podcast, 2=youtube), NOT the label strings the
-            # datasets-server `statistics` endpoint renders. Comparing rows
-            # against the human-readable names matches nothing and silently
-            # dropped 0 of 910,140 rows. Resolve names -> ids so the config
-            # stays readable, and reject a name the column does not define.
-            feature = (ds.features or {}).get(column)
-            wanted: set | None = None
-            if names:
-                if isinstance(feature, ClassLabel):
-                    # Report every bad name at once rather than dying on the first.
-                    unknown = sorted(n for n in names if n not in feature.names)
-                    if unknown:
-                        msg = (
-                            f"exclude_where value {unknown} not a label of {column!r} in "
-                            f"{dataset_path} (defined: {feature.names})"
-                        )
-                        raise ValueError(msg)
-                    wanted = {feature.str2int(n) for n in names}
-                else:
-                    wanted = set(names)
+            ds = self._apply_exclude_where(ds, exclude_where, dataset_path)
 
-            def _keep(v, _wanted=wanted, _above=above, _below=below):
-                excluded = (
-                    (_wanted is not None and v in _wanted)
-                    or (v is not None and _above is not None and v > _above)
-                    or (v is not None and _below is not None and v < _below)
-                )
-                return not excluded
+        ds = self._select_training_columns(ds, dataset_cfg)
+        return self._filter_ignore_markers(ds, dataset_path)
 
-            before = len(ds)
-            # `input_columns` keeps this from materialising the audio column --
-            # it matters for a duration filter over ~1.1M rows, which would
-            # otherwise decode every clip to answer a float comparison.
-            ds = ds.filter(
-                _keep,
-                num_proc=self.num_proc,
-                input_columns=column,
+    def _filter_common_voice_down_votes(self, ds: Dataset, dataset_path: str) -> Dataset:
+        """Keep only CommonVoice clips with zero down-votes (no-op for other sources)."""
+        # CommonVoice strict-validated filter: Mozilla's `train` split is
+        # already up-vote validated (up_votes >= 2 AND up_votes > down_votes),
+        # but still admits clips with non-zero down_votes. Filtering to
+        # down_votes == 0 cuts the small tail of community-flagged
+        # audio/transcript mismatches. Applied to all CV splits (train +
+        # eval) for consistency with the TEDLIUM marker-filter pattern in
+        # _filter_ignore_markers. Guarded on column presence in case a future
+        # mirror strips the voting metadata.
+        if "common_voice" not in dataset_path.lower() or "down_votes" not in ds.column_names:
+            return ds
+
+        def _no_down_votes(dv: int) -> bool:
+            return dv == 0
+
+        return ds.filter(
+            _no_down_votes,
+            num_proc=self.num_proc,
+            input_columns="down_votes",
+        )
+
+    def _apply_exclude_where(
+        self, ds: Dataset, exclude_where: DictConfig, dataset_path: str
+    ) -> Dataset:
+        """Drop the rows an `exclude_where` rule matches, failing if it matches none."""
+        column = exclude_where.get("column")
+        names = list(exclude_where.get("values") or [])
+        # Numeric bounds, added 2026-09-20 for LibriHeavy. Semantics follow
+        # the key's name: this EXCLUDES rows, so `above: 19.0` drops rows
+        # whose value exceeds 19.0 (it is not a keep-ceiling).
+        above = exclude_where.get("above")
+        below = exclude_where.get("below")
+        _validate_exclude_where(ds, exclude_where, dataset_path)
+        feature = (ds.features or {}).get(column)
+        wanted = _resolve_excluded_values(names, feature, column, dataset_path)
+
+        before = len(ds)
+        # `input_columns` keeps this from materialising the audio column --
+        # it matters for a duration filter over ~1.1M rows, which would
+        # otherwise decode every clip to answer a float comparison.
+        # Module-level with fn_kwargs, not a closure: datasets fingerprints a
+        # filter by pickling it, and a local function's code object goes
+        # through dill's deprecated `co_lnotab` path.
+        ds = ds.filter(
+            _not_excluded,
+            num_proc=self.num_proc,
+            input_columns=column,
+            fn_kwargs={"wanted": wanted, "above": above, "below": below},
+        )
+        dropped = before - len(ds)
+        logger.info(
+            "exclude_where on %s: dropped %d/%d rows (%s in %s, above=%s, below=%s)",
+            dataset_path,
+            dropped,
+            before,
+            column,
+            names or "-",
+            above,
+            below,
+        )
+        # A filter that matches nothing is a configuration bug, not a
+        # legitimate no-op: you asked to exclude something that is not
+        # there. Failing here costs seconds; not failing means training a
+        # full run on the mix you thought you had excluded, and only
+        # finding out from the eval.
+        if dropped == 0:
+            msg = (
+                f"exclude_where on {dataset_path} matched 0 of {before} rows "
+                f"({column}: values={sorted(names)} above={above} below={below}). "
+                f"Check the column's value type and spelling -- feature is {feature!r}."
             )
-            dropped = before - len(ds)
-            logger.info(
-                "exclude_where on %s: dropped %d/%d rows (%s in %s, above=%s, below=%s)",
-                dataset_path,
-                dropped,
-                before,
-                column,
-                names or "-",
-                above,
-                below,
-            )
-            # A filter that matches nothing is a configuration bug, not a
-            # legitimate no-op: you asked to exclude something that is not
-            # there. Failing here costs seconds; not failing means training a
-            # full run on the mix you thought you had excluded, and only
-            # finding out from the eval.
-            if dropped == 0:
-                msg = (
-                    f"exclude_where on {dataset_path} matched 0 of {before} rows "
-                    f"({column}: values={sorted(names)} above={above} below={below}). "
-                    f"Check the column's value type and spelling -- feature is {feature!r}."
-                )
-                raise ValueError(msg)
+            raise ValueError(msg)
+        return ds
 
+    def _select_training_columns(self, ds: Dataset, dataset_cfg: DictConfig) -> Dataset:
+        """Rename to audio/text, cast audio to the target rate, and prune other columns."""
         col_map = {
             "text": dataset_cfg.get("text_column", "text"),
             "audio": dataset_cfg.get("audio_column", "audio"),
@@ -338,33 +348,31 @@ class DatasetLoader:
 
         ds = ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
 
-        keep_cols = {"audio", "text"}
-        # Preserve the declared casing policy so _normalize_label can use it.
-        if "_text_case" in ds.column_names:
-            keep_cols = keep_cols | {"_text_case"}
-        # Preserve the declared punctuation policy so _build_sample can pick
-        # the matching prompt.
-        if "_text_punct" in ds.column_names:
-            keep_cols = keep_cols | {"_text_punct"}
+        # Preserve the declared casing policy so normalize_label can use it, and
+        # the declared punctuation policy so _build_sample can pick the
+        # matching prompt.
+        keep_cols = {"audio", "text"} | ({"_text_case", "_text_punct"} & set(ds.column_names))
         extra_cols = [c for c in (ds.column_names or []) if c not in keep_cols]
 
         if extra_cols:
             ds = ds.remove_columns(extra_cols)
+        return ds
 
+    def _filter_ignore_markers(self, ds: Dataset, dataset_path: str) -> Dataset:
+        """Drop TEDLIUM/EdAcc rows whose whole label is the unscored-region marker."""
         # Filter `ignore_time_segment_in_scoring` placeholder labels. TEDLIUM
         # uses them to mark unscored regions; EdAcc reuses the same convention
         # in its validation transcripts. Both ship rows where the entire label
         # IS that string — training on them teaches the model to emit it.
         # Case-insensitive: TEDLIUM ships lowercase, EdAcc ships uppercase.
         # Duration filtering happens in DataCollator to avoid loading all audio upfront.
-        if "tedlium" in dataset_path.lower() or "edacc" in dataset_path.lower():
+        if "tedlium" not in dataset_path.lower() and "edacc" not in dataset_path.lower():
+            return ds
 
-            def filter_ignore_marker(text):
-                return text.strip().lower() != "ignore_time_segment_in_scoring"
+        def filter_ignore_marker(text: str) -> bool:
+            return text.strip().lower() != "ignore_time_segment_in_scoring"
 
-            ds = ds.filter(filter_ignore_marker, num_proc=self.num_proc, input_columns="text")
-
-        return ds
+        return ds.filter(filter_ignore_marker, num_proc=self.num_proc, input_columns="text")
 
     def _resample_to_target(self, ds: Dataset, target: int) -> Dataset:
         """Cap (downsample) or repeat-pad (upsample) to ``target`` samples.
@@ -382,7 +390,8 @@ class DatasetLoader:
         if current == target:
             return ds
         if current > target:
-            return ds.shuffle(seed=self.seed).select(range(target))
+            shuffled = ds.shuffle(seed=self.seed)
+            return shuffled.select(range(target))
         # Upsampling repeats rows verbatim, so the extra "samples" carry no
         # new signal. That is intended for small sources, but it is also what
         # happens when a filter (e.g. exclude_where) cuts a large source below
@@ -426,7 +435,8 @@ class DatasetLoader:
         return concatenate_datasets([ds] * times)
 
     def load(self) -> tuple[Dataset | None, Dataset | None]:
-        train_datasets, val_datasets = [], []
+        train_datasets: list[Dataset] = []
+        val_datasets: list[Dataset] = []
 
         # epoch_expansion: build ONE physical epoch that is worth N logical
         # ones, so that capped sources contribute fresh rows instead of
@@ -514,182 +524,6 @@ class DatasetLoader:
         return train_ds, val_ds
 
 
-class DataCollator:
-    """Collates audio and text data for training."""
-
-    def __init__(
-        self,
-        tokenizer: Any,
-        feature_extractor: Any,
-        sample_rate: int,
-        projector: Any = None,
-        encoder_conv_layers: list | None = None,
-        audio_token: str = "<audio>",
-    ):
-        self.tokenizer = tokenizer
-        self.feature_extractor = feature_extractor
-        self.sample_rate = sample_rate
-        self.projector = projector
-        self.encoder_conv_layers = encoder_conv_layers or DEFAULT_ENCODER_CONV_LAYERS
-        # Must match ASRModel.audio_token -- the collator emits this string and
-        # forward() locates the scatter positions by its token id.
-        self.audio_token = audio_token
-        # Whisper's encoder requires a fixed 3000 mel frames; other encoders
-        # (GLM-ASR) accept variable-length input, so only pad to longest.
-        self._audio_padding = (
-            "max_length"
-            if type(feature_extractor).__name__ == "WhisperFeatureExtractor"
-            else "longest"
-        )
-        # 4096 tokens accommodates the long-tail of audio (up to 30s ≈ 187
-        # audio tokens) + user prompt + assistant transcript
-        # (dense speech can produce 1000-1500 transcript tokens). At 2048 the
-        # longest TEDLIUM / Earnings22 samples silently truncated the
-        # assistant turn — model trained on partial labels. Qwen3-0.6B
-        # supports 32K context so 4096 is well within capacity.
-        self.text_collator = DataCollatorForChatML(tokenizer=tokenizer, max_length=4096)
-
-    # Whisper's feature extractor pads/truncates to a fixed 30s window. Audio
-    # longer than this is silently truncated while the label is kept whole,
-    # training the model to transcribe content it never sees. Drop those rows.
-    # Lowered from 30s to 19s to reduce batch-memory pressure: with
-    # group_by_length disabled, a single long sample forces the whole batch
-    # to its length. 19s sits just under the ~20s production-norm cap
-    # for ASR fine-tunes.
-    #
-    # Per-source loss re-measured 2026-09-20 -- the old "TEDLIUM / Earnings22
-    # / Peoples / VoxPopuli, roughly 3-8%" was wrong in every particular:
-    # LibriHeavy 19.6% (the source it hits hardest was not even named, and is
-    # now pre-filtered at prep time via exclude_where so the 600K cap
-    # delivers a true 600K), VoxPopuli 13.7%, TEDLIUM 0.07%, SPGISpeech 0.0%;
-    # Earnings22 and Peoples have left the mix. Because these drops run at
-    # COLLATE time -- after target_samples -- a capped source silently
-    # delivers fewer rows than its cap, which is how the mix table came to
-    # overstate the corpus by 235K rows. In
-    # exchange, mel-spec peak memory drops ~37% vs the 30s default, freeing
-    # headroom for auto_find_batch_size (observed batch=70 at max=30s →
-    # expected ~100+ at max=19s for the same mix without WHAM).
-    _MAX_AUDIO_SECONDS = 19.0
-    # Sub-0.8s clips are dominated by boundary-cut segments and isolated
-    # backchannels ("yeah", "ok", "umhum") where the audio span and the
-    # reference transcript don't actually line up — eval-side analysis on
-    # Peoples / CV / Switchboard / AMI showed these as the bulk of >=50%
-    # WER samples, with model output reflecting adjacent content rather
-    # than the labeled token.
-    _MIN_AUDIO_SECONDS = 0.8
-
-    def _extract_audio_arrays(self, features):
-        audio_arrays = []
-        valid_features = []
-        for f in features:
-            try:
-                audio = f["audio"]["array"]
-                if hasattr(audio, "numpy"):
-                    audio = audio.numpy()
-                audio = audio.squeeze()
-                if audio.ndim > 1:
-                    audio = audio.mean(axis=0)
-                # Drop samples that would poison the gradient or break the
-                # encoder: empty / NaN audio, labels that normalize to empty
-                # (entire label was an annotation marker like <noise>), audio
-                # longer than Whisper's 30s window (label/audio mismatch via
-                # silent truncation), or sub-floor backchannels (label/audio
-                # don't actually line up — boundary-cut segments dominate the
-                # >50% WER tail). One bad sample is enough to NaN the
-                # optimizer state. Applied uniformly to train and eval — the
-                # filter is correctness, not policy, and the per-dataset eval
-                # cap (max_eval_samples_per_dataset) keeps any single dataset
-                # cluster from saturating an eval batch.
-                if audio.size == 0:
-                    continue
-                if not np.isfinite(audio).all():
-                    continue
-                # Drop rows whose entire text was an annotation marker
-                # (e.g. Gigaspeech <NOISE>-only segments).
-                raw_text = f.get("text") or ""
-                if not _normalize_label(raw_text, f.get("_text_case")):
-                    continue
-                # Drop rows whose label starts or ends with a content-bearing
-                # tag (<unk>/<foreign>/<overlap>). Stripping those yields a
-                # target missing its first or last spoken word while the audio
-                # retains it, which supervises onset/offset truncation — the
-                # measured root cause of this recipe's Peoples regression.
-                # See scripts/labels.py _EDGE_CONTENT_TAG_RE for the rates and the evidence.
-                if _has_edge_content_tag(raw_text):
-                    continue
-                duration_s = audio.size / self.sample_rate
-                if duration_s > self._MAX_AUDIO_SECONDS:
-                    continue
-                if duration_s < self._MIN_AUDIO_SECONDS:
-                    continue
-                audio_arrays.append(audio)
-                valid_features.append(f)
-            except (KeyError, TypeError, AttributeError, ValueError, OSError) as e:
-                # Narrow exception set covers genuine per-row decode/access
-                # failures: missing audio dict keys, audio==None, shape
-                # mismatch on squeeze, soundfile decode errors. Everything
-                # else (LookupError from NLTK punkt_tab, ImportError,
-                # RuntimeError from a CUDA path, AssertionError on broken
-                # invariants) MUST propagate — silently swallowing them
-                # masks real bugs and silently drops samples from training.
-                # The prior `except Exception: continue` was hiding an
-                # NLTK punkt_tab LookupError that was silently dropping
-                # ~48% of training samples (every mono-case row from
-                # Gigaspeech / AMI / Peoples / TEDLIUM / Switchboard).
-                logger.debug("Skipping row in DataCollator: %s: %s", type(e).__name__, e)
-                continue
-            finally:
-                f["audio"] = None
-        if not audio_arrays:
-            msg = "No valid audio samples in batch"
-            raise ValueError(msg)
-        return audio_arrays, valid_features
-
-    def _build_sample(self, feature: dict, num_audio_tokens: int) -> dict:
-        """Build a single chat sample."""
-        text = _normalize_label(feature.get("text") or "", feature.get("_text_case"))
-        # Prompt carries the label convention, so the punctuated and
-        # unpunctuated halves of the mix stop competing for the same
-        # conditioning. Undeclared sources keep the plain prompt.
-        prompt = TRANSCRIBE_PROMPT_PUNCT if feature.get("_text_punct") else TRANSCRIBE_PROMPT
-        return self._make_messages(num_audio_tokens, prompt, text)
-
-    def _make_messages(self, num_audio_tokens: int, prompt: str, response: str) -> dict:
-        user_content = (self.audio_token * num_audio_tokens) + " " + prompt
-        messages = [
-            {"role": "user", "content": user_content},
-            {"role": "assistant", "content": response},
-        ]
-        return {"messages": messages}
-
-    def __call__(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
-        audio_arrays, valid_features = self._extract_audio_arrays(features)
-
-        audio_out = self.feature_extractor(
-            audio_arrays,
-            sampling_rate=self.sample_rate,
-            padding=self._audio_padding,
-            return_attention_mask=True,
-            return_tensors="pt",
-        )
-
-        mel_lengths = audio_out.attention_mask.sum(dim=-1)
-        encoder_lengths = compute_encoder_output_length(mel_lengths, self.encoder_conv_layers)
-        token_counts_tensor = self.projector.get_output_length(encoder_lengths).to(torch.long)
-        audio_token_counts = token_counts_tensor.tolist()
-
-        text_features = [
-            self._build_sample(f, n)
-            for f, n in zip(valid_features, audio_token_counts, strict=True)
-        ]
-
-        batch = self.text_collator(text_features)
-        batch["input_features"] = audio_out.input_features
-        batch["audio_attention_mask"] = audio_out.attention_mask
-        batch["audio_token_counts"] = token_counts_tensor
-        return batch
-
-
 def decay_parameter_ids(model: torch.nn.Module) -> set[int]:
     """ids of the trainable parameters that should get weight decay.
 
@@ -765,13 +599,13 @@ class ASRTrainer(Trainer):
 
     def __init__(
         self,
-        *args,
+        *args: Any,
         decoder_learning_rate: float | None = None,
         projector_weight_decay: float | None = None,
         encoder_learning_rate: float | None = None,
         encoder_weight_decay: float | None = None,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.decoder_learning_rate = decoder_learning_rate
         self.projector_weight_decay = projector_weight_decay
@@ -815,7 +649,7 @@ class ASRTrainer(Trainer):
         # Three-way component split. Names are checked against fixed prefixes
         # so the routing matches the freeze flags exactly: `audio_tower.*`,
         # `language_model.*`, and everything else (projector + auxiliary).
-        groups: dict[tuple[str, bool], list] = {
+        groups: dict[tuple[str, bool], list[torch.nn.Parameter]] = {
             ("encoder", True): [],
             ("encoder", False): [],
             ("decoder", True): [],
@@ -845,7 +679,7 @@ class ASRTrainer(Trainer):
         enc_lr = self.encoder_learning_rate if self.encoder_learning_rate is not None else base_lr
         enc_wd = self.encoder_weight_decay if self.encoder_weight_decay is not None else base_wd
 
-        optimizer_grouped_parameters = [
+        optimizer_grouped_parameters: list[dict[str, Any]] = [
             {
                 "params": groups[("other", True)],
                 "weight_decay": proj_wd,
@@ -914,7 +748,7 @@ class PushToHubCallback(TrainerCallback):
             )
 
 
-def get_valid_training_args(config: dict) -> dict:
+def get_valid_training_args(config: dict[str, Any]) -> dict[str, Any]:
     """Filter config to only valid, set TrainingArguments fields.
 
     None means "unset" in the structured-config schema (scripts/train_config.py),
@@ -964,7 +798,7 @@ TRAINING_MODEL_PARAMS = [
 ]
 
 
-def _require_fused_cross_entropy(model, cfg) -> None:
+def _require_fused_cross_entropy(model: ASRModel, cfg: DictConfig) -> None:
     """Fail at startup when fused CE is unavailable on a GPU run.
 
     Without liger's fused linear cross-entropy, every labelled forward
@@ -1019,82 +853,82 @@ def _require_fused_cross_entropy(model, cfg) -> None:
     raise RuntimeError(msg)
 
 
-@hydra.main(version_base=None, config_path="../configs", config_name="config")
-def main(cfg: DictConfig) -> None:
-    push_to_hub = cfg.training.get("push_to_hub") and cfg.training.get("hub_model_id")
-    if push_to_hub and not os.environ.get("HF_TOKEN"):
-        msg = (
-            "HF_TOKEN environment variable is required when push_to_hub is enabled. "
-            "Set it with: export HF_TOKEN=your_token"
-        )
-        raise ValueError(msg)
+def _init_wandb(cfg: DictConfig) -> None:
+    """Start the wandb run with the resolved config and the current git state."""
+    cfg_container = OmegaConf.to_container(cfg, resolve=True)
+    assert isinstance(cfg_container, dict)
+    # The root config's keys are the group names (model/data/training).
+    wandb_config = {str(k): v for k, v in cfg_container.items()}
+    git_commit, git_dirty = _git_state()
+    if git_commit:
+        # Surface the commit in the run config so it's queryable/filterable
+        # in the wandb UI alongside the run's hyperparameters. Wandb does
+        # capture git metadata on its own, but it lives in a separate panel
+        # and can't be used to group/filter runs.
+        wandb_config["git_commit"] = git_commit
+        wandb_config["git_dirty"] = git_dirty
+    run = wandb.init(
+        project=cfg.training.get("wandb_project", "tiny-audio"),
+        config=wandb_config,
+    )
+    if git_commit:
+        run.summary["git_commit"] = git_commit
+        run.summary["git_dirty"] = git_dirty
 
-    if cfg.training.get("report_to") == "wandb":
-        cfg_container = OmegaConf.to_container(cfg, resolve=True)
-        assert isinstance(cfg_container, dict)
-        # The root config's keys are the group names (model/data/training).
-        wandb_config = {str(k): v for k, v in cfg_container.items()}
-        git_commit, git_dirty = _git_state()
-        if git_commit:
-            # Surface the commit in the run config so it's queryable/filterable
-            # in the wandb UI alongside the run's hyperparameters. Wandb does
-            # capture git metadata on its own, but it lives in a separate panel
-            # and can't be used to group/filter runs.
-            wandb_config["git_commit"] = git_commit
-            wandb_config["git_dirty"] = git_dirty
-        run = wandb.init(
-            project=cfg.training.get("wandb_project", "tiny-audio"),
-            config=wandb_config,
-        )
-        if git_commit:
-            run.summary["git_commit"] = git_commit
-            run.summary["git_dirty"] = git_dirty
 
-    # Patch the decoder's transformers module with liger fused kernels before
-    # the LM class is instantiated. The big win is fused linear cross-entropy:
-    # instead of materializing the (B, T, V) fp32 log-softmax tensor that HF's
-    # standard CE / LabelSmoother path requires (~15GB at B=50, V=151k on
-    # Qwen3-0.6B), liger fuses lm_head @ hidden_states + softmax + CE into a
-    # single kernel with peak memory O(B·T·D). Label smoothing flows through
-    # this kernel via the loss_function's **kwargs path (see ASRModel.forward)
-    # — so set HF Trainer's label_smoothing_factor=0 in configs to bypass the
+# Decoder-family substring -> liger patcher. First match wins, so longer keys
+# are listed first.
+_LIGER_PATCHERS = (
+    ("gemma-4", "apply_liger_kernel_to_gemma4"),
+    ("qwen3.5", "apply_liger_kernel_to_qwen3_5"),
+    ("qwen3", "apply_liger_kernel_to_qwen3"),
+)
+
+
+def _apply_liger_kernels(cfg: DictConfig) -> None:
+    """Patch the decoder's transformers module with liger's fused kernels, if mapped."""
+    # Must run before the LM class is instantiated. The big win is fused
+    # linear cross-entropy: instead of materializing the (B, T, V) fp32
+    # log-softmax tensor that HF's standard CE / LabelSmoother path requires
+    # (~15GB at B=50, V=151k on Qwen3-0.6B), liger fuses lm_head @
+    # hidden_states + softmax + CE into a single kernel with peak memory
+    # O(B·T·D). Label smoothing flows through this kernel via the
+    # loss_function's **kwargs path (see ASRModel.forward) — so set HF
+    # Trainer's label_smoothing_factor=0 in configs to bypass the
     # LabelSmoother and rely on model.config.label_smoothing instead.
     #
     # The patcher is per-architecture, so it must track text_model_id. Getting
     # this wrong is not a crash but an OOM: Gemma 4's vocab is 262,144, so an
     # unfused (B, T, V) logits tensor is ~17GB at B=32/T=512 before the
-    # log_softmax copy. First match wins, so longer keys are listed first.
-    if cfg.training.get("use_liger", True):
-        liger_patchers = (
-            ("gemma-4", "apply_liger_kernel_to_gemma4"),
-            ("qwen3.5", "apply_liger_kernel_to_qwen3_5"),
-            ("qwen3", "apply_liger_kernel_to_qwen3"),
+    # log_softmax copy.
+    text_model_id = str(cfg.model.get("text_model_id", "")).lower()
+    patcher_name = next((fn for key, fn in _LIGER_PATCHERS if key in text_model_id), None)
+    if patcher_name is None:
+        logger.warning(
+            "No liger patcher mapped for text_model_id=%r — training with stock "
+            "kernels and unfused cross-entropy. Add an entry to _LIGER_PATCHERS "
+            "if this decoder has liger support.",
+            cfg.model.get("text_model_id"),
         )
-        text_model_id = str(cfg.model.get("text_model_id", "")).lower()
-        patcher_name = next((fn for key, fn in liger_patchers if key in text_model_id), None)
-        if patcher_name is None:
-            logger.warning(
-                "No liger patcher mapped for text_model_id=%r — training with stock "
-                "kernels and unfused cross-entropy. Add an entry to liger_patchers "
-                "if this decoder has liger support.",
-                cfg.model.get("text_model_id"),
-            )
-        else:
-            try:
-                if LIGER_TRANSFORMERS is None:
-                    assert _LIGER_IMPORT_ERROR is not None
-                    raise _LIGER_IMPORT_ERROR
-                getattr(LIGER_TRANSFORMERS, patcher_name)()
-                logger.info("Applied liger kernels via %s()", patcher_name)
-            except (ImportError, AttributeError) as e:
-                logger.warning(
-                    "liger-kernel unavailable or missing %s (%s) — falling back to "
-                    "stock kernels. Install with `poetry install` on Linux and pin a "
-                    "version that exports it to enable fused linear CE.",
-                    patcher_name,
-                    e,
-                )
+        return
+    try:
+        if _liger_transformers is None:
+            assert _liger_import_error is not None
+            raise _liger_import_error
+        getattr(_liger_transformers, patcher_name)()
+        logger.info("Applied liger kernels via %s()", patcher_name)
+    except (ImportError, AttributeError) as e:
+        logger.warning(
+            "liger-kernel unavailable or missing %s (%s) — falling back to "
+            "stock kernels. Install with `poetry install` on Linux and pin a "
+            "version that exports it to enable fused linear CE.",
+            patcher_name,
+            e,
+        )
 
+
+def _build_asr_config(cfg: DictConfig) -> ASRConfig:
+    """Merge `model:` with the TRAINING_MODEL_PARAMS set under `training:` into an ASRConfig."""
     model_container = OmegaConf.to_container(cfg.model, resolve=True)
     assert isinstance(model_container, dict), "model config must be a dict"
     # Keys are ModelConfig field names (scripts/train_config.py), i.e. strings.
@@ -1131,9 +965,38 @@ def main(cfg: DictConfig) -> None:
     )
     # None marks a schema field the configs left unset; drop it so ASRConfig's
     # own default applies (see ModelConfig in scripts/train_config.py).
-    asr_config = ASRConfig(**{k: v for k, v in model_config_dict.items() if v is not None})
+    return ASRConfig(**{k: v for k, v in model_config_dict.items() if v is not None})
 
-    model = ASRModel(asr_config)
+
+def _disable_chat_template_thinking(model: ASRModel) -> None:
+    """Rewrite an `enable_thinking` chat template (Qwen3) so thinking is always off."""
+    # Workaround: TRL's DataCollatorForChatML doesn't pass enable_thinking=False to Qwen3.
+    # See https://github.com/huggingface/trl/issues/3387
+    chat_template = model.tokenizer.chat_template
+    if isinstance(chat_template, str) and "enable_thinking" in chat_template:
+        model.tokenizer.chat_template = chat_template.replace(
+            "enable_thinking is defined and enable_thinking is false",
+            "true",
+        )
+
+
+@hydra.main(version_base=None, config_path="../configs", config_name="config")
+def main(cfg: DictConfig) -> None:
+    push_to_hub = cfg.training.get("push_to_hub") and cfg.training.get("hub_model_id")
+    if push_to_hub and not os.environ.get("HF_TOKEN"):
+        msg = (
+            "HF_TOKEN environment variable is required when push_to_hub is enabled. "
+            "Set it with: export HF_TOKEN=your_token"
+        )
+        raise ValueError(msg)
+
+    if cfg.training.get("report_to") == "wandb":
+        _init_wandb(cfg)
+
+    if cfg.training.get("use_liger", True):
+        _apply_liger_kernels(cfg)
+
+    model = ASRModel(_build_asr_config(cfg))
 
     _require_fused_cross_entropy(model, cfg)
 
@@ -1148,13 +1011,7 @@ def main(cfg: DictConfig) -> None:
     if hub_model_id := cfg.training.get("hub_model_id"):
         model.config.pretrained_model_path = hub_model_id
 
-    # Workaround: TRL's DataCollatorForChatML doesn't pass enable_thinking=False to Qwen3.
-    # See https://github.com/huggingface/trl/issues/3387
-    if model.tokenizer.chat_template and "enable_thinking" in model.tokenizer.chat_template:
-        model.tokenizer.chat_template = model.tokenizer.chat_template.replace(
-            "enable_thinking is defined and enable_thinking is false",
-            "true",
-        )
+    _disable_chat_template_thinking(model)
 
     train_dataset, val_dataset = DatasetLoader(cfg).load()
 
@@ -1167,12 +1024,14 @@ def main(cfg: DictConfig) -> None:
         audio_token=model.audio_token,
     )
 
-    callbacks = []
+    callbacks: list[TrainerCallback] = []
     if push_to_hub:
         callbacks.append(PushToHubCallback())
 
-    training_config = OmegaConf.to_container(cfg.training, resolve=True)
-    assert isinstance(training_config, dict)
+    training_container = OmegaConf.to_container(cfg.training, resolve=True)
+    assert isinstance(training_container, dict)
+    # Keys are TrainingConfig field names (scripts/train_config.py), i.e. strings.
+    training_config = {str(k): v for k, v in training_container.items()}
     decoder_learning_rate = training_config.pop("decoder_learning_rate", None)
     projector_weight_decay = training_config.pop("projector_weight_decay", None)
     encoder_learning_rate = training_config.pop("encoder_learning_rate", None)
@@ -1188,8 +1047,10 @@ def main(cfg: DictConfig) -> None:
     # scalar-tensor outputs into the graph instead of graph-breaking on
     # the first scalar-producing op (e.g. token_counts.max().item() in
     # _gather_audio_embeds).
-    torch._dynamo.config.cache_size_limit = 256
-    torch._dynamo.config.capture_scalar_outputs = True
+    # torch exposes these knobs only under torch._dynamo.
+    dynamo_config = torch._dynamo.config  # pyright: ignore[reportPrivateUsage]
+    dynamo_config.cache_size_limit = 256
+    dynamo_config.capture_scalar_outputs = True
     trainer = ASRTrainer(
         model=model,
         args=TrainingArguments(**get_valid_training_args(training_config)),

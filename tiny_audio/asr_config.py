@@ -1,9 +1,17 @@
 """Configuration for the ASR model: encoder, decoder, projector and training options."""
 
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any, overload
+
 import transformers
 
+if TYPE_CHECKING:
+    import torch
+
+ConvLayerSpec = tuple[int, int, int]
+
 # Default conv layers for Whisper/GLM-ASR audio encoders: [(pad, kernel, stride), ...]
-DEFAULT_ENCODER_CONV_LAYERS = [(1, 3, 1), (1, 3, 2)]
+DEFAULT_ENCODER_CONV_LAYERS: list[ConvLayerSpec] = [(1, 3, 1), (1, 3, 2)]
 
 # Granite Speech 5.0 TurboCTC. Its feature extractor already stacks mel frame
 # pairs (100 Hz -> 50 Hz, 320-dim output), so the `mel_length` handed to
@@ -14,7 +22,7 @@ DEFAULT_ENCODER_CONV_LAYERS = [(1, 3, 1), (1, 3, 2)]
 # generic formula below. Verified against the real encoder at 1/2/5/10/20s
 # (T_fe 50/100/250/500/1000 -> 12/25/62/125/250).
 # Full path: 100 Hz mel -> 2x FE stacking -> 4x encoder -> 12.5 Hz.
-GRANITE_ENCODER_CONV_LAYERS = [(0, 2, 2), (0, 2, 2)]
+GRANITE_ENCODER_CONV_LAYERS: list[ConvLayerSpec] = [(0, 2, 2), (0, 2, 2)]
 
 # Encoders whose `input_features` are (batch, time, feature_dim) rather than
 # Whisper/GLM-ASR's (batch, n_mels, mel_len). Conformer-family checkpoints
@@ -43,7 +51,17 @@ def is_time_major_encoder(audio_model_id: str | None) -> bool:
     return any(m in (audio_model_id or "").lower() for m in _TIME_MAJOR_ENCODER_MARKERS)
 
 
-def compute_encoder_output_length(mel_length, conv_layers=None):
+@overload
+def compute_encoder_output_length(
+    mel_length: int, conv_layers: Sequence[ConvLayerSpec] | None = None
+) -> int: ...
+@overload
+def compute_encoder_output_length(
+    mel_length: "torch.Tensor", conv_layers: Sequence[ConvLayerSpec] | None = None
+) -> "torch.Tensor": ...
+def compute_encoder_output_length(
+    mel_length: "int | torch.Tensor", conv_layers: Sequence[ConvLayerSpec] | None = None
+) -> "int | torch.Tensor":
     """Apply encoder conv layer formulas to compute output length.
 
     Works with both Python ints and torch tensors of mel lengths; the formula
@@ -54,6 +72,13 @@ def compute_encoder_output_length(mel_length, conv_layers=None):
     for padding, kernel_size, stride in layers:
         length = (length + 2 * padding - (kernel_size - 1) - 1) // stride + 1
     return length
+
+
+def _config_from_dict(model_type: str, values: dict[str, Any]) -> transformers.PretrainedConfig:
+    """Rebuild a serialized sub-config as the config class registered for `model_type`."""
+    auto_config = transformers.AutoConfig
+    default = auto_config.for_model(model_type)
+    return default.__class__(**values)
 
 
 class ASRConfig(transformers.PretrainedConfig):
@@ -87,7 +112,7 @@ class ASRConfig(transformers.PretrainedConfig):
         llm_dim: int | None = None,
         # Encoder conv layers: list of (padding, kernel_size, stride) tuples
         # Default is Whisper/GLM-ASR structure: conv1(k=3,s=1,p=1) + conv2(k=3,s=2,p=1)
-        encoder_conv_layers: list | None = None,
+        encoder_conv_layers: list[ConvLayerSpec] | None = None,
         audio_sample_rate: int = 16000,
         # Whether the encoder takes `input_features` as (batch, time, feature)
         # instead of Whisper/GLM-ASR's (batch, n_mels, mel_len). Only
@@ -151,7 +176,7 @@ class ASRConfig(transformers.PretrainedConfig):
         lora_rank: int = 8,  # SALMONN default
         lora_alpha: int = 32,  # SALMONN default (scaling factor 4.0)
         lora_dropout: float = 0.0,
-        lora_target_modules: list | None = None,  # Default: all linear layers
+        lora_target_modules: list[str] | None = None,  # Default: all linear layers
         # Per-module rank/alpha overrides, keyed by the module's leaf name and
         # matched by PEFT as `(.*\.)?<key>$` against the full module path.
         #
@@ -171,8 +196,8 @@ class ASRConfig(transformers.PretrainedConfig):
         # changes the scale: alpha/r goes 128/64 = 2.0 to 128/16 = 8.0. Always
         # set both, and keep the ratio equal to the global one unless the
         # scale change is the point.
-        lora_rank_pattern: dict | None = None,
-        lora_alpha_pattern: dict | None = None,
+        lora_rank_pattern: dict[str, int] | None = None,
+        lora_alpha_pattern: dict[str, int] | None = None,
         # Seconds of silence prepended to every clip at INFERENCE. Measured on
         # Peoples (n=500, paired bootstrap): 20.51% -> 19.28% WER, delta -1.22
         # CI [-1.83, -0.64], with utterances losing a leading reference word
@@ -235,8 +260,8 @@ class ASRConfig(transformers.PretrainedConfig):
         max_new_tokens: int | None = None,
         use_cache: bool | None = None,
         no_repeat_ngram_size: int | None = None,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         """Initialize ASR model configuration.
 
         Args:
@@ -336,33 +361,34 @@ class ASRConfig(transformers.PretrainedConfig):
             value = explicit_generation_args[key]
             setattr(self, key, value if value is not None else default)
 
+        audio_config: transformers.PretrainedConfig | dict[str, Any]
         if "audio_config" not in kwargs:
-            self.audio_config = transformers.AutoConfig.from_pretrained(audio_model_id)
+            audio_config = transformers.AutoConfig.from_pretrained(audio_model_id)
             # Override dtype to match model_dtype
-            self.audio_config.dtype = model_dtype
+            audio_config.dtype = model_dtype
         else:
-            self.audio_config = kwargs.pop("audio_config")
+            audio_config = kwargs.pop("audio_config")
+        self.audio_config: transformers.PretrainedConfig | dict[str, Any] = audio_config
 
+        text_config: transformers.PretrainedConfig | dict[str, Any]
         if "text_config" not in kwargs:
-            self.text_config = transformers.AutoConfig.from_pretrained(
+            text_config = transformers.AutoConfig.from_pretrained(
                 text_model_id, trust_remote_code=True
             )
             # Override dtype to match model_dtype
-            self.text_config.dtype = model_dtype
+            text_config.dtype = model_dtype
         else:
-            self.text_config = kwargs.pop("text_config")
+            text_config = kwargs.pop("text_config")
 
-        if isinstance(self.text_config, dict):
+        if isinstance(text_config, dict):
             # Reconstruct config from dict using the model_type stored in the dict
-            model_type = self.text_config["model_type"]
-            config_class = transformers.AutoConfig.for_model(model_type).__class__
-            self.text_config = config_class(**self.text_config)
+            text_config = _config_from_dict(text_config["model_type"], text_config)
+        self.text_config: transformers.PretrainedConfig = text_config
 
-        if isinstance(self.audio_config, dict):
-            model_type = self.audio_config.get("model_type")
-            if model_type:
-                config_class = transformers.AutoConfig.for_model(model_type).__class__
-                self.audio_config = config_class(**self.audio_config)
+        if isinstance(audio_config, dict):
+            audio_model_type = audio_config.get("model_type")
+            if audio_model_type:
+                self.audio_config = _config_from_dict(audio_model_type, audio_config)
 
         super().__init__(**kwargs)
 

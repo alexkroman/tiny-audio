@@ -3,32 +3,41 @@
 Uses pytest-mock and shared fixtures from conftest.py.
 """
 
+from typing import Any, cast
+from unittest.mock import MagicMock
+
 import pytest
 import torch
+from pytest_mock import MockerFixture
 
 from tiny_audio.asr_config import DEFAULT_ENCODER_CONV_LAYERS
+from tiny_audio.asr_modeling import ASRModel
 from tiny_audio.asr_processing import ASRProcessor
+
+
+class MockProcessor:
+    encoder_conv_layers = DEFAULT_ENCODER_CONV_LAYERS
+
+    def _compute_encoder_output_length(self, mel_length: int) -> int:
+        length = mel_length
+        for padding, kernel_size, stride in self.encoder_conv_layers:
+            length = (length + 2 * padding - (kernel_size - 1) - 1) // stride + 1
+        return length
+
+
+def _quarter(x: int) -> int:
+    return x // 4
 
 
 class TestComputeEncoderOutputLength:
     """Tests for ASRProcessor._compute_encoder_output_length method."""
 
     @pytest.fixture
-    def processor_method(self):
+    def processor_method(self) -> MockProcessor:
         """Get the method without creating full processor."""
-
-        class MockProcessor:
-            encoder_conv_layers = DEFAULT_ENCODER_CONV_LAYERS
-
-            def _compute_encoder_output_length(self, mel_length: int) -> int:
-                length = mel_length
-                for padding, kernel_size, stride in self.encoder_conv_layers:
-                    length = (length + 2 * padding - (kernel_size - 1) - 1) // stride + 1
-                return length
-
         return MockProcessor()
 
-    def test_default_conv_layers(self, processor_method):
+    def test_default_conv_layers(self, processor_method: MockProcessor) -> None:
         """Should compute correct length with default Whisper conv layers."""
         # Whisper default: [(1, 3, 1), (1, 3, 2)]
         # Layer 1: (100 + 2*1 - 2 - 1) // 1 + 1 = 100
@@ -36,12 +45,12 @@ class TestComputeEncoderOutputLength:
         result = processor_method._compute_encoder_output_length(100)
         assert result == 50
 
-    def test_single_frame(self, processor_method):
+    def test_single_frame(self, processor_method: MockProcessor) -> None:
         """Should handle single frame input."""
         result = processor_method._compute_encoder_output_length(1)
         assert result == 1
 
-    def test_large_input(self, processor_method):
+    def test_large_input(self, processor_method: MockProcessor) -> None:
         """Should handle large input lengths."""
         result = processor_method._compute_encoder_output_length(3000)
         assert result == 1500  # Halved by stride=2
@@ -50,17 +59,17 @@ class TestComputeEncoderOutputLength:
 class TestProcessorConstants:
     """Tests for ASRProcessor constants."""
 
-    def test_audio_token_defined(self):
+    def test_audio_token_defined(self) -> None:
         """AUDIO_TOKEN constant should be defined."""
         assert hasattr(ASRProcessor, "AUDIO_TOKEN")
         assert ASRProcessor.AUDIO_TOKEN == "<audio>"
 
-    def test_transcribe_prompt_defined(self):
+    def test_transcribe_prompt_defined(self) -> None:
         """TRANSCRIBE_PROMPT must match the prompt used in training (scripts/train.py)."""
         assert hasattr(ASRProcessor, "TRANSCRIBE_PROMPT")
         assert ASRProcessor.TRANSCRIBE_PROMPT == "Transcribe the speech to text"
 
-    def test_default_conv_layers(self):
+    def test_default_conv_layers(self) -> None:
         """DEFAULT_ENCODER_CONV_LAYERS should match Whisper."""
         expected = [(1, 3, 1), (1, 3, 2)]
         assert expected == DEFAULT_ENCODER_CONV_LAYERS
@@ -69,7 +78,12 @@ class TestProcessorConstants:
 class TestProcessorInit:
     """Tests for ASRProcessor initialization."""
 
-    def test_init_sets_attributes(self, mock_feature_extractor, mock_tokenizer, mock_projector):
+    def test_init_sets_attributes(
+        self,
+        mock_feature_extractor: MagicMock,
+        mock_tokenizer: MagicMock,
+        mock_projector: MagicMock,
+    ) -> None:
         """Processor should store all attributes."""
         processor = ASRProcessor(mock_feature_extractor, mock_tokenizer, mock_projector)
 
@@ -79,16 +93,22 @@ class TestProcessorInit:
         assert processor.audio_token_id == 12345
 
     def test_init_uses_default_conv_layers(
-        self, mock_feature_extractor, mock_tokenizer, mock_projector
-    ):
+        self,
+        mock_feature_extractor: MagicMock,
+        mock_tokenizer: MagicMock,
+        mock_projector: MagicMock,
+    ) -> None:
         """Should use default conv layers when not specified."""
         processor = ASRProcessor(mock_feature_extractor, mock_tokenizer, mock_projector)
 
         assert processor.encoder_conv_layers == DEFAULT_ENCODER_CONV_LAYERS
 
     def test_init_accepts_custom_conv_layers(
-        self, mock_feature_extractor, mock_tokenizer, mock_projector
-    ):
+        self,
+        mock_feature_extractor: MagicMock,
+        mock_tokenizer: MagicMock,
+        mock_projector: MagicMock,
+    ) -> None:
         """Should accept custom conv layer configuration."""
         custom_layers = [(0, 3, 2), (0, 3, 2)]
         processor = ASRProcessor(
@@ -105,7 +125,7 @@ class TestProcessorCall:
     """Tests for ASRProcessor.__call__ method."""
 
     @pytest.fixture
-    def mock_processor(self, mocker):
+    def mock_processor(self, mocker: MockerFixture) -> ASRProcessor:
         """Create processor with mocked components."""
         fe = mocker.MagicMock()
         fe.sampling_rate = 16000
@@ -123,7 +143,7 @@ class TestProcessorCall:
 
         return ASRProcessor(fe, tok, proj)
 
-    def test_call_with_audio_only(self, mock_processor):
+    def test_call_with_audio_only(self, mock_processor: ASRProcessor) -> None:
         """Should process audio and build prompt."""
         audio = torch.randn(16000)
         result = mock_processor(audio=audio)
@@ -132,31 +152,31 @@ class TestProcessorCall:
         assert "input_ids" in result
         assert "attention_mask" in result
 
-    def test_call_builds_user_message(self, mock_processor):
+    def test_call_builds_user_message(self, mock_processor: ASRProcessor) -> None:
         """Should build message with audio tokens."""
         audio = torch.randn(16000)
         mock_processor(audio=audio)
 
-        mock_processor.tokenizer.apply_chat_template.assert_called()
-        call_args = mock_processor.tokenizer.apply_chat_template.call_args
+        cast(MagicMock, mock_processor.tokenizer).apply_chat_template.assert_called()
+        call_args = cast(MagicMock, mock_processor.tokenizer).apply_chat_template.call_args
         messages = call_args[0][0]
 
         user_msg = next(m for m in messages if m["role"] == "user")
         assert "<audio>" in user_msg["content"]
 
-    def test_call_without_audio(self, mock_processor):
+    def test_call_without_audio(self, mock_processor: ASRProcessor) -> None:
         """Should handle call without audio (text-only)."""
         result = mock_processor(text="hello")
 
         assert "input_ids" in result
         assert "input_features" not in result
 
-    def test_call_with_text_adds_assistant_message(self, mock_processor):
+    def test_call_with_text_adds_assistant_message(self, mock_processor: ASRProcessor) -> None:
         """Text should be added as assistant response."""
         audio = torch.randn(16000)
         mock_processor(audio=audio, text="hello world")
 
-        call_args = mock_processor.tokenizer.apply_chat_template.call_args
+        call_args = cast(MagicMock, mock_processor.tokenizer).apply_chat_template.call_args
         messages = call_args[0][0]
 
         assistant_msgs = [m for m in messages if m["role"] == "assistant"]
@@ -168,7 +188,7 @@ class TestProcessorAudioTokenCount:
     """Tests for correct audio token counting."""
 
     @pytest.fixture
-    def processor_with_variable_attention(self, mocker):
+    def processor_with_variable_attention(self, mocker: MockerFixture) -> ASRProcessor:
         """Create processor that returns variable attention masks."""
         fe = mocker.MagicMock()
         fe.sampling_rate = 16000
@@ -178,16 +198,18 @@ class TestProcessorAudioTokenCount:
         tok.apply_chat_template.return_value = torch.tensor([[1, 2, 3]])
 
         proj = mocker.MagicMock()
-        proj.get_output_length.side_effect = lambda x: x // 4
+        proj.get_output_length.side_effect = _quarter
 
         return ASRProcessor(fe, tok, proj)
 
-    def test_audio_token_count_from_attention_mask(self, processor_with_variable_attention):
+    def test_audio_token_count_from_attention_mask(
+        self, processor_with_variable_attention: ASRProcessor
+    ) -> None:
         """Audio token count should be based on actual audio length."""
         processor = processor_with_variable_attention
 
         # Create attention mask with 80 valid frames
-        processor.feature_extractor.return_value = {
+        cast(MagicMock, processor.feature_extractor).return_value = {
             "input_features": torch.randn(1, 80, 100),
             "attention_mask": torch.cat([torch.ones(1, 80), torch.zeros(1, 20)], dim=1),
         }
@@ -195,7 +217,7 @@ class TestProcessorAudioTokenCount:
         audio = torch.randn(16000)
         processor(audio=audio)
 
-        call_args = processor.tokenizer.apply_chat_template.call_args
+        call_args = cast(MagicMock, processor.tokenizer).apply_chat_template.call_args
         messages = call_args[0][0]
         user_msg = next(m for m in messages if m["role"] == "user")
 
@@ -210,7 +232,7 @@ class TestProcessorRaggedBatch:
     """A batch of unequal-length audio must get one prompt per sample."""
 
     @pytest.fixture
-    def batch_processor(self, mocker):
+    def batch_processor(self, mocker: MockerFixture) -> ASRProcessor:
         """Processor over a 2-sample batch: 80 valid mel frames vs 40."""
         fe = mocker.MagicMock()
         fe.sampling_rate = 16000
@@ -227,24 +249,26 @@ class TestProcessorRaggedBatch:
         tok = mocker.MagicMock()
         tok.convert_tokens_to_ids.return_value = 12345
         tok.pad_token_id = 0
+
         # One id per audio placeholder, so row length tracks the count.
-        tok.apply_chat_template.side_effect = lambda messages, **kw: torch.tensor(
-            [[12345] * messages[0]["content"].count("<audio>")]
-        )
+        def render(messages: list[dict[str, str]], **kw: Any) -> torch.Tensor:
+            return torch.tensor([[12345] * messages[0]["content"].count("<audio>")])
+
+        tok.apply_chat_template.side_effect = render
 
         proj = mocker.MagicMock()
-        proj.get_output_length.side_effect = lambda x: x // 4
+        proj.get_output_length.side_effect = _quarter
 
         return ASRProcessor(fe, tok, proj)
 
-    def test_prompt_rows_match_batch_size(self, batch_processor):
+    def test_prompt_rows_match_batch_size(self, batch_processor: ASRProcessor) -> None:
         """`input_ids` must have one row per audio sample, not one row total."""
         result = batch_processor(audio=[torch.randn(16000), torch.randn(8000)])
 
         assert result["input_ids"].shape[0] == result["input_features"].shape[0] == 2
         assert result["attention_mask"].shape == result["input_ids"].shape
 
-    def test_each_row_gets_its_own_token_count(self, batch_processor):
+    def test_each_row_gets_its_own_token_count(self, batch_processor: ASRProcessor) -> None:
         """Sizing every row from the batch max over-counts the shorter rows.
 
         Encoder: 80 -> 40 and 40 -> 20; projector: // 4 -> 10 and 5. The
@@ -257,14 +281,16 @@ class TestProcessorRaggedBatch:
         counts = [int((row == batch_processor.audio_token_id).sum()) for row in result["input_ids"]]
         assert counts == [10, 5]
 
-    def test_shorter_row_is_left_padded(self, batch_processor):
+    def test_shorter_row_is_left_padded(self, batch_processor: ASRProcessor) -> None:
         """Padding goes on the left so it never sits before the first new token."""
         result = batch_processor(audio=[torch.randn(16000), torch.randn(8000)])
 
         short = result["attention_mask"][1]
         assert short.tolist() == [0] * 5 + [1] * 5
 
-    def test_projector_is_required_for_audio(self, mock_feature_extractor, mock_tokenizer):
+    def test_projector_is_required_for_audio(
+        self, mock_feature_extractor: MagicMock, mock_tokenizer: MagicMock
+    ) -> None:
         """Without a projector the token count is unknowable -- say so."""
         processor = ASRProcessor(mock_feature_extractor, mock_tokenizer)
 
@@ -276,15 +302,21 @@ class TestProcessorAudioToken:
     """The placeholder token must come from the config, not a hardcoded default."""
 
     def test_defaults_to_class_constant(
-        self, mock_feature_extractor, mock_tokenizer, mock_projector
-    ):
+        self,
+        mock_feature_extractor: MagicMock,
+        mock_tokenizer: MagicMock,
+        mock_projector: MagicMock,
+    ) -> None:
         processor = ASRProcessor(mock_feature_extractor, mock_tokenizer, mock_projector)
 
         assert processor.audio_token == ASRProcessor.AUDIO_TOKEN
 
     def test_accepts_native_decoder_token(
-        self, mock_feature_extractor, mock_tokenizer, mock_projector
-    ):
+        self,
+        mock_feature_extractor: MagicMock,
+        mock_tokenizer: MagicMock,
+        mock_projector: MagicMock,
+    ) -> None:
         """Gemma 4's placeholder is its own pretrained "<|audio|>", not "<audio>"."""
         processor = ASRProcessor(
             mock_feature_extractor,
@@ -297,8 +329,11 @@ class TestProcessorAudioToken:
         mock_tokenizer.convert_tokens_to_ids.assert_called_with("<|audio|>")
 
     def test_prompt_uses_configured_token(
-        self, mock_feature_extractor, mock_tokenizer, mock_projector
-    ):
+        self,
+        mock_feature_extractor: MagicMock,
+        mock_tokenizer: MagicMock,
+        mock_projector: MagicMock,
+    ) -> None:
         """The prompt must repeat the configured token, or masked_scatter mismatches."""
         mock_projector.get_output_length.return_value = 3
         mock_tokenizer.apply_chat_template.return_value = torch.tensor([[1, 2, 3]])
@@ -316,7 +351,7 @@ class TestProcessorAudioToken:
         assert user_content.startswith("<|audio|>" * 3)
         assert "<audio>" not in user_content
 
-    def test_model_processor_inherits_config_token(self, base_asr_model):
+    def test_model_processor_inherits_config_token(self, base_asr_model: ASRModel) -> None:
         """ASRModel.get_processor must forward its resolved audio_token."""
         processor = base_asr_model.get_processor()
 

@@ -10,7 +10,9 @@ from tiny_audio import alignment
     ("cuda", "mps", "expected"),
     [(True, True, "cuda"), (False, True, "mps"), (False, False, "cpu")],
 )
-def test_get_device_prefers_cuda_then_mps(monkeypatch, cuda, mps, expected):
+def test_get_device_prefers_cuda_then_mps(
+    monkeypatch: pytest.MonkeyPatch, cuda: bool, mps: bool, expected: str
+) -> None:
     monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda)
     monkeypatch.setattr(torch.backends.mps, "is_available", lambda: mps)
     assert alignment._get_device() == expected

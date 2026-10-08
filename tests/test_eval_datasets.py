@@ -9,7 +9,7 @@ from scripts.eval.datasets import (
 class TestDatasetConfig:
     """Tests for DatasetConfig dataclass."""
 
-    def test_create_minimal_config(self):
+    def test_create_minimal_config(self) -> None:
         """Test creating config with minimal required fields."""
         config = DatasetConfig(
             path="test/path",
@@ -20,7 +20,7 @@ class TestDatasetConfig:
         assert config.text_field == "text"  # Default
         assert config.default_split == "test"  # Default
 
-    def test_create_full_config(self):
+    def test_create_full_config(self) -> None:
         """Test creating config with all fields."""
         config = DatasetConfig(
             path="test/path",
@@ -37,11 +37,11 @@ class TestDatasetConfig:
 class TestDatasetRegistry:
     """Tests for the dataset registry."""
 
-    def test_registry_not_empty(self):
+    def test_registry_not_empty(self) -> None:
         """Test that registry contains datasets."""
         assert len(DATASET_REGISTRY) > 0
 
-    def test_required_asr_datasets(self):
+    def test_required_asr_datasets(self) -> None:
         """Test that common ASR datasets are registered."""
         required_datasets = [
             "loquacious",
@@ -57,14 +57,14 @@ class TestDatasetRegistry:
         for name in required_datasets:
             assert name in DATASET_REGISTRY, f"Missing dataset: {name}"
 
-    def test_all_configs_have_required_fields(self):
+    def test_all_configs_have_required_fields(self) -> None:
         """Test that all configs have required fields."""
         for name, config in DATASET_REGISTRY.items():
             assert config.path, f"Missing path for {name}"
             assert config.audio_field, f"Missing audio_field for {name}"
             assert config.text_field, f"Missing text_field for {name}"
 
-    def test_loquacious_config(self):
+    def test_loquacious_config(self) -> None:
         """Test specific config for loquacious dataset."""
         config = DATASET_REGISTRY["loquacious"]
         assert config.path == "speechbrain/LoquaciousSet"
@@ -72,14 +72,14 @@ class TestDatasetRegistry:
         assert config.audio_field == "wav"
         assert config.text_field == "text"
 
-    def test_earnings22_config(self):
+    def test_earnings22_config(self) -> None:
         """Test specific config for earnings22 dataset."""
         config = DATASET_REGISTRY["earnings22"]
         assert config.path == "sanchit-gandhi/earnings22_robust_split"
         assert config.audio_field == "audio"
         assert config.text_field == "sentence"
 
-    def test_ami_config(self):
+    def test_ami_config(self) -> None:
         """Test specific config for AMI dataset."""
         config = DATASET_REGISTRY["ami"]
         assert config.path == "edinburghcstr/ami"
@@ -89,7 +89,7 @@ class TestDatasetRegistry:
 class TestDatasetValidation:
     """Tests for dataset configuration validation."""
 
-    def test_default_splits_are_valid(self):
+    def test_default_splits_are_valid(self) -> None:
         """Test that default splits are reasonable values."""
         valid_splits = {"test", "validation", "dev", "train"}
         for name, config in DATASET_REGISTRY.items():

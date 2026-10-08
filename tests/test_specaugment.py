@@ -7,6 +7,7 @@ most of its spans landed in padding.
 """
 
 from types import SimpleNamespace
+from unittest.mock import NonCallableMock
 
 import pytest
 import torch
@@ -15,9 +16,9 @@ from conftest import stub
 from tiny_audio.asr_modeling import ASRModel
 
 
-def make_masker(**config_fields):
+def make_masker(**config_fields: object) -> NonCallableMock:
     """Minimal stand-in exposing just what _mask_input_features touches."""
-    defaults = {
+    defaults: dict[str, object] = {
         "audio_features_time_major": False,
         "mask_time_prob": 0.05,
         "mask_time_length": 10,
@@ -32,7 +33,7 @@ def make_masker(**config_fields):
 class TestSampleMaskIndices:
     """_sample_mask_indices: shape, span count, and valid-length confinement."""
 
-    def test_shape_and_dtype(self):
+    def test_shape_and_dtype(self) -> None:
         mask = ASRModel._sample_mask_indices(
             batch_size=3,
             axis_length=200,
@@ -44,7 +45,7 @@ class TestSampleMaskIndices:
         assert mask.shape == (3, 200)
         assert mask.dtype == torch.bool
 
-    def test_no_valid_lengths_spans_full_axis(self):
+    def test_no_valid_lengths_spans_full_axis(self) -> None:
         """Without valid_lengths the whole axis is fair game."""
         mask = ASRModel._sample_mask_indices(
             batch_size=1,
@@ -58,7 +59,7 @@ class TestSampleMaskIndices:
         # across the whole axis.
         assert mask[0, 500:].any()
 
-    def test_valid_lengths_confine_spans(self):
+    def test_valid_lengths_confine_spans(self) -> None:
         """Every masked position must sit inside the sample's real length."""
         valid = 100
         for _ in range(25):  # sampling is random; repeat to catch leakage
@@ -74,7 +75,7 @@ class TestSampleMaskIndices:
             assert not mask[0, valid:].any(), "span leaked into padding"
             assert mask[0, :valid].any(), "short sample got no augmentation"
 
-    def test_span_count_scales_with_valid_length(self):
+    def test_span_count_scales_with_valid_length(self) -> None:
         """A long sample earns more spans than a short one in the same batch."""
         mask = ASRModel._sample_mask_indices(
             batch_size=2,
@@ -90,7 +91,7 @@ class TestSampleMaskIndices:
         assert mask[0].sum() <= 2 * 10
         assert mask[1].sum() > mask[0].sum()
 
-    def test_min_masks_floor_applies_to_short_samples(self):
+    def test_min_masks_floor_applies_to_short_samples(self) -> None:
         """min_masks still holds when the proportional count rounds to zero."""
         mask = ASRModel._sample_mask_indices(
             batch_size=1,
@@ -103,7 +104,7 @@ class TestSampleMaskIndices:
         )
         assert mask[0].any()
 
-    def test_zero_spans_returns_empty_mask(self):
+    def test_zero_spans_returns_empty_mask(self) -> None:
         mask = ASRModel._sample_mask_indices(
             batch_size=2,
             axis_length=100,
@@ -114,7 +115,7 @@ class TestSampleMaskIndices:
         )
         assert not mask.any()
 
-    def test_valid_length_shorter_than_mask_length(self):
+    def test_valid_length_shorter_than_mask_length(self) -> None:
         """A clip shorter than one span still gets masked, without indexing off."""
         mask = ASRModel._sample_mask_indices(
             batch_size=1,
@@ -131,7 +132,7 @@ class TestSampleMaskIndices:
 class TestMaskInputFeatures:
     """_mask_input_features: axis handling and attention_mask plumbing."""
 
-    def test_attention_mask_confines_time_masks(self):
+    def test_attention_mask_confines_time_masks(self) -> None:
         """The padded-axis regression: a 1s clip batched with a 19s clip."""
         masker = make_masker()
         features = torch.ones(2, 80, 3000)
@@ -147,13 +148,13 @@ class TestMaskInputFeatures:
         # And it did get augmented rather than skipped.
         assert zeroed[0, :, :100].any()
 
-    def test_without_attention_mask_uses_full_axis(self):
+    def test_without_attention_mask_uses_full_axis(self) -> None:
         masker = make_masker(mask_time_prob=0.5)
         features = torch.ones(1, 80, 1000)
         out = ASRModel._mask_input_features(masker, features, None)
         assert (out == 0).any()
 
-    def test_mismatched_attention_mask_raises(self):
+    def test_mismatched_attention_mask_raises(self) -> None:
         """Masking the wrong axis is silent, so a shape mismatch must be loud."""
         masker = make_masker()
         features = torch.ones(2, 80, 3000)
@@ -161,7 +162,7 @@ class TestMaskInputFeatures:
         with pytest.raises(ValueError, match="does not match input_features"):
             ASRModel._mask_input_features(masker, features, bad_mask)
 
-    def test_time_major_layout(self):
+    def test_time_major_layout(self) -> None:
         """Conformer encoders hand us (batch, time, feature)."""
         masker = make_masker(audio_features_time_major=True)
         features = torch.ones(2, 400, 64)
@@ -175,7 +176,7 @@ class TestMaskInputFeatures:
         assert not zeroed[0, 50:, :].any()
         assert zeroed[0, :50, :].any()
 
-    def test_input_is_not_mutated(self):
+    def test_input_is_not_mutated(self) -> None:
         masker = make_masker(mask_time_prob=0.5)
         features = torch.ones(1, 80, 1000)
         original = features.clone()

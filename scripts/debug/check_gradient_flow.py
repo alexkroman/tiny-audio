@@ -23,9 +23,12 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
+from collections.abc import Iterable
 from enum import StrEnum
-from typing import Annotated, cast
+from typing import Annotated, Any, NamedTuple, TypedDict, cast
 
+import numpy as np
+import numpy.typing as npt
 import torch
 import typer
 from omegaconf import OmegaConf
@@ -35,7 +38,17 @@ from scripts.train import decay_parameter_ids
 from scripts.utils import get_project_root
 from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
-from tiny_audio.projectors import MLPAudioProjector
+from tiny_audio.asr_types import AudioFeatureExtractor
+
+
+class ParamGroup(TypedDict):
+    """One optimizer param group as ASRTrainer would build it, plus audit fields."""
+
+    label: str
+    params: list[torch.nn.Parameter]
+    param_names: list[str]
+    lr: float | None
+    wd: float | None
 
 
 def load_embedded_training_knobs() -> dict[str, float | None]:
@@ -55,9 +68,10 @@ def load_embedded_training_knobs() -> dict[str, float | None]:
             "projector_weight_decay": None,
         }
     cfg = OmegaConf.to_container(OmegaConf.load(yaml_path))
-    training = (cfg.get("training") if isinstance(cfg, dict) else None) or {}
+    root = cfg if isinstance(cfg, dict) else {}
+    training: dict[str, Any] = root.get("training") or {}
 
-    def _to_float(v):
+    def _to_float(v: Any) -> float | None:
         return float(v) if v is not None else None
 
     return {
@@ -71,7 +85,7 @@ def load_embedded_training_knobs() -> dict[str, float | None]:
 def build_param_groups(
     model: ASRModel,
     knobs: dict[str, float | None],
-) -> list[dict]:
+) -> list[ParamGroup]:
     """Mirror scripts/train.py ASRTrainer.create_optimizer's four-group split.
 
     Groups: (is_decoder, decay) for is_decoder in {False, True} and
@@ -111,7 +125,7 @@ def build_param_groups(
         (True, True): ("decoder   / decay", dec_lr, dec_wd),
         (True, False): ("decoder   / no-decay", dec_lr, 0.0),
     }
-    groups: list[dict] = []
+    groups: list[ParamGroup] = []
     for key, items in buckets.items():
         label, lr, wd = labels[key]
         groups.append(
@@ -126,7 +140,7 @@ def build_param_groups(
     return groups
 
 
-def effective_update_norms(groups: list[dict]) -> dict[str, float]:
+def effective_update_norms(groups: list[ParamGroup]) -> dict[str, float]:
     """SGD-style lr x ||grad|| approximation aggregated to projector/decoder.
 
     NOT Adam's true update: Adam normalizes per-parameter by sqrt(v) + eps,
@@ -137,10 +151,11 @@ def effective_update_norms(groups: list[dict]) -> dict[str, float]:
     proj_total = 0.0
     dec_total = 0.0
     for g in groups:
-        if g["lr"] is None or not g["params"]:
+        lr = g["lr"]
+        if lr is None or not g["params"]:
             continue
         gn = grad_norm(g["params"])
-        contribution = g["lr"] * gn
+        contribution = lr * gn
         if g["label"].startswith("projector"):
             proj_total += contribution
         else:
@@ -209,11 +224,14 @@ def synthetic_batch(
     audio_seconds: float = 4.0,
     response: str = "hello world this is a gradient flow test",
 ) -> dict[str, torch.Tensor]:
-    """Build a batch shaped exactly like train.DataCollator output."""
+    """Build a batch shaped exactly like train_collator.DataCollator output."""
     sr = model.feature_extractor.sampling_rate
     n_samples = int(audio_seconds * sr)
-    audio_arrays = [torch.randn(n_samples).numpy() for _ in range(batch_size)]
-    audio_out = model.feature_extractor(
+    audio_arrays: list[npt.NDArray[np.float32]] = [
+        torch.randn(n_samples).numpy() for _ in range(batch_size)
+    ]
+    feature_extractor = cast(AudioFeatureExtractor, model.feature_extractor)
+    audio_out = feature_extractor(
         audio_arrays,
         sampling_rate=sr,
         padding="longest",
@@ -221,7 +239,11 @@ def synthetic_batch(
         return_tensors="pt",
     )
 
-    enc_lengths = model._compute_encoder_output_lengths(audio_out.attention_mask)
+    audio_attention_mask: torch.Tensor = audio_out["attention_mask"]
+    input_features: torch.Tensor = audio_out["input_features"]
+    # A probe of ASRModel internals: it reproduces what forward() computes.
+    encoder_lengths = model._compute_encoder_output_lengths  # pyright: ignore[reportPrivateUsage]
+    enc_lengths = encoder_lengths(audio_attention_mask)
     token_counts = model.projector.get_output_length(enc_lengths).to(torch.long)
 
     tok = model.tokenizer
@@ -243,6 +265,8 @@ def synthetic_batch(
             add_generation_prompt=True,
             enable_thinking=False,
         )
+        assert isinstance(full_text, str)
+        assert isinstance(prompt_text, str)
         full_ids = tok(full_text, add_special_tokens=False)["input_ids"]
         prompt_ids = tok(prompt_text, add_special_tokens=False)["input_ids"]
         sample_labels = [-100] * len(prompt_ids) + list(full_ids[len(prompt_ids) :])
@@ -250,8 +274,10 @@ def synthetic_batch(
         samples_input_ids.append(list(full_ids))
         samples_labels.append(sample_labels)
 
+    pad_id = tok.pad_token_id
+    assert isinstance(pad_id, int)
     ids_t = [torch.tensor(ids, dtype=torch.long) for ids in samples_input_ids]
-    input_ids = pad_sequence(ids_t, batch_first=True, padding_value=tok.pad_token_id)
+    input_ids = pad_sequence(ids_t, batch_first=True, padding_value=pad_id)
     attention_mask = pad_sequence([torch.ones_like(t) for t in ids_t], batch_first=True)
     labels = pad_sequence(
         [torch.tensor(lab, dtype=torch.long) for lab in samples_labels],
@@ -263,13 +289,13 @@ def synthetic_batch(
         "input_ids": input_ids,
         "attention_mask": attention_mask,
         "labels": labels,
-        "input_features": audio_out.input_features,
-        "audio_attention_mask": audio_out.attention_mask,
+        "input_features": input_features,
+        "audio_attention_mask": audio_attention_mask,
         "audio_token_counts": token_counts,
     }
 
 
-def grad_norm(params) -> float:
+def grad_norm(params: Iterable[torch.nn.Parameter]) -> float:
     total = 0.0
     for p in params:
         if p.grad is None:
@@ -278,17 +304,8 @@ def grad_norm(params) -> float:
     return math.sqrt(total)
 
 
-def projector_submodule_norms(model: ASRModel) -> dict[str, float] | None:
-    """Per-named-submodule grad norms for the MLP projector.
-
-    Returns None for non-MLP projectors so the caller can print a skip note;
-    the other projector types (MOSA, MoE, QFormer) have different internal
-    structures and would each need their own carve-up (out of scope per the
-    design spec).
-    """
-    if not isinstance(model.projector, MLPAudioProjector):
-        return None
-
+def projector_submodule_norms(model: ASRModel) -> dict[str, float]:
+    """Per-named-submodule grad norms for the MLP projector."""
     norms: dict[str, float] = {}
     for name, param in model.projector.named_parameters():
         if param.grad is None:
@@ -297,15 +314,42 @@ def projector_submodule_norms(model: ASRModel) -> dict[str, float] | None:
     return norms
 
 
-def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
-    print(f"== embedded.yaml gradient flow probe ({dtype}, {device}) ==\n")
+class _Component(NamedTuple):
+    """.grad coverage and gradient norm of one top-level component."""
 
+    with_grad: int
+    total: int
+    norm: float
+
+
+def _component_grads(module: torch.nn.Module) -> _Component:
+    """Count a module's params that got .grad, and their combined grad norm."""
+    params = list(module.parameters())
+    with_grad = sum(1 for p in params if p.grad is not None)
+    return _Component(with_grad, len(params), grad_norm(params))
+
+
+class _Routing(NamedTuple):
+    """Optimizer param groups plus the routing-audit counts from section [9]."""
+
+    knobs: dict[str, float | None]
+    groups: list[ParamGroup]
+    total_routed: int
+    expected_trainable: int
+    encoder_in_groups: int
+
+
+def _print_parameter_summary(model: ASRModel) -> None:
+    """[1] Trainable / total parameter counts per top-level submodule."""
     print("[1] Parameter summary (trainable / total):")
     for top, (tr, tot) in sorted(parameter_summary(model).items()):
         pct = 100 * tr / tot if tot else 0.0
         print(f"    {top:18s} {tr:>14,d} / {tot:>14,d}  ({pct:5.1f}%)")
     print()
 
+
+def _forward_pass(model: ASRModel, dtype: torch.dtype, device: str) -> torch.Tensor:
+    """[2] Run one synthetic labelled forward and print loss/logit finiteness."""
     batch = synthetic_batch(model)
     batch = {k: v.to(device) for k, v in batch.items()}
     if "input_features" in batch:
@@ -320,7 +364,7 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
     # only exists on liger's patched forward, so it is gated on the same flag
     # ASRModel uses.
     forward_kwargs: dict[str, bool] = {}
-    if model._lm_accepts_skip_logits:
+    if model._lm_accepts_skip_logits:  # pyright: ignore[reportPrivateUsage]
         forward_kwargs["skip_logits"] = False
     outputs = model(**batch, **forward_kwargs)
     loss = outputs.loss
@@ -333,76 +377,70 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
             f"finite={torch.isfinite(outputs.logits).all().item()}"
         )
     print()
+    return loss
 
-    print("[3] Backward pass...")
-    loss.backward()
 
-    encoder_params = list(model.audio_tower.parameters())
-    projector_params = list(model.projector.parameters())
-    lm_params = list(model.language_model.parameters())
-
-    enc_with_grad = sum(1 for p in encoder_params if p.grad is not None)
-    proj_with_grad = sum(1 for p in projector_params if p.grad is not None)
-    lm_with_grad = sum(1 for p in lm_params if p.grad is not None)
-
-    print(
-        f"    encoder   params with .grad: {enc_with_grad}/{len(encoder_params)} "
-        f"(expected 0 — frozen)"
-    )
-    print(
-        f"    projector params with .grad: {proj_with_grad}/{len(projector_params)} (expected all)"
-    )
-    print(f"    decoder   params with .grad: {lm_with_grad}/{len(lm_params)} (expected all)")
+def _print_grad_coverage(enc: _Component, proj: _Component, lm: _Component) -> None:
+    """[3] (after backward) How many params of each component received .grad."""
+    print(f"    encoder   params with .grad: {enc.with_grad}/{enc.total} (expected 0 — frozen)")
+    print(f"    projector params with .grad: {proj.with_grad}/{proj.total} (expected all)")
+    print(f"    decoder   params with .grad: {lm.with_grad}/{lm.total} (expected all)")
     print()
 
-    enc_norm = grad_norm(encoder_params)
-    proj_norm = grad_norm(projector_params)
-    lm_norm = grad_norm(lm_params)
+
+def _print_grad_norms(enc: _Component, proj: _Component, lm: _Component) -> None:
+    """[4] Per-component gradient norms and the projector/decoder ratio."""
     print("[4] Gradient norms:")
-    print(f"    ||grad_encoder||   = {enc_norm:.6e}")
-    print(f"    ||grad_projector|| = {proj_norm:.6e}")
-    print(f"    ||grad_decoder||   = {lm_norm:.6e}")
-    if lm_norm > 0:
-        print(f"    projector / decoder norm ratio = {proj_norm / lm_norm:.3f}")
+    print(f"    ||grad_encoder||   = {enc.norm:.6e}")
+    print(f"    ||grad_projector|| = {proj.norm:.6e}")
+    print(f"    ||grad_decoder||   = {lm.norm:.6e}")
+    if lm.norm > 0:
+        print(f"    projector / decoder norm ratio = {proj.norm / lm.norm:.3f}")
     print()
 
+
+def _print_projector_submodules(model: ASRModel) -> dict[str, float]:
+    """[4b] Projector submodule gradient norms, relative to the largest."""
     sub_norms = projector_submodule_norms(model)
-    if sub_norms is None:
-        print(
-            "[4b] Projector submodule gradient norms: "
-            f"(skipped — projector is {type(model.projector).__name__}, not MLPAudioProjector)"
-        )
-    else:
-        print("[4b] Projector submodule gradient norms:")
-        max_norm = max(sub_norms.values())
-        for name, n in sub_norms.items():
-            ratio = (n / max_norm) if max_norm > 0 else 0.0
-            print(f"    {name:18s} ||grad|| = {n:.6e}  ({ratio:5.2f}x of max)")
+    print("[4b] Projector submodule gradient norms:")
+    max_norm = max(sub_norms.values())
+    for name, n in sub_norms.items():
+        ratio = (n / max_norm) if max_norm > 0 else 0.0
+        print(f"    {name:18s} ||grad|| = {n:.6e}  ({ratio:5.2f}x of max)")
     print()
+    return sub_norms
 
+
+def _decoder_group_key(name: str) -> str:
+    """Bucket a decoder parameter name into its breakdown group."""
+    if "embed_tokens" in name:
+        return "embed_tokens"
+    if name.endswith("lm_head.weight"):
+        return "lm_head"
+    if ".self_attn." in name:
+        return "attn"
+    if ".mlp." in name:
+        return "mlp"
+    if "norm" in name:
+        return "norm"
+    return "other"
+
+
+def _print_decoder_breakdown(model: ASRModel) -> None:
+    """[5] Decoder gradient norms grouped by embed/attn/mlp/norm/lm_head."""
     print("[5] Per-submodule gradient norms (decoder breakdown):")
-    decoder_groups: dict[str, list] = defaultdict(list)
+    decoder_groups: defaultdict[str, list[torch.nn.Parameter]] = defaultdict(list)
     for name, p in model.language_model.named_parameters():
-        if p.grad is None:
-            continue
-        if "embed_tokens" in name:
-            key = "embed_tokens"
-        elif name.endswith("lm_head.weight"):
-            key = "lm_head"
-        elif ".self_attn." in name:
-            key = "attn"
-        elif ".mlp." in name:
-            key = "mlp"
-        elif "norm" in name:
-            key = "norm"
-        else:
-            key = "other"
-        decoder_groups[key].append(p)
+        if p.grad is not None:
+            decoder_groups[_decoder_group_key(name)].append(p)
     for key in ("embed_tokens", "attn", "mlp", "norm", "lm_head", "other"):
         if key in decoder_groups:
             print(f"    {key:14s} ||grad|| = {grad_norm(decoder_groups[key]):.6e}")
     print()
 
+
+def _print_audio_token_rows(model: ASRModel) -> None:
+    """[6] Gradient on the <audio> row of the input embedding and lm_head."""
     print("[6] <audio>-token row gradient (sanity check):")
     audio_id = model.audio_token_id
     # The input embedding is an nn.Embedding and the output head an nn.Linear;
@@ -413,7 +451,7 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
         row_grad = embed_weight.grad[audio_id].detach().float()
         print(f"    embed_tokens[<audio>] ||grad|| = {row_grad.norm().item():.6e}")
         print("    (should be zero if labels mask user prompt and no assistant token is <audio>)")
-    out_emb = model.language_model.get_output_embeddings()
+    out_emb = model.get_output_embeddings()
     out_weight = out_emb.weight if out_emb is not None else None
     assert out_weight is None or isinstance(out_weight, torch.Tensor)
     tied = out_weight is not None and out_weight.data_ptr() == embed_weight.data_ptr()
@@ -425,18 +463,23 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
         print(f"    lm_head tied to embed_tokens: {tied}")
     print()
 
+
+def _scan_nonfinite_grads(model: ASRModel) -> int:
+    """[7] Print every param with a NaN/Inf grad; return how many there were."""
     print("[7] NaN / Inf scan over all grads:")
     bad = 0
     for name, p in model.named_parameters():
-        if p.grad is None:
-            continue
-        if not torch.isfinite(p.grad).all():
+        if p.grad is not None and not torch.isfinite(p.grad).all():
             bad += 1
             print(f"    !! non-finite grad in {name}")
     if bad == 0:
         print("    all grads finite")
     print()
+    return bad
 
+
+def _print_optimizer_routing(model: ASRModel) -> _Routing:
+    """[9] Build ASRTrainer-style param groups and audit their coverage."""
     print("[9] Optimizer param-group routing (mirrors scripts/train.py ASRTrainer):")
     knobs = load_embedded_training_knobs()
     groups = build_param_groups(model, knobs)
@@ -462,16 +505,18 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
         f"({'no orphans' if total_routed == expected_trainable else 'ORPHANS PRESENT'})"
     )
 
-    encoder_in_groups = 0
     encoder_param_ptrs = {p.data_ptr() for p in model.audio_tower.parameters()}
-    for g in groups:
-        for p in g["params"]:
-            if p.data_ptr() in encoder_param_ptrs:
-                encoder_in_groups += 1
+    encoder_in_groups = sum(
+        1 for g in groups for p in g["params"] if p.data_ptr() in encoder_param_ptrs
+    )
     if encoder_in_groups:
         print(f"    !! encoder params in optimizer groups: {encoder_in_groups} (should be 0)")
     print()
+    return _Routing(knobs, groups, total_routed, expected_trainable, encoder_in_groups)
 
+
+def _print_effective_update(groups: list[ParamGroup]) -> None:
+    """[10] lr x ||grad|| per side, a sanity check on the LR split."""
     eff = effective_update_norms(groups)
     print("[10] Effective per-step update estimate (lr \u00d7 ||grad||, SGD-style approximation):")
     print(f"    projector contribution: {eff['projector']:.2e}")
@@ -482,20 +527,38 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
     print("          sanity check on the LR split, not a literal step magnitude.")
     print()
 
-    print("[11] Verdict:")
-    issues = []
-    warnings: list[str] = []
 
-    if enc_with_grad != 0 or enc_norm != 0.0:
+def _verdict_issues(
+    enc: _Component, proj: _Component, lm: _Component, bad: int, routing: _Routing
+) -> list[str]:
+    """Hard failures: wrong grad flow, non-finite grads, or misrouted params."""
+    issues: list[str] = []
+    if enc.with_grad != 0 or enc.norm != 0.0:
         issues.append("encoder is receiving gradient (should be frozen)")
-    if proj_with_grad != len(projector_params) or proj_norm == 0.0:
+    if proj.with_grad != proj.total or proj.norm == 0.0:
         issues.append("projector grads incomplete or zero")
-    if lm_with_grad != len(lm_params) or lm_norm == 0.0:
+    if lm.with_grad != lm.total or lm.norm == 0.0:
         issues.append("decoder grads incomplete or zero")
     if bad:
         issues.append(f"{bad} param(s) have non-finite grads")
+    # Optimizer-routing audit (relies on the counts from [9])
+    if routing.total_routed != routing.expected_trainable:
+        issues.append(
+            f"optimizer group routing: {routing.total_routed} routed "
+            f"vs {routing.expected_trainable} trainable (orphans)"
+        )
+    if routing.encoder_in_groups:
+        issues.append(
+            f"optimizer group routing: {routing.encoder_in_groups} frozen "
+            "encoder param(s) ended up in an optimizer group"
+        )
+    return issues
 
-    # New: projector linear_1 starvation check (relies on [4b])
+
+def _verdict_warnings(sub_norms: dict[str, float], knobs: dict[str, float | None]) -> list[str]:
+    """Soft findings: a starved projector linear_1, or LRs off the designed values."""
+    warnings: list[str] = []
+    # Projector linear_1 starvation check (relies on [4b])
     if sub_norms:
         max_sub = max(sub_norms.values())
         linear_1_norm = sub_norms.get("linear_1.weight", 0.0)
@@ -504,18 +567,6 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
                 "projector linear_1 < 1% of max submodule grad — RMSNorm-init "
                 "claim at projectors.py:30 may be wrong; verify before relying on it"
             )
-
-    # New: optimizer-routing audit (relies on the counts and knobs from [9])
-    if total_routed != expected_trainable:
-        issues.append(
-            f"optimizer group routing: {total_routed} routed "
-            f"vs {expected_trainable} trainable (orphans)"
-        )
-    if encoder_in_groups:
-        issues.append(
-            f"optimizer group routing: {encoder_in_groups} frozen "
-            "encoder param(s) ended up in an optimizer group"
-        )
     # LR/WD mismatch vs embedded.yaml. Only check when knobs were readable.
     if knobs["learning_rate"] is not None and knobs["learning_rate"] != 1e-3:
         warnings.append(
@@ -527,10 +578,14 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
             f"embedded.yaml decoder_learning_rate={knobs['decoder_learning_rate']} "
             "differs from the 1e-4 this probe was designed against"
         )
+    return warnings
 
-    if issues:
-        for s in issues:
-            print(f"    [FAIL] {s}")
+
+def _print_verdict(issues: list[str], warnings: list[str]) -> None:
+    """[11] FAIL/WARN lines, or the all-clear summary when nothing failed."""
+    print("[11] Verdict:")
+    for s in issues:
+        print(f"    [FAIL] {s}")
     for w in warnings:
         print(f"    [WARN] {w}")
     if not issues:
@@ -539,6 +594,33 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
         print("         - projector + decoder fully trainable, all params got grad")
         print("         - all grads finite")
         print("         - optimizer groups route every trainable param exactly once")
+
+
+def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
+    """Run one forward + backward and print every audit section, then a verdict."""
+    print(f"== embedded.yaml gradient flow probe ({dtype}, {device}) ==\n")
+    _print_parameter_summary(model)
+    loss = _forward_pass(model, dtype, device)
+
+    print("[3] Backward pass...")
+    loss.backward()
+    enc = _component_grads(model.audio_tower)
+    proj = _component_grads(model.projector)
+    lm = _component_grads(model.language_model)
+    _print_grad_coverage(enc, proj, lm)
+    _print_grad_norms(enc, proj, lm)
+
+    sub_norms = _print_projector_submodules(model)
+    _print_decoder_breakdown(model)
+    _print_audio_token_rows(model)
+    bad = _scan_nonfinite_grads(model)
+    routing = _print_optimizer_routing(model)
+    _print_effective_update(routing.groups)
+
+    _print_verdict(
+        _verdict_issues(enc, proj, lm, bad, routing),
+        _verdict_warnings(sub_norms, routing.knobs),
+    )
 
 
 class Dtype(StrEnum):

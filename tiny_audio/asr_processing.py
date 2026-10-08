@@ -1,31 +1,51 @@
 """Processor that turns raw audio (and optional text) into model inputs."""
 
-from typing import TYPE_CHECKING, Any, ClassVar, Union
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Any, ClassVar, cast, overload
 
 import numpy as np
+import numpy.typing as npt
 import torch
 import transformers
 from torch.nn.utils.rnn import pad_sequence
-from transformers import BatchFeature, ProcessorMixin
+from transformers import (
+    BatchFeature,
+    PreTrainedTokenizerBase,
+    ProcessorMixin,
+    SequenceFeatureExtractor,
+)
 
 if TYPE_CHECKING:
-    from .asr_config import DEFAULT_ENCODER_CONV_LAYERS, ASRConfig, compute_encoder_output_length
+    from .asr_config import (
+        DEFAULT_ENCODER_CONV_LAYERS,
+        ASRConfig,
+        ConvLayerSpec,
+        compute_encoder_output_length,
+    )
+    from .asr_types import AudioFeatureExtractor, AudioInput, Waveform
+    from .projectors import MLPAudioProjector
 else:
     try:
         from .asr_config import (
             DEFAULT_ENCODER_CONV_LAYERS,
             ASRConfig,
+            ConvLayerSpec,
             compute_encoder_output_length,
         )
+        from .asr_types import AudioInput
     except ImportError:  # flat layout on the Hub: sibling modules, no package
         from asr_config import (
             DEFAULT_ENCODER_CONV_LAYERS,
             ASRConfig,
+            ConvLayerSpec,
             compute_encoder_output_length,
         )
+        from asr_types import AudioInput
 
 
-def left_pad_prompt_rows(rows: list[torch.Tensor], tokenizer) -> tuple[torch.Tensor, torch.Tensor]:
+def left_pad_prompt_rows(
+    rows: list[torch.Tensor], tokenizer: PreTrainedTokenizerBase
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Stack per-sample prompt rows into a left-padded batch: `(input_ids, attention_mask)`.
 
     Left, not right: these feed `generate`, so padding must not sit between
@@ -33,9 +53,10 @@ def left_pad_prompt_rows(rows: list[torch.Tensor], tokenizer) -> tuple[torch.Ten
     token, falling back to eos, then 0. Pad positions never carry
     `audio_token_id`, so the model's masked_scatter is unaffected.
     """
-    pad_id = tokenizer.pad_token_id
+    # transformers types special-token ids as any token value; a single id is an int.
+    pad_id = cast("int | None", tokenizer.pad_token_id)
     if pad_id is None:
-        pad_id = tokenizer.eos_token_id or 0
+        pad_id = cast("int | None", tokenizer.eos_token_id) or 0
     input_ids = pad_sequence(rows, batch_first=True, padding_value=int(pad_id), padding_side="left")
     # Padded from ones rather than `input_ids != pad_id`: a real token may
     # equal `pad_id` when pad falls back to eos.
@@ -45,7 +66,17 @@ def left_pad_prompt_rows(rows: list[torch.Tensor], tokenizer) -> tuple[torch.Ten
     return input_ids, attention_mask
 
 
-def prepend_lead_in(audio, sampling_rate: int, seconds: float):
+@overload
+def prepend_lead_in[ScalarT: np.generic](
+    audio: npt.NDArray[ScalarT], sampling_rate: int, seconds: float | None
+) -> npt.NDArray[ScalarT]: ...
+@overload
+def prepend_lead_in[ScalarT: np.generic](
+    audio: list[npt.NDArray[ScalarT]], sampling_rate: int, seconds: float | None
+) -> list[npt.NDArray[ScalarT]]: ...
+@overload
+def prepend_lead_in(audio: AudioInput, sampling_rate: int, seconds: float | None) -> AudioInput: ...
+def prepend_lead_in(audio: AudioInput, sampling_rate: int, seconds: float | None) -> AudioInput:
     """Prepend `seconds` of silence to a waveform (or each waveform in a list).
 
     Peoples ships fixed ~15s grid cuts rather than sentence-aligned segments,
@@ -65,19 +96,24 @@ def prepend_lead_in(audio, sampling_rate: int, seconds: float):
         return audio
 
     if isinstance(audio, (list, tuple)) and audio and not isinstance(audio[0], (int, float)):
-        return [prepend_lead_in(a, sampling_rate, seconds) for a in audio]
+        batch = cast("Sequence[Waveform]", audio)
+        return [cast("Waveform", prepend_lead_in(a, sampling_rate, seconds)) for a in batch]
 
+    waveform = cast("Waveform", audio)
     pad = round(sampling_rate * seconds)
     if pad <= 0:
-        return audio
-    arr = np.asarray(audio)
-    return np.pad(arr, (pad, 0))
+        return waveform
+    arr: npt.NDArray[Any] = np.asarray(waveform)
+    padded: npt.NDArray[Any] = np.pad(arr, (pad, 0))
+    return padded
 
 
 class ASRProcessor(ProcessorMixin):
     """Processor for Whisper-based ASR models."""
 
     attributes: ClassVar[list[str]] = ["feature_extractor", "tokenizer"]
+    feature_extractor: SequenceFeatureExtractor
+    tokenizer: PreTrainedTokenizerBase
     feature_extractor_class = "AutoFeatureExtractor"
     tokenizer_class = "AutoTokenizer"
     # Fallback only. The real value comes from `ASRConfig.audio_token`, which
@@ -91,10 +127,10 @@ class ASRProcessor(ProcessorMixin):
 
     def __init__(
         self,
-        feature_extractor,
-        tokenizer,
-        projector=None,
-        encoder_conv_layers: list | None = None,
+        feature_extractor: SequenceFeatureExtractor,
+        tokenizer: PreTrainedTokenizerBase,
+        projector: "MLPAudioProjector | None" = None,
+        encoder_conv_layers: list[ConvLayerSpec] | None = None,
         audio_token: str | None = None,
         lead_in_seconds: float = 0.0,
     ):
@@ -134,12 +170,16 @@ class ASRProcessor(ProcessorMixin):
         if text is not None:
             messages.append({"role": "assistant", "content": text})
 
-        tokenized = self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=(text is None),
-            return_tensors="pt",
-            enable_thinking=False,  # Disable Qwen3 thinking mode for ASR
+        # With `tokenize=True, return_tensors="pt"` the ids come back as tensors.
+        tokenized = cast(
+            "torch.Tensor | Mapping[str, torch.Tensor]",
+            self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=(text is None),
+                return_tensors="pt",
+                enable_thinking=False,  # Disable Qwen3 thinking mode for ASR
+            ),
         )
 
         # apply_chat_template returns a bare tensor or a BatchEncoding/mapping.
@@ -161,11 +201,11 @@ class ASRProcessor(ProcessorMixin):
 
     def _process(
         self,
-        audio: Union[list, "torch.Tensor", np.ndarray] | None = None,
+        audio: AudioInput | None = None,
         text: str | None = None,
         return_tensors: str = "pt",
-        **kwargs,
-    ) -> dict:
+        **kwargs: Any,
+    ) -> dict[str, torch.Tensor]:
         """Process audio and text inputs for inference.
 
         Args:
@@ -176,14 +216,15 @@ class ASRProcessor(ProcessorMixin):
         Returns:
             Dict with input_features, input_ids, attention_mask
         """
-        result = {}
+        result: dict[str, torch.Tensor] = {}
         token_counts = [0]
 
         # Process audio
         if audio is not None:
             sr = getattr(self.feature_extractor, "sampling_rate", 16000)
             padded_audio = prepend_lead_in(audio, sr, self.lead_in_seconds)
-            audio_inputs = self.feature_extractor(
+            extract = cast("AudioFeatureExtractor", self.feature_extractor)
+            audio_inputs = extract(
                 padded_audio,
                 sampling_rate=getattr(self.feature_extractor, "sampling_rate", 16000),
                 return_attention_mask=True,

@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import itertools
-from typing import TYPE_CHECKING, cast
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, TypedDict
 
 import numpy as np
+import numpy.typing as npt
 import torch
 import torchaudio
-from transformers import AutoProcessor
 
 if TYPE_CHECKING:
     from transformers import Qwen3ASRForTokenClassification, Qwen3ASRProcessor
-    from transformers.models.qwen3_asr.processing_qwen3_asr import _clean_tokens
+    from transformers.models.qwen3_asr.processing_qwen3_asr import (
+        _clean_tokens,  # pyright: ignore[reportPrivateUsage]  # no public word filter
+    )
 
     _QWEN3_ASR_IMPORT_ERROR: ImportError | None = None
 else:
@@ -27,6 +30,14 @@ else:
         _QWEN3_ASR_IMPORT_ERROR = e
 
 
+class AlignedWord(TypedDict):
+    """One aligned word: the original word and its span in seconds."""
+
+    word: str
+    start: float
+    end: float
+
+
 def _get_device() -> str:
     """Get best available device for inference."""
     if torch.cuda.is_available():
@@ -34,16 +45,6 @@ def _get_device() -> str:
     if torch.backends.mps.is_available():
         return "mps"
     return "cpu"
-
-
-def _module_to(module: torch.nn.Module, device: str) -> None:
-    """`module.to(device)`, in place.
-
-    `PreTrainedModel.to` is wrapped with `functools.wraps`, which type checkers
-    can't bind as a method; typed as `nn.Module` the call resolves. Same method
-    at runtime: it moves the module in place and returns it.
-    """
-    module.to(device)
 
 
 class QwenForcedAligner:
@@ -78,36 +79,39 @@ class QwenForcedAligner:
             model = Qwen3ASRForTokenClassification.from_pretrained(
                 cls.MODEL_ID, dtype=torch.bfloat16, attn_implementation=attn
             )
-            _module_to(model, device)
-            cls._model = model.eval()
-            cls._processor = cast(Qwen3ASRProcessor, AutoProcessor.from_pretrained(cls.MODEL_ID))
+            # PreTrainedModel.to is functools.wraps'd, which pyright cannot bind as a method.
+            model.to(device)  # pyright: ignore[reportArgumentType]
+            model.eval()
+            cls._model = model
+            cls._processor = Qwen3ASRProcessor.from_pretrained(cls.MODEL_ID)
         return cls._model, cls._processor
 
     @staticmethod
-    def _to_16k(audio, sample_rate: int) -> np.ndarray:
+    def _to_16k(audio: npt.ArrayLike | torch.Tensor, sample_rate: int) -> npt.NDArray[np.float32]:
         """Flatten `audio` to a float32 mono array resampled to 16 kHz."""
         if isinstance(audio, torch.Tensor):
-            audio = audio.cpu().numpy()
-        audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+            audio = audio.cpu()
+        out: npt.NDArray[np.float32] = np.asarray(audio, dtype=np.float32).reshape(-1)
         if sample_rate != 16000:
-            audio = torchaudio.functional.resample(
-                torch.from_numpy(audio), sample_rate, 16000
-            ).numpy()
-        return audio
+            out = np.asarray(
+                torchaudio.functional.resample(torch.as_tensor(out), sample_rate, 16000),
+                dtype=np.float32,
+            )
+        return out
 
     @classmethod
     @torch.inference_mode()
     def align_chunks(
         cls,
-        chunks: list[tuple[np.ndarray, str]],
+        chunks: Sequence[tuple[npt.ArrayLike | torch.Tensor, str]],
         sample_rate: int = 16000,
         language: str = "English",
-    ) -> list[list[dict]]:
+    ) -> list[list[AlignedWord]]:
         """Align each `(audio, text)` pair (each <= 5 min); one word list per pair."""
         if _QWEN3_ASR_IMPORT_ERROR is not None:
             raise _QWEN3_ASR_IMPORT_ERROR
-        results: list[list[dict]] = [[] for _ in chunks]
-        todo = []
+        results: list[list[AlignedWord]] = [[] for _ in chunks]
+        todo: list[tuple[int, npt.NDArray[np.float32], list[str]]] = []
         for i, (raw, text) in enumerate(chunks):
             kept = [w for w in text.split() if _clean_tokens([w])]
             if not kept:
@@ -151,6 +155,12 @@ class QwenForcedAligner:
         return results
 
     @classmethod
-    def align(cls, audio, text: str, sample_rate: int = 16000, language: str = "English"):
+    def align(
+        cls,
+        audio: npt.ArrayLike | torch.Tensor,
+        text: str,
+        sample_rate: int = 16000,
+        language: str = "English",
+    ) -> list[AlignedWord]:
         """Align one clip of at most 5 minutes; `[{"word", "start", "end"}]`."""
         return cls.align_chunks([(audio, text)], sample_rate, language)[0]

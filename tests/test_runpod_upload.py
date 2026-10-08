@@ -1,6 +1,9 @@
 """Tests for SFTP script upload (scripts/deploy/runpod.py)."""
 
+from typing import BinaryIO, cast
 from unittest.mock import MagicMock
+
+from fabric import Connection
 
 from scripts.deploy.runpod import _put_text, install_dependencies
 
@@ -11,48 +14,54 @@ from scripts.deploy.runpod import _put_text, install_dependencies
 NON_ASCII = "#!/bin/bash\n# Verify torch — we never pin it.\necho hi\n"
 
 
-def _captured_upload(text):
+def _captured_upload(text: str) -> dict[str, object]:
     """Run `_put_text` against a mock connection and return what it uploaded."""
     conn = MagicMock()
-    uploaded = {}
-    conn.put.side_effect = lambda fl, **kwargs: uploaded.update(
-        {"remote": kwargs.get("remote"), "body": fl.read()}
-    )
-    _put_text(conn, text, "/tmp/script.sh")
+    uploaded: dict[str, object] = {}
+
+    def put(fl: BinaryIO, **kwargs: object) -> None:
+        uploaded.update({"remote": kwargs.get("remote"), "body": fl.read()})
+
+    conn.put.side_effect = put
+    _put_text(cast(Connection, conn), text, "/tmp/script.sh")
     return uploaded
 
 
 class TestPutText:
     """Tests for the text-to-SFTP upload helper."""
 
-    def test_uploads_bytes_not_text(self):
+    def test_uploads_bytes_not_text(self) -> None:
         """Paramiko sizes the transfer by len() of what it reads; it must be bytes."""
         assert isinstance(_captured_upload(NON_ASCII)["body"], bytes)
 
-    def test_uploaded_length_matches_remote_byte_size(self):
+    def test_uploaded_length_matches_remote_byte_size(self) -> None:
         """The regression: char count != byte count once any non-ASCII is present."""
-        body = _captured_upload(NON_ASCII)["body"]
+        body = cast(bytes, _captured_upload(NON_ASCII)["body"])
         assert len(body) == len(NON_ASCII.encode("utf-8"))
         assert len(body) != len(NON_ASCII), "test string must exercise multi-byte chars"
 
-    def test_round_trips_content_verbatim(self):
-        body = _captured_upload(NON_ASCII)["body"]
+    def test_round_trips_content_verbatim(self) -> None:
+        body = cast(bytes, _captured_upload(NON_ASCII)["body"])
         assert body.decode("utf-8") == NON_ASCII
 
-    def test_passes_remote_path_through(self):
+    def test_passes_remote_path_through(self) -> None:
         assert _captured_upload(NON_ASCII)["remote"] == "/tmp/script.sh"
 
 
 class TestInstallDependenciesUpload:
     """Guards the real bootstrap script, whose comments do contain em dashes."""
 
-    def test_setup_script_uploads_as_bytes(self):
+    def test_setup_script_uploads_as_bytes(self) -> None:
         conn = MagicMock()
-        uploaded = {}
-        conn.put.side_effect = lambda fl, **_: uploaded.update({"body": fl.read()})
+        uploaded: dict[str, object] = {}
+
+        def put(fl: BinaryIO, **_: object) -> None:
+            uploaded.update({"body": fl.read()})
+
+        conn.put.side_effect = put
         conn.run.return_value = MagicMock(ok=True, stdout="")
 
-        install_dependencies(conn)
+        install_dependencies(cast(Connection, conn))
 
         body = uploaded["body"]
         assert isinstance(body, bytes)

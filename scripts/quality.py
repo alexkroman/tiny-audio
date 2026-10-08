@@ -19,7 +19,7 @@ import math
 import re
 import subprocess
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
@@ -53,11 +53,12 @@ _GUARD_NAME = re.compile(r"_*(assert|require|check|ensure|validate|verify)")
 _PYTEST_ASSERTIONS = frozenset({"raises", "warns", "fail", "deprecated_call"})
 
 
-def _load(path: Path) -> dict:
-    return json.loads(path.read_text()) if path.exists() else {}
+def _load(path: Path) -> dict[str, Any]:
+    data: dict[str, Any] = json.loads(path.read_text()) if path.exists() else {}
+    return data
 
 
-def _save(path: Path, data: dict) -> None:
+def _save(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
 
@@ -81,7 +82,7 @@ def code_lines(text: str) -> int:
 
 def file_length_violations(lengths: dict[str, int], baseline: dict[str, int]) -> list[str]:
     """Files over the cap that are not grandfathered, or grandfathered and grown."""
-    problems = []
+    problems: list[str] = []
     for path, n in sorted(lengths.items()):
         allowed = baseline.get(path, MAX_CODE_LINES)
         if n > max(allowed, MAX_CODE_LINES):
@@ -114,11 +115,12 @@ def file_length(
 # --------------------------------------------------------------- coverage floors
 
 
-def file_coverage(report: dict) -> dict[str, float]:
+def file_coverage(report: dict[str, Any]) -> dict[str, float]:
     """Line coverage percent per file from a coverage.py JSON report."""
-    out = {}
-    for path, data in report.get("files", {}).items():
-        summary = data["summary"]
+    out: dict[str, float] = {}
+    files: dict[str, dict[str, Any]] = report.get("files", {})
+    for path, data in files.items():
+        summary: dict[str, int] = data["summary"]
         statements = summary["num_statements"]
         out[path] = 100.0 if statements == 0 else 100.0 * summary["covered_lines"] / statements
     return out
@@ -126,7 +128,7 @@ def file_coverage(report: dict) -> dict[str, float]:
 
 def coverage_violations(coverage: dict[str, float], floors: dict[str, float]) -> list[str]:
     """Files below their recorded floor, or new files below NEW_FILE_COVERAGE_FLOOR."""
-    problems = []
+    problems: list[str] = []
     for path, pct in sorted(coverage.items()):
         floor = floors.get(path, NEW_FILE_COVERAGE_FLOOR)
         if pct + 1e-9 < floor:
@@ -210,7 +212,7 @@ def tests_without_assertions(source: str) -> list[tuple[int, str]]:
 @app.command("test-assertions")
 def test_assertions() -> None:
     """Every test must assert something; one that only runs code checks nothing."""
-    problems = []
+    problems: list[str] = []
     tests = sorted((ROOT / "tests").glob("test_*.py"))
     for path in tests:
         for line, name in tests_without_assertions(path.read_text()):

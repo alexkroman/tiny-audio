@@ -1,16 +1,15 @@
 import functools
-import importlib
 import importlib.util
 import inspect
 import json
 import logging
 import shutil
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from copy import copy
 from os import PathLike
 from pathlib import Path
 from threading import Thread
-from typing import TYPE_CHECKING, Any, TypeVar, cast, overload
+from typing import TYPE_CHECKING, Any, Self, cast, overload
 
 import torch
 import torch.nn as nn
@@ -18,7 +17,6 @@ from peft import LoraConfig, PeftModel, get_peft_model
 from safetensors.torch import load_file
 from torch.nn import functional
 from transformers import (
-    AutoConfig,
     AutoFeatureExtractor,
     AutoModel,
     AutoModelForCausalLM,
@@ -26,19 +24,27 @@ from transformers import (
     AutoTokenizer,
     BatchEncoding,
     PreTrainedModel,
+    PreTrainedTokenizerBase,
+    SequenceFeatureExtractor,
     TextIteratorStreamer,
     WhisperModel,
 )
 from transformers import __version__ as transformers_version
 from transformers.generation.utils import GenerateOutput, GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
-from transformers.utils.hub import PushToHubMixin, cached_file
+from transformers.utils.hub import (
+    cached_file,
+)
 
 if TYPE_CHECKING:
-    from transformers import GraniteSpeech5Encoder
+    from transformers import GraniteSpeech5Encoder as _GraniteSpeech5Encoder
     from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
-    from transformers.models.gemma4.modeling_gemma4 import Gemma4ForCausalLM
+    from transformers.models.gemma4.modeling_gemma4 import (
+        Gemma4ForCausalLM as _Gemma4ForCausalLM,
+    )
+    from transformers.models.gemma4.modeling_gemma4 import Gemma4TextModel
 
+    from .asr_attention import resolve_attn_implementation, resolve_decoder_attn_implementation
     from .asr_config import ASRConfig, compute_encoder_output_length
     from .asr_layers import chunk_oversized_embeddings, unfreeze_encoder_top_layers
     from .asr_processing import ASRProcessor, left_pad_prompt_rows
@@ -47,21 +53,29 @@ if TYPE_CHECKING:
         GenerativeDecoder,
         HubFileKwargs,
         LoadKwargs,
-        PerLayerInputsTextModel,
+        LoadStateDictResult,
+        OutputLengthProjector,
+        StateDictT,
     )
     from .projectors import PROJECTOR_CLASSES, MLPAudioProjector
+
+    # None at runtime on a transformers without the architecture; see below.
+    GraniteSpeech5Encoder: type[_GraniteSpeech5Encoder] | None
+    Gemma4ForCausalLM: type[_Gemma4ForCausalLM] | None
 else:
     try:
+        from .asr_attention import resolve_attn_implementation, resolve_decoder_attn_implementation
         from .asr_config import ASRConfig, compute_encoder_output_length
         from .asr_layers import chunk_oversized_embeddings, unfreeze_encoder_top_layers
         from .asr_processing import ASRProcessor, left_pad_prompt_rows
-        from .asr_types import DecoderLoadKwargs, HubFileKwargs, LoadKwargs, PerLayerInputsTextModel
+        from .asr_types import LoadStateDictResult, OutputLengthProjector, StateDictT
         from .projectors import PROJECTOR_CLASSES
     except ImportError:  # flat layout on the Hub: sibling modules, no package
+        from asr_attention import resolve_attn_implementation, resolve_decoder_attn_implementation
         from asr_config import ASRConfig, compute_encoder_output_length
         from asr_layers import chunk_oversized_embeddings, unfreeze_encoder_top_layers
         from asr_processing import ASRProcessor, left_pad_prompt_rows
-        from asr_types import DecoderLoadKwargs, HubFileKwargs, LoadKwargs, PerLayerInputsTextModel
+        from asr_types import LoadStateDictResult, OutputLengthProjector, StateDictT
         from projectors import PROJECTOR_CLASSES
 
     # Architectures newer than the transformers floor in pyproject.toml. Kept
@@ -81,16 +95,13 @@ else:
 
 logger = logging.getLogger(__name__)
 
-# FlashAttention's kernels are compiled for head dimensions up to 256.
-FLASH_ATTENTION_MAX_HEAD_DIM = 256
-
 # Vocab dimension the embedding table is padded to after adding the audio
 # token. 128 is what transformers' own `pad_to_multiple_of` docs recommend for
 # tensor cores on sm_75+ and is what Qwen already pads its published tables to.
 VOCAB_PAD_MULTIPLE = 128
 
 
-def _resolve_dtype(name, fallback: torch.dtype) -> torch.dtype:
+def _resolve_dtype(name: object, fallback: torch.dtype) -> torch.dtype:
     """Resolve a config dtype name to a `torch.dtype`, falling back when unusable.
 
     Only a genuine `str` naming a real floating-point dtype is honoured. Stand-in
@@ -106,131 +117,6 @@ def _resolve_dtype(name, fallback: torch.dtype) -> torch.dtype:
     return (
         resolved if isinstance(resolved, torch.dtype) and resolved.is_floating_point else fallback
     )
-
-
-def _max_attention_head_dim(text_config) -> int | None:
-    """Largest attention head dim across layers, or None if undeterminable.
-
-    Has to cope with heterogeneous configs: Gemma 4 varies head_dim per layer,
-    and reading `config.head_dim` on one of those raises
-    AmbiguousGlobalPerLayerAttributeError instead of returning a number, so the
-    per-layer list must be consulted explicitly.
-    """
-    per_layer = getattr(text_config, "per_layer_config", None)
-    dims: list = []
-    if per_layer:
-        dims = [getattr(layer, "head_dim", None) for layer in per_layer]
-    else:
-        try:
-            dims = [getattr(text_config, "head_dim", None)]
-        except Exception:
-            # Raised by the heterogeneity guard; treated as "unknown".
-            dims = []
-    usable = [d for d in dims if isinstance(d, int) and d > 0]
-    return max(usable) if usable else None
-
-
-@functools.lru_cache(maxsize=16)
-def _has_sliding_window_attention(model_id: str) -> bool:
-    """Whether `model_id`'s text stack has any sliding-window attention layer.
-
-    Read from the config rather than the loaded module so the answer is
-    available before `from_pretrained` picks an attn implementation.
-
-    Two independent spellings, because transformers has both. Gemma 4 declares
-    `sliding_window: 512` AND `layer_types: [full_attention,
-    sliding_attention]` (verified against google/gemma-4-E2B-it); Qwen2-style
-    configs carry a non-null `sliding_window` that is inert unless
-    `use_sliding_window` is true, so that flag has to veto the window.
-
-    Returns True when the config can't be read, so an unknown architecture
-    keeps the conservative eager path on MPS.
-    """
-    try:
-        probe = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
-        text_config = probe.get_text_config() if hasattr(probe, "get_text_config") else probe
-    except Exception:
-        logger.warning(
-            "Could not read the config for %s to check for sliding-window "
-            "attention; assuming it has some and using eager attention on MPS.",
-            model_id,
-        )
-        return True
-
-    layer_types = getattr(text_config, "layer_types", None) or []
-    if any("sliding" in str(layer_type) for layer_type in layer_types):
-        return True
-    if getattr(text_config, "use_sliding_window", None) is False:
-        return False
-    return bool(getattr(text_config, "sliding_window", None))
-
-
-def _resolve_attn_implementation(requested: str | None, model_id: str | None = None) -> str | None:
-    """Coerce flash_attention_2 to sdpa when CUDA isn't available, and avoid sdpa on MPS.
-
-    FA2 is CUDA-only. On MPS/CPU, requesting it either errors at load or
-    silently falls back to a slower path; either way the user pays the FA2
-    install + import cost for no win. Coerce here so a saved config that
-    pins flash_attention_2 still loads on Mac / CPU-only Linux boxes.
-
-    MPS needs eager for SOME models. PyTorch's Metal sdpa kernel returns wrong
-    results for cached single-token decode against a sliding-window mask, which
-    is exactly Gemma 4's layout (`sliding_window=512`, four sliding layers per
-    full-attention layer). A full-sequence forward is fine, so the damage shows
-    up only during generation: greedy decode with no cache transcribed
-    correctly while the identical cached decode produced "Mr. and a".
-
-    The mask is the trigger, so the coercion is scoped to models that actually
-    build one. `model_id` opts into that check; without it every MPS load falls
-    back to eager, which is what this function used to do unconditionally. That
-    blanket version taxed the models it was never protecting: Qwen3.5-2B
-    declares `sliding_window: None` and cannot hit the bug, and eager cost it
-    41% of decode throughput on an M4 Max (19.9 -> 28.1 tok/s, bf16, 64 tokens
-    from a 200-token prompt). Audio encoders are likewise unaffected -- they run
-    full-sequence forwards with no cache at all, and the Granite branch below
-    has been pinning sdpa on MPS for every granite_qwen run to date.
-
-    SECOND, SEPARATE MPS sdpa HAZARD, and the reason `generate` carries a guard:
-    Metal's sdpa returns NaN for a row containing any fully-masked position, so
-    a LEFT-PADDED batch comes back as NaN logits, argmax 0, and a transcript of
-    "!!!!!!". One pad token is enough. Measured on bare transformers with no
-    tiny_audio code involved (Qwen3.5-2B, bf16): the identical forward is exact
-    to 0.000 on CPU/fp32, and eager is correct on MPS at any padding. Batch 1
-    pads nothing, which is why the eval harness is safe under sdpa -- but this
-    is what the blanket eager was accidentally also protecting, so anything
-    that batches ragged audio on a Mac must ask for eager explicitly. See
-    `_assert_sdpa_safe_on_mps`.
-    """
-    if (
-        torch.backends.mps.is_available()
-        and requested in (None, "sdpa", "flash_attention_2")
-        and (model_id is None or _has_sliding_window_attention(model_id))
-    ):
-        return "eager"
-    # Otherwise fall through: on MPS, sdpa and None (let transformers pick,
-    # which is sdpa where available) are both safe for a model with no
-    # sliding-window layer, and a config pinning flash_attention_2 is still
-    # downgraded to sdpa below.
-    if requested != "flash_attention_2":
-        return requested
-    if not torch.cuda.is_available():
-        return "sdpa"
-    # CUDA alone isn't enough -- the flash_attn package must actually be
-    # importable, and new enough for transformers. It is a source build that
-    # routinely fails on RunPod images (its metadata hook imports torch, so any
-    # broken torch install takes it down with it). Without this check a CUDA
-    # box with no flash-attn raises at from_pretrained instead of quietly
-    # using sdpa, which is the same numerics at lower throughput.
-    #
-    # Looked up on `transformers.utils` at call time rather than bound at
-    # import, so patching it there (as the tests do) reaches this probe.
-    if not importlib.import_module("transformers.utils").is_flash_attn_2_available():
-        logger.warning(
-            "flash_attention_2 requested but flash_attn is not installed or too old; "
-            "falling back to sdpa."
-        )
-        return "sdpa"
-    return requested
 
 
 def _gather_audio_embeds(
@@ -262,7 +148,7 @@ def _gather_audio_embeds(
 def _assert_audio_token_counts(
     audio_embeds: torch.Tensor,
     token_counts: torch.Tensor,
-    projector,
+    projector: OutputLengthProjector,
     encoder_valid_lengths: torch.Tensor | None = None,
     max_tokens: int | None = None,
 ) -> None:
@@ -311,17 +197,7 @@ def _assert_audio_token_counts(
         raise ValueError(msg)
 
 
-def _module_to_dtype(module: nn.Module, dtype: torch.dtype) -> nn.Module:
-    """Return `module.to(dtype=dtype)`, typed through `nn.Module.to`.
-
-    PreTrainedModel declares `to` via functools.wraps, which type checkers
-    cannot bind to an instance. The call still dispatches to the module's own
-    `to` (PreTrainedModel's included), so this is only a typing boundary.
-    """
-    return module.to(dtype=dtype)
-
-
-def _patch_gemma_decode_loop(model) -> None:
+def _patch_gemma_decode_loop(model: "GenerativeDecoder") -> None:
     """Make a Gemma4ForCausalLM drop `per_layer_inputs` after the first step.
 
     `Gemma4ForConditionalGeneration` does this itself; the causal LM does not.
@@ -346,7 +222,9 @@ def _patch_gemma_decode_loop(model) -> None:
     # here, since audio only ever reaches the decoder as inputs_embeds.
     # `wraps` sets __wrapped__, which inspect.signature follows.
     @functools.wraps(inner_prepare)
-    def prepare_inputs_for_generation(*args, is_first_iteration: bool = False, **kwargs):
+    def prepare_inputs_for_generation(
+        *args: Any, is_first_iteration: bool = False, **kwargs: Any
+    ) -> dict[str, Any]:
         """Drop stale `per_layer_inputs` on every decode step after the first."""
         model_inputs = inner_prepare(*args, is_first_iteration=is_first_iteration, **kwargs)
         if not is_first_iteration:
@@ -356,7 +234,7 @@ def _patch_gemma_decode_loop(model) -> None:
     model.prepare_inputs_for_generation = prepare_inputs_for_generation
 
 
-def _assert_projector_loaded(incompatible_keys, projector_type: str) -> None:
+def _assert_projector_loaded(incompatible_keys: LoadStateDictResult, projector_type: str) -> None:
     """Fail loudly when a checkpoint's projector doesn't match the built one.
 
     `save_pretrained` serializes `projector.*` (plus the language model when
@@ -376,7 +254,7 @@ def _assert_projector_loaded(incompatible_keys, projector_type: str) -> None:
     if not missing and not unexpected:
         return
 
-    detail = []
+    detail: list[str] = []
     if missing:
         detail.append(f"missing from the checkpoint: {missing}")
     if unexpected:
@@ -431,28 +309,6 @@ def _log_linear_attention_backends(level: int = logging.WARNING) -> None:
         )
     else:
         logger.info("Linear-attention fast path: causal-conv1d + flash-linear-attention packages.")
-
-
-_StateDictT = TypeVar("_StateDictT", bound=dict[str, Any])
-
-
-def _push_to_hub_recording_repo_id(*args: Any, **kwargs: Any) -> str:
-    """`ASRModel.push_to_hub`: push to the Hub, pointing adapter_config at the repo.
-
-    IMPORTANT: Sets base_model_name_or_path in adapter_config.json to repo_id
-    so that transformers pipeline() can load the model correctly. Without this,
-    the pipeline tries to load from "None" which fails.
-
-    Takes `(model, repo_id, ...)` exactly like a bound `push_to_hub`. Spelled
-    with bare `*args` because that is the only wrapper signature both mypy and
-    pyright accept in place of PreTrainedModel's functools.wraps-declared one.
-    """
-    model = args[0]
-    repo_id = args[1] if len(args) > 1 else kwargs["repo_id"]
-    # Store repo_id in config so save_pretrained can access it
-    model.config.pretrained_model_path = repo_id
-    # Call parent's push_to_hub
-    return PreTrainedModel.push_to_hub(*args, **kwargs)
 
 
 class ASRModel(PreTrainedModel, GenerationMixin):
@@ -528,7 +384,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                     # available, which ZeroGPU Spaces do at startup without a
                     # GPU attached ("No CUDA GPUs are available").
                     base_device = next(model.language_model.parameters()).device
-                    peft_model = PeftModel.from_pretrained(
+                    peft = PeftModel.from_pretrained(
                         model.language_model,
                         pretrained_model_name_or_path,
                         is_trainable=True,
@@ -537,7 +393,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                     )
                     # See `language_model` in __init__: PEFT forwards the
                     # decoder interface, so callers keep using it unchanged.
-                    model.language_model = cast("GenerativeDecoder", peft_model)
+                    model.language_model = cast("GenerativeDecoder", peft)
                 else:
                     # No saved adapters - initialize fresh LLM LoRA for training.
                     # __init__ skips _setup_lora while loading, so call it here.
@@ -547,7 +403,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         finally:
             cls._is_loading_from_pretrained = False
 
-    def __init__(self, config: ASRConfig, **kwargs) -> None:
+    def __init__(self, config: ASRConfig, **kwargs: Any) -> None:
         """Build encoder, projector, decoder and tokenizer from `config`.
 
         `**kwargs` are the loader arguments `from_pretrained` forwards (e.g.
@@ -557,9 +413,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         # Shadows the class attribute when the config names one, so a run that
         # trained under a specific instruction decodes under the same one.
-        transcribe_prompt = getattr(config, "transcribe_prompt", None)
-        if transcribe_prompt is not None:
-            self.TRANSCRIBE_PROMPT = transcribe_prompt
+        prompt = getattr(config, "transcribe_prompt", None)
+        if prompt is not None:
+            self.TRANSCRIBE_PROMPT = prompt  # pyright: ignore[reportConstantRedefinition]
         target_dtype = getattr(torch, config.model_dtype)
 
         # Audio encoder (frozen)
@@ -614,55 +470,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # this line left ASRConfig's 12-gram loop guard inert: the value was
         # set on the config, serialized into config.json, and never consulted.
         self.generation_config.no_repeat_ngram_size = config.no_repeat_ngram_size
-        # Set EOS tokens, filtering out any that don't exist in the tokenizer.
-        # `convert_tokens_to_ids` reports "not in vocab" inconsistently: Qwen-
-        # style tokenizers return None, while Gemma's returns unk_token_id.
-        # Filtering on None alone left Gemma with eos_token_id=[unk, unk], so
-        # generation never stopped and every sample ran to max_new_tokens.
-        #
-        # The membership test is a name round-trip, NOT `id == unk_token_id`:
-        # in GPT-2-lineage tokenizers (SmolLM2, Qwen) unk_token *is*
-        # "<|endoftext|>", so comparing ids would discard a legitimate stop
-        # token here while fixing Gemma. A token that fell back to unk comes
-        # back under unk's name; one that is really in the vocab comes back
-        # as itself.
-        #
-        # The name list alone is not enough, and silently produced garbage on
-        # Gemma 4: that template dropped Gemma 2/3's "<end_of_turn>" for a new
-        # "<|turn>role\n ... <turn|>\n" scheme, so all three probes missed and
-        # eos collapsed to the bare "<eos>" -- a token the template never
-        # emits. Training taught the model to close its turn with "<turn|>"
-        # (id 106) and generation then ignored it, running every sample to
-        # max_new_tokens and burying the transcript under 250 copies of
-        # "<turn|>" that `skip_special_tokens` silently swallowed.
-        #
-        # So derive the real terminator from the template instead of guessing
-        # its name: render an assistant turn holding a sentinel and take the
-        # first token that follows it. That token is the turn closer by
-        # construction, for any decoder, including ones released after this
-        # code was written. The name probes stay as a fallback for tokenizers
-        # whose template renders no trailing special token.
-        eos_ids: list[int] = []
-        derived = self._derive_turn_end_token_id()
-        if derived is not None:
-            eos_ids.append(derived)
-        for token in ("<|im_end|>", "<|endoftext|>", "<end_of_turn>"):
-            token_id = self.tokenizer.convert_tokens_to_ids(token)
-            # A single token name maps to a single id (None when unknown).
-            if (
-                not isinstance(token_id, int)
-                or self.tokenizer.convert_ids_to_tokens(token_id) != token
-            ):
-                continue
-            if token_id not in eos_ids:
-                eos_ids.append(token_id)
-        # The chat-template stop tokens above are additions, not replacements:
-        # the tokenizer's own EOS is always a valid stop and is the only one
-        # left for a decoder using none of those three templates.
-        tokenizer_eos = self.tokenizer.eos_token_id
-        if tokenizer_eos is not None and tokenizer_eos not in eos_ids:
-            eos_ids.append(tokenizer_eos)
-        self.generation_config.eos_token_id = eos_ids
+        self.generation_config.eos_token_id = self._resolve_eos_token_ids()
         self.generation_config.pad_token_id = self.tokenizer.pad_token_id
 
         # Feature extractor for audio preprocessing
@@ -696,15 +504,17 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # For model parallelism
         self._no_split_modules = getattr(self.language_model, "_no_split_modules", [])
 
-    def _create_feature_extractor(self, config: ASRConfig):
+    def _create_feature_extractor(self, config: ASRConfig) -> SequenceFeatureExtractor:
         """Create the appropriate feature extractor for the audio encoder."""
-        feature_extractor = AutoFeatureExtractor.from_pretrained(config.audio_model_id)
+        feature_extractor: SequenceFeatureExtractor = AutoFeatureExtractor.from_pretrained(
+            config.audio_model_id
+        )
         # Whisper's encoder requires a fixed 3000 mel frames (30s) and the
         # feature extractor pads to that by default — leave it alone. Other
         # encoders (e.g. GLM-ASR) accept variable-length input, so we disable
         # padding to avoid wasting compute on silent frames.
         if "whisper" not in config.audio_model_id.lower():
-            feature_extractor.padding = False
+            feature_extractor.padding = False  # pyright: ignore[reportAttributeAccessIssue]
         return feature_extractor
 
     @classmethod
@@ -718,7 +528,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         LR routing.
         """
         encoder_kwargs: LoadKwargs = {
-            "attn_implementation": _resolve_attn_implementation(
+            "attn_implementation": resolve_attn_implementation(
                 config.attn_implementation, config.audio_model_id
             ),
             "low_cpu_mem_usage": True,
@@ -750,11 +560,12 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
             # Granite's block-attention implementation has no FA2 kernel and
             # raises ValueError on attn_implementation="flash_attention_2".
-            # _resolve_attn_implementation only downgrades FA2 when CUDA is
+            # resolve_attn_implementation only downgrades FA2 when CUDA is
             # absent, so on a CUDA box the inherited default would hard-fail
             # at load. Pin sdpa regardless of what the config asks for.
             granite_kwargs: LoadKwargs = {**encoder_kwargs, "attn_implementation": "sdpa"}
-            encoder = GraniteSpeech5Encoder.from_pretrained(config.audio_model_id, **granite_kwargs)
+            granite = GraniteSpeech5Encoder
+            encoder = granite.from_pretrained(config.audio_model_id, **granite_kwargs)
         elif "glm" in config.audio_model_id.lower():
             # GLM-ASR stores its encoder at audio_tower (GlmAsrEncoder), but
             # which object owns that attribute depends on the transformers
@@ -765,14 +576,16 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             # flat checkpoints hung them off the top-level model. Resolve the
             # owner instead of assuming, so neither layout AttributeErrors
             # at load.
-            full_model = AutoModelForSeq2SeqLM.from_pretrained(
+            glm_model = AutoModelForSeq2SeqLM.from_pretrained(
                 config.audio_model_id, trust_remote_code=True, **encoder_kwargs
             )
-            inner = getattr(full_model, "model", None)
-            holder = inner if inner is not None and hasattr(inner, "audio_tower") else full_model
+            inner = getattr(glm_model, "model", None)
+            holder: Any = (
+                inner if inner is not None and hasattr(inner, "audio_tower") else glm_model
+            )
             if not hasattr(holder, "audio_tower"):
                 msg = (
-                    f"{type(full_model).__name__} exposes no audio_tower at "
+                    f"{type(glm_model).__name__} exposes no audio_tower at "
                     "`.audio_tower` or `.model.audio_tower`; GLM-ASR encoder "
                     f"extraction needs updating for transformers "
                     f"{transformers_version}."
@@ -785,7 +598,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             # a plain attribute and frees nothing.
             holder.language_model = None
             holder.multi_modal_projector = None
-            del full_model
+            del glm_model
         else:
             encoder = AutoModel.from_pretrained(config.audio_model_id, **encoder_kwargs)
 
@@ -798,9 +611,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # `encoder_dtype` overrides the stack dtype when the encoder has
         # trainable blocks; it must be fp32 for Adam's step to survive
         # rounding. See ASRConfig.encoder_dtype for the arithmetic.
-        encoder = _module_to_dtype(
-            encoder, _resolve_dtype(getattr(config, "encoder_dtype", None), dtype)
-        )
+        encoder_dtype = _resolve_dtype(getattr(config, "encoder_dtype", None), dtype)
+        # PreTrainedModel.to is functools.wraps'd, which pyright cannot bind as a method.
+        encoder = encoder.to(dtype=encoder_dtype)  # pyright: ignore[reportCallIssue]
         if getattr(config, "freeze_audio_encoder", True):
             encoder.requires_grad_(False)
             encoder.train(False)  # equivalent to .eval(); avoids a security hook false-positive
@@ -844,32 +657,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     @classmethod
     def _load_language_model(cls, config: ASRConfig, dtype: torch.dtype) -> "GenerativeDecoder":
         """Load and freeze the language model."""
-        attn_implementation = _resolve_attn_implementation(
-            config.attn_implementation, config.text_model_id
-        )
-
-        # FlashAttention only has kernels for head_dim <= 256, and it fails at
-        # the first forward rather than at load. Gemma 4 E2B trips this: 7 of
-        # its 35 layers use head_dim=512 (the other 28 use 256), so FA2 can
-        # never run this architecture regardless of flash-attn version. Detect
-        # it from the config and fall back instead of dying a step into
-        # training.
-        if attn_implementation == "flash_attention_2":
-            probe = AutoConfig.from_pretrained(config.text_model_id, trust_remote_code=True)
-            text_probe = probe.get_text_config() if hasattr(probe, "get_text_config") else probe
-            head_dim = _max_attention_head_dim(text_probe)
-            if head_dim is not None and head_dim > FLASH_ATTENTION_MAX_HEAD_DIM:
-                logger.warning(
-                    "%s has max head_dim=%d, above FlashAttention's limit of %d; "
-                    "using sdpa for the decoder.",
-                    config.text_model_id,
-                    head_dim,
-                    FLASH_ATTENTION_MAX_HEAD_DIM,
-                )
-                attn_implementation = "sdpa"
-
         decoder_kwargs: DecoderLoadKwargs = {
-            "attn_implementation": attn_implementation,
+            "attn_implementation": resolve_decoder_attn_implementation(
+                config.attn_implementation, config.text_model_id
+            ),
             "trust_remote_code": True,
             "low_cpu_mem_usage": True,
             "dtype": dtype,
@@ -923,7 +714,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # FA2 "current dype is fp32" warning when from_pretrained's dtype kwarg
         # isn't fully propagated to every submodule.
         # `to` returns the module itself, so the cast happens in place.
-        _module_to_dtype(decoder, dtype)
+        # PreTrainedModel.to is functools.wraps'd, which pyright cannot bind as a method.
+        decoder.to(dtype=dtype)  # pyright: ignore[reportCallIssue]
         decoder.config.use_cache = getattr(config, "use_cache", True)
         if getattr(config, "freeze_language_model", True):
             decoder.requires_grad_(False)
@@ -969,8 +761,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         with torch.device("meta"):
             shell = Gemma4ForCausalLM(text_config)
 
-        shell.model = loaded.model.language_model
-        shell.lm_head = loaded.lm_head
+        shell.model = cast("Gemma4TextModel", loaded.get_submodule("model.language_model"))
+        shell.lm_head = cast(nn.Linear, loaded.get_submodule("lm_head"))
         shell.generation_config = loaded.generation_config
         shell.tie_weights()
 
@@ -985,7 +777,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # Patched on the instance rather than via a subclass: subclassing
         # Gemma4ForCausalLM trips transformers' experts-implementation check
         # ("does not support setting experts implementation") during __init__.
-        _patch_gemma_decode_loop(shell)
+        # Gemma4ForCausalLM is a PreTrainedModel with GenerationMixin, which is
+        # all `GenerativeDecoder` describes.
+        decoder = cast("GenerativeDecoder", shell)
+        _patch_gemma_decode_loop(decoder)
 
         stranded = [n for n, t in shell.named_parameters() if t.device.type == "meta"]
         stranded += [n for n, t in shell.named_buffers() if t.device.type == "meta"]
@@ -995,9 +790,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 f"(would silently produce garbage): {stranded[:5]}"
             )
             raise RuntimeError(msg)
-        # Gemma4ForCausalLM is a PreTrainedModel with GenerationMixin, which is
-        # all `GenerativeDecoder` describes.
-        return cast("GenerativeDecoder", shell)
+        return decoder
 
     def _create_projector(self, config: ASRConfig, dtype: torch.dtype) -> "MLPAudioProjector":
         """Create the trainable audio projector."""
@@ -1044,7 +837,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         self._projector_dtype = proj_dtype
         return projector.to(device=device, dtype=proj_dtype)
 
-    def _setup_lora(self, config: ASRConfig):
+    def _setup_lora(self, config: ASRConfig) -> None:
         """Apply LoRA adapters to the language model for Stage 2 fine-tuning."""
         lora_config = LoraConfig(
             r=config.lora_rank,
@@ -1067,9 +860,11 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             "GenerativeDecoder", get_peft_model(self.language_model, lora_config)
         )
 
-    def _init_tokenizer(self, config: ASRConfig):
+    def _init_tokenizer(self, config: ASRConfig) -> None:
         """Initialize tokenizer with audio token."""
-        self.tokenizer = AutoTokenizer.from_pretrained(config.text_model_id, trust_remote_code=True)
+        self.tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(
+            config.text_model_id, trust_remote_code=True
+        )
 
         # Set pad token. Prefer a dedicated pad token if the tokenizer has one
         # (e.g. Qwen's <|finetune_right_pad_id|>); otherwise fall back to
@@ -1093,7 +888,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         already_in_vocab = existing_id is not None and existing_id != self.tokenizer.unk_token_id
 
         if not already_in_vocab:
-            existing_special = getattr(self.tokenizer, "additional_special_tokens", None) or []
+            existing_special: list[str] = (
+                getattr(self.tokenizer, "additional_special_tokens", None) or []
+            )
             self.tokenizer.add_special_tokens(
                 {"additional_special_tokens": [*existing_special, self.audio_token]}
             )
@@ -1147,6 +944,58 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 cfg.eos_token_id = self.tokenizer.eos_token_id
                 cfg.bos_token_id = self.tokenizer.bos_token_id
 
+    def _resolve_eos_token_ids(self) -> list[int]:
+        """Collect the ids generation stops on: turn closer, known end tokens, tokenizer EOS."""
+        # Candidates that don't exist in the tokenizer are filtered out.
+        # `convert_tokens_to_ids` reports "not in vocab" inconsistently: Qwen-
+        # style tokenizers return None, while Gemma's returns unk_token_id.
+        # Filtering on None alone left Gemma with eos_token_id=[unk, unk], so
+        # generation never stopped and every sample ran to max_new_tokens.
+        #
+        # The membership test is a name round-trip, NOT `id == unk_token_id`:
+        # in GPT-2-lineage tokenizers (SmolLM2, Qwen) unk_token *is*
+        # "<|endoftext|>", so comparing ids would discard a legitimate stop
+        # token here while fixing Gemma. A token that fell back to unk comes
+        # back under unk's name; one that is really in the vocab comes back
+        # as itself.
+        #
+        # The name list alone is not enough, and silently produced garbage on
+        # Gemma 4: that template dropped Gemma 2/3's "<end_of_turn>" for a new
+        # "<|turn>role\n ... <turn|>\n" scheme, so all three probes missed and
+        # eos collapsed to the bare "<eos>" -- a token the template never
+        # emits. Training taught the model to close its turn with "<turn|>"
+        # (id 106) and generation then ignored it, running every sample to
+        # max_new_tokens and burying the transcript under 250 copies of
+        # "<turn|>" that `skip_special_tokens` silently swallowed.
+        #
+        # So derive the real terminator from the template instead of guessing
+        # its name: render an assistant turn holding a sentinel and take the
+        # first token that follows it. That token is the turn closer by
+        # construction, for any decoder, including ones released after this
+        # code was written. The name probes stay as a fallback for tokenizers
+        # whose template renders no trailing special token.
+        eos_ids: list[int] = []
+        derived = self._derive_turn_end_token_id()
+        if derived is not None:
+            eos_ids.append(derived)
+        for token in ("<|im_end|>", "<|endoftext|>", "<end_of_turn>"):
+            token_id = self.tokenizer.convert_tokens_to_ids(token)
+            # A single token name maps to a single id (None when unknown).
+            if (
+                not isinstance(token_id, int)
+                or self.tokenizer.convert_ids_to_tokens(token_id) != token
+            ):
+                continue
+            if token_id not in eos_ids:
+                eos_ids.append(token_id)
+        # The chat-template stop tokens above are additions, not replacements:
+        # the tokenizer's own EOS is always a valid stop and is the only one
+        # left for a decoder using none of those three templates.
+        tokenizer_eos = self.tokenizer.eos_token_id
+        if isinstance(tokenizer_eos, int) and tokenizer_eos not in eos_ids:
+            eos_ids.append(tokenizer_eos)
+        return eos_ids
+
     def _derive_turn_end_token_id(self) -> int | None:
         """Return the token id the chat template uses to close an assistant turn.
 
@@ -1177,9 +1026,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             return None
         if not isinstance(rendered, str) or sentinel not in rendered:
             return None
-        tail_ids = self.tokenizer(rendered.split(sentinel)[-1], add_special_tokens=False)[
-            "input_ids"
-        ]
+        tail_ids: list[int] = self.tokenizer(
+            rendered.split(sentinel)[-1], add_special_tokens=False
+        )["input_ids"]
         if not tail_ids:
             return None
         # Require a special token: a template that ends the turn with plain
@@ -1188,7 +1037,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         first = tail_ids[0]
         return first if first in set(self.tokenizer.all_special_ids) else None
 
-    def _apply(self, *args, **kwargs):
+    def _apply(self, *args: Any, **kwargs: Any) -> Self:
         """Repair MPS-unsafe embeddings whenever the model lands on MPS.
 
         Device placement happens after construction -- `pipeline` builds the
@@ -1202,7 +1051,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         full speed. Chunking keeps the model on the GPU -- falling back to CPU
         would be correct but costs roughly an order of magnitude in latency.
         """
-        module = super()._apply(*args, **kwargs)
+        module: Self = super()._apply(*args, **kwargs)
         try:
             on_mps = any(p.device.type == "mps" for p in module.parameters())
         except StopIteration:  # pragma: no cover - parameterless model
@@ -1215,7 +1064,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             )
         return module
 
-    def train(self, mode: bool = True):
+    def train(self, mode: bool = True) -> Self:
         """Set train/eval mode, but keep frozen submodules out of train mode.
 
         HF Trainer calls `model.train()` at the top of every training step, which
@@ -1259,7 +1108,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             # "Norm"). This mirrors what the partial-unfreeze path already gets
             # for free via the `freeze_audio_encoder: true` branch above.
             for module in self.audio_tower.modules():
-                if isinstance(module, torch.nn.modules.batchnorm._BatchNorm):
+                if isinstance(
+                    module,
+                    (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d, nn.SyncBatchNorm),
+                ):
                     module.eval()
         if getattr(self.config, "freeze_language_model", True):
             self.language_model.train(False)
@@ -1267,10 +1119,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     def _set_gradient_checkpointing(
         self,
         enable: bool = True,
-        gradient_checkpointing_func=None,
+        gradient_checkpointing_func: Callable[..., Any] | None = None,
         every_n_layers: int = 1,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         """Enable/disable gradient checkpointing on the trainable submodules.
 
         Routes the request to whichever components are actually trainable in
@@ -1293,7 +1145,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         Upstream sniffs for it to detect the pre-4.35 checkpointing format and
         would silently take the legacy `self.apply(...)` path instead.
         """
-        forwardable = dict(kwargs)
+        forwardable: dict[str, Any] = dict(kwargs)
         forwardable["every_n_layers"] = every_n_layers
         if gradient_checkpointing_func is not None:
             forwardable["gradient_checkpointing_func"] = gradient_checkpointing_func
@@ -1341,7 +1193,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         """Replace the decoder's LM head."""
         self.language_model.set_output_embeddings(new_embeddings)
 
-    def get_processor(self):
+    def get_processor(self) -> ASRProcessor:
         """Get the processor for this model."""
         return ASRProcessor(
             feature_extractor=self.feature_extractor,
@@ -1353,8 +1205,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
     @overload
     def state_dict(
-        self, *, destination: _StateDictT, prefix: str = ..., keep_vars: bool = ...
-    ) -> _StateDictT: ...
+        self, *, destination: StateDictT, prefix: str = ..., keep_vars: bool = ...
+    ) -> StateDictT: ...
 
     @overload
     def state_dict(self, *, prefix: str = ..., keep_vars: bool = ...) -> dict[str, Any]: ...
@@ -1427,7 +1279,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         destination.update({f"{prefix}{k}": v for k, v in sd.items()})
         return destination
 
-    def _ple_text_model(self) -> PerLayerInputsTextModel | None:
+    def _ple_text_model(self) -> "Gemma4TextModel | None":
         """Locate the submodule owning `get_per_layer_inputs`, or None.
 
         Only Gemma 4 style decoders have one. The attribute sits on
@@ -1442,10 +1294,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         for candidate in candidates:
             if candidate is not None and hasattr(candidate, "get_per_layer_inputs"):
                 # Checked just above; only Gemma 4 text models define it.
-                return cast("PerLayerInputsTextModel", candidate)
+                return cast("Gemma4TextModel", candidate)
         return None
 
-    def _per_layer_kwargs(self, input_ids: torch.Tensor | None) -> dict:
+    def _per_layer_kwargs(self, input_ids: torch.Tensor | None) -> dict[str, torch.Tensor]:
         """Precompute Gemma 4 per-layer embeddings (PLE) from clean `input_ids`.
 
         Gemma 4 builds a token-identity PLE component by looking `input_ids` up
@@ -1473,7 +1325,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
     def _embed_tokens(self, input_ids: torch.Tensor | None) -> torch.Tensor:
         """Look `input_ids` up in the decoder's token embedding table."""
-        return self.language_model.get_input_embeddings()(input_ids)
+        embeds: torch.Tensor = self.language_model.get_input_embeddings()(input_ids)
+        return embeds
 
     def _compute_encoder_output_lengths(
         self,
@@ -1737,7 +1590,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         use_cache: bool | None = None,
         cache_position: torch.Tensor | None = None,
         audio_token_counts: torch.Tensor | None = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> CausalLMOutputWithPast:
         """Forward pass for training and inference."""
         if inputs_embeds is None:
@@ -1826,7 +1679,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         if labels is not None and self._lm_accepts_skip_logits:
             kwargs.setdefault("skip_logits", True)
 
-        return self.language_model(
+        outputs: CausalLMOutputWithPast = self.language_model(
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_values=past_key_values,
@@ -1837,8 +1690,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             **ple_kwargs,
             **kwargs,
         )
+        return outputs
 
-    def prepare_inputs_for_generation(self, *args, **kwargs):
+    def prepare_inputs_for_generation(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         """Prepare inputs for generation, handling audio features for cached decoding."""
         input_features = kwargs.pop("input_features", None)
         cache_position = kwargs.get("cache_position")
@@ -1886,7 +1740,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         if not isinstance(chat_result, BatchEncoding):
             msg = f"apply_chat_template returned {type(chat_result).__name__}, not BatchEncoding"
             raise TypeError(msg)
-        ids = chat_result.input_ids
+        ids = chat_result["input_ids"]
         return (ids[0] if ids.dim() > 1 else ids).to(torch.long)
 
     def _left_pad_prompt_rows(
@@ -1961,12 +1815,15 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         Batch 1 and uniform-length batches pad nothing and pass. `eager` is
         correct on MPS at any padding, and the bug is Metal-specific, so a CUDA
-        box is unaffected either way. `_resolve_attn_implementation` documents
+        box is unaffected either way. `resolve_attn_implementation` documents
         the measurements.
         """
         if attention_mask is None or attention_mask.device.type != "mps":
             return
-        if self.language_model.config._attn_implementation != "sdpa":
+        if (
+            self.language_model.config._attn_implementation  # pyright: ignore[reportPrivateUsage]  # transformers has no public accessor
+            != "sdpa"
+        ):
             return
         if not bool((attention_mask == 0).any()):
             return
@@ -1981,7 +1838,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         )
         raise ValueError(msg)
 
-    @torch.no_grad()
+    @torch.no_grad()  # pyright: ignore[reportUntypedFunctionDecorator]
     def generate(
         self,
         *args: Any,
@@ -2027,7 +1884,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # Pull any score-related flags out of generate_kwargs and apply them to
         # a derived generation_config so they actually take effect.
         gen_cfg = self.generation_config
-        score_flags = {}
+        score_flags: dict[str, Any] = {}
         for flag in ("output_scores", "output_logits", "return_dict_in_generate"):
             if flag in generate_kwargs:
                 score_flags[flag] = generate_kwargs.pop(flag)
@@ -2037,24 +1894,12 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 setattr(gen_cfg, flag, value)
             # output_scores requires return_dict_in_generate for HF generate to
             # actually populate .scores on the output object.
-            if gen_cfg.output_scores and not gen_cfg.return_dict_in_generate:
+            if getattr(gen_cfg, "output_scores", None) and not getattr(
+                gen_cfg, "return_dict_in_generate", None
+            ):
                 gen_cfg.return_dict_in_generate = True
 
-        # Generate using language model.
-        #
-        # Default path passes both input_ids and inputs_embeds so
-        # repetition_penalty works correctly (it needs input_ids to track which
-        # tokens have been used). Gemma 4 forbids that combination outright --
-        # "You must specify exactly one of input_ids or inputs_embeds" -- so
-        # there we pass embeds plus the PLE precomputed from the clean prompt
-        # ids. Gemma's prepare_inputs_for_generation drops per_layer_inputs
-        # after the first step, so it is correct to hand it to generate().
-        ple_kwargs = self._per_layer_kwargs(input_ids)
-        lm_inputs = (
-            {"inputs_embeds": inputs_embeds, **ple_kwargs}
-            if ple_kwargs
-            else {"input_ids": input_ids, "inputs_embeds": inputs_embeds}
-        )
+        lm_inputs = self._lm_generate_inputs(input_ids, inputs_embeds)
         output = self.language_model.generate(
             **lm_inputs,
             attention_mask=attention_mask,
@@ -2076,11 +1921,30 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         output.sequences = cast("torch.LongTensor", output.sequences[:, prompt_len:])
         return output
 
+    def _lm_generate_inputs(
+        self, input_ids: torch.Tensor, inputs_embeds: torch.Tensor
+    ) -> dict[str, torch.Tensor]:
+        """The prompt arguments for `language_model.generate`.
+
+        Default path passes both input_ids and inputs_embeds so
+        repetition_penalty and no_repeat_ngram_size see the prompt (they need
+        input_ids to track which tokens have been used). Gemma 4 forbids that
+        combination outright -- "You must specify exactly one of input_ids or
+        inputs_embeds" -- so there we pass embeds plus the PLE precomputed from
+        the clean prompt ids. Gemma's prepare_inputs_for_generation drops
+        per_layer_inputs after the first step, so it is correct to hand it to
+        generate().
+        """
+        ple_kwargs = self._per_layer_kwargs(input_ids)
+        if ple_kwargs:
+            return {"inputs_embeds": inputs_embeds, **ple_kwargs}
+        return {"input_ids": input_ids, "inputs_embeds": inputs_embeds}
+
     def generate_streaming(
         self,
         input_features: torch.Tensor,
         audio_attention_mask: torch.Tensor,
-        **generate_kwargs,
+        **generate_kwargs: Any,
     ) -> Iterator[str]:
         """Generate transcription with streaming token output.
 
@@ -2107,13 +1971,13 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         )
 
         # Prepare generation kwargs
-        gen_kwargs = {
-            "inputs_embeds": inputs_embeds,
+        # Same prompt arguments as generate(); with input_ids present the
+        # streamer's skip_prompt drops the echoed prompt tokens.
+        gen_kwargs: dict[str, Any] = {
+            **self._lm_generate_inputs(input_ids, inputs_embeds),
             "attention_mask": attention_mask,
             "generation_config": self.generation_config,
             "streamer": streamer,
-            # Gemma 4 needs PLE precomputed from the prompt ids; {} elsewhere.
-            **self._per_layer_kwargs(input_ids),
             **generate_kwargs,
         }
 
@@ -2189,7 +2053,11 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         del self.tokenizer
 
         try:
-            super().save_pretrained(save_dir, *args, **kwargs)
+            super().save_pretrained(
+                save_dir,
+                *args,
+                **kwargs,
+            )
         finally:
             self.tokenizer = tokenizer
 
@@ -2228,6 +2096,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         # Add processor auto_map to preprocessor_config.json
         config_path = save_dir / "preprocessor_config.json"
+        processor_config: dict[str, Any]
         if config_path.exists():
             with config_path.open() as f:
                 processor_config = json.load(f)
@@ -2277,10 +2146,43 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         if card_fn is not None:
             card_fn(str(output_dir))
 
-    # Declared the way PreTrainedModel declares its own push_to_hub (through
-    # functools.wraps), so the override has the type its bases expect; see
-    # `_push_to_hub_recording_repo_id` for the behaviour.
-    push_to_hub = functools.wraps(PushToHubMixin.push_to_hub)(_push_to_hub_recording_repo_id)
+    # typeshed's functools._Wrapped (how PreTrainedModel declares push_to_hub) is
+    # not a descriptor, so no method can match it; the signature is the
+    # PushToHubMixin one that PreTrainedModel wraps.
+    def push_to_hub(  # pyright: ignore[reportIncompatibleVariableOverride]
+        self,
+        repo_id: str,
+        *,
+        commit_message: str | None = None,
+        commit_description: str | None = None,
+        private: bool | None = None,
+        token: bool | str | None = None,
+        revision: str | None = None,
+        create_pr: bool = False,
+        max_shard_size: int | str | None = "50GB",
+        tags: list[str] | None = None,
+    ) -> str:
+        """Push model to HuggingFace Hub, ensuring adapter_config points to repo.
+
+        IMPORTANT: Sets base_model_name_or_path in adapter_config.json to repo_id
+        so that transformers pipeline() can load the model correctly. Without this,
+        the pipeline tries to load from "None" which fails.
+        """
+        # Store repo_id in config so save_pretrained can access it
+        self.config.pretrained_model_path = repo_id
+        # Call parent's push_to_hub
+        return PreTrainedModel.push_to_hub(
+            self,
+            repo_id,
+            commit_message=commit_message,
+            commit_description=commit_description,
+            private=private,
+            token=token,
+            revision=revision,
+            create_pr=create_pr,
+            max_shard_size=max_shard_size,
+            tags=tags,
+        )
 
 
 # Register with transformers Auto classes

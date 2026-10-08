@@ -7,7 +7,7 @@ import time
 import traceback
 from importlib import resources
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
 
@@ -58,6 +58,98 @@ def find_test_audio() -> str | None:
     return None
 
 
+def _load_handler(model_path: str) -> "EndpointHandler":
+    """Import tiny_audio.handler and construct its EndpointHandler, exiting on failure."""
+    # Imported here, not at module scope: it pulls in transformers + torch
+    # (~2.8s), which every other `ta dev` command would otherwise pay because
+    # scripts/dev.py imports this module to register the command.
+    try:
+        handler_module = importlib.import_module("tiny_audio.handler")
+    except ImportError as e:
+        typer.echo(f"Failed to import handler: {e}", err=True)
+        typer.echo("   Make sure tiny_audio package is installed", err=True)
+        raise typer.Exit(1) from None
+
+    typer.echo("=" * 80)
+    typer.echo("HuggingFace Inference Endpoint Handler - Local Test Runner")
+    typer.echo("=" * 80)
+
+    typer.echo(f"\nLoading model from: {model_path}")
+    typer.echo("   This may take a moment on first load...")
+
+    start_time = time.time()
+    try:
+        handler: EndpointHandler = handler_module.EndpointHandler(path=model_path)
+    except Exception as e:
+        typer.echo(f"Failed to load model: {e}")
+        traceback.print_exc()
+        raise typer.Exit(1) from None
+    typer.echo(f"Model loaded successfully in {time.time() - start_time:.2f} seconds")
+    return handler
+
+
+def _resolve_audio_path(audio: Path | None) -> str:
+    """Use the --audio file if given, else auto-detect a test clip."""
+    if audio:
+        return str(audio)
+    typer.echo("\nNo audio file specified, searching for test audio...")
+    audio_path = find_test_audio()
+    if not audio_path:
+        msg = "no test audio found; pass one explicitly"
+        raise typer.BadParameter(msg, param_hint="--audio")
+    typer.echo(f"   Found test audio: {audio_path}")
+    return audio_path
+
+
+def _run_single(handler: "EndpointHandler", audio_path: str, params: dict[str, Any]) -> None:
+    """Transcribe one file and print the result (failures are reported, not raised)."""
+    data: dict[str, Any] = {"inputs": audio_path, "parameters": params}
+    typer.echo("\nRunning transcription...")
+    start_time = time.time()
+    try:
+        result = handler(data)
+    except Exception as e:
+        typer.echo(f"Inference failed: {e}")
+        traceback.print_exc()
+        return
+    typer.echo(f"Inference completed in {time.time() - start_time:.2f} seconds")
+    typer.echo("\nTranscription Result:")
+    typer.echo("-" * 40)
+    if isinstance(result, dict):
+        typer.echo(result.get("text", json.dumps(result, indent=2)))
+    else:
+        typer.echo(json.dumps(result, indent=2))
+    typer.echo("-" * 40)
+
+
+def _run_batch(handler: "EndpointHandler", audio_path: str, params: dict[str, Any]) -> None:
+    """Transcribe the same file as a batch of 3 and print per-sample results."""
+    typer.echo("\nTesting batch processing...")
+    batch_size = 3
+    batch_params: dict[str, Any] = {**params, "batch_size": batch_size}
+    data = {"inputs": [audio_path] * batch_size, "parameters": batch_params}
+    typer.echo(f"   Batch size: {batch_size}")
+
+    start_time = time.time()
+    try:
+        result = handler(data)
+    except Exception as e:
+        typer.echo(f"Batch inference failed: {e}")
+        traceback.print_exc()
+        return
+    inference_time = time.time() - start_time
+    typer.echo(f"Batch inference completed in {inference_time:.2f} seconds")
+    typer.echo(f"   Average time per sample: {inference_time / batch_size:.2f} seconds")
+    typer.echo("\nBatch Results:")
+    typer.echo("-" * 40)
+    if isinstance(result, dict) and "texts" in result:
+        for i, text in enumerate(result["texts"], 1):
+            typer.echo(f"Sample {i}: {text}")
+    else:
+        typer.echo(json.dumps(result, indent=2))
+    typer.echo("-" * 40)
+
+
 @app.command()
 def run_handler(
     model: Annotated[
@@ -89,50 +181,15 @@ def run_handler(
     batch_test: Annotated[
         bool, typer.Option("--batch-test", help="Test batch processing with multiple audio files")
     ] = False,
-):
+) -> None:
     """Test the inference endpoint handler locally."""
-    # Imported here, not at module scope: it pulls in transformers + torch
-    # (~2.8s), which every other `ta dev` command would otherwise pay because
-    # scripts/dev.py imports this module to register the command.
-    try:
-        handler_module = importlib.import_module("tiny_audio.handler")
-    except ImportError as e:
-        typer.echo(f"Failed to import handler: {e}", err=True)
-        typer.echo("   Make sure tiny_audio package is installed", err=True)
-        raise typer.Exit(1) from None
-
-    model_path = model
-
-    typer.echo("=" * 80)
-    typer.echo("HuggingFace Inference Endpoint Handler - Local Test Runner")
-    typer.echo("=" * 80)
-
-    typer.echo(f"\nLoading model from: {model_path}")
-    typer.echo("   This may take a moment on first load...")
-
-    start_time = time.time()
-    try:
-        handler: EndpointHandler = handler_module.EndpointHandler(path=model_path)
-    except Exception as e:
-        typer.echo(f"Failed to load model: {e}")
-        traceback.print_exc()
-        raise typer.Exit(1) from None
-    typer.echo(f"Model loaded successfully in {time.time() - start_time:.2f} seconds")
-
-    audio_path = str(audio) if audio else None
-    if audio_path is None:
-        typer.echo("\nNo audio file specified, searching for test audio...")
-        audio_path = find_test_audio()
-        if audio_path:
-            typer.echo(f"   Found test audio: {audio_path}")
-        else:
-            msg = "no test audio found; pass one explicitly"
-            raise typer.BadParameter(msg, param_hint="--audio")
+    handler = _load_handler(model)
+    audio_path = _resolve_audio_path(audio)
 
     typer.echo(f"\nUsing audio file: {audio_path}")
     typer.echo("\nPreparing inference request...")
 
-    params: dict = {
+    params: dict[str, Any] = {
         "max_new_tokens": max_new_tokens,
         "num_beams": num_beams,
         "do_sample": do_sample,
@@ -140,53 +197,12 @@ def run_handler(
     if do_sample:
         params["temperature"] = temperature
 
-    if not batch_test:
-        data = {"inputs": audio_path, "parameters": params}
+    if batch_test:
+        _run_batch(handler, audio_path, params)
+    else:
         typer.echo(f"   Parameters: max_new_tokens={max_new_tokens}, num_beams={num_beams}")
         typer.echo(f"              temperature={temperature}, do_sample={do_sample}")
-
-        typer.echo("\nRunning transcription...")
-        start_time = time.time()
-        try:
-            result = handler(data)
-        except Exception as e:
-            typer.echo(f"Inference failed: {e}")
-            traceback.print_exc()
-        else:
-            typer.echo(f"Inference completed in {time.time() - start_time:.2f} seconds")
-            typer.echo("\nTranscription Result:")
-            typer.echo("-" * 40)
-            if isinstance(result, dict):
-                typer.echo(result.get("text", json.dumps(result, indent=2)))
-            else:
-                typer.echo(json.dumps(result, indent=2))
-            typer.echo("-" * 40)
-
-    if batch_test:
-        typer.echo("\nTesting batch processing...")
-        batch_size = 3
-        batch_params = {**params, "batch_size": batch_size}
-        data = {"inputs": [audio_path] * batch_size, "parameters": batch_params}
-        typer.echo(f"   Batch size: {batch_size}")
-
-        start_time = time.time()
-        try:
-            result = handler(data)
-        except Exception as e:
-            typer.echo(f"Batch inference failed: {e}")
-            traceback.print_exc()
-        else:
-            inference_time = time.time() - start_time
-            typer.echo(f"Batch inference completed in {inference_time:.2f} seconds")
-            typer.echo(f"   Average time per sample: {inference_time / batch_size:.2f} seconds")
-            typer.echo("\nBatch Results:")
-            typer.echo("-" * 40)
-            if isinstance(result, dict) and "texts" in result:
-                for i, text in enumerate(result["texts"], 1):
-                    typer.echo(f"Sample {i}: {text}")
-            else:
-                typer.echo(json.dumps(result, indent=2))
-            typer.echo("-" * 40)
+        _run_single(handler, audio_path, params)
 
     typer.echo("\nTest completed!")
     typer.echo("=" * 80)
