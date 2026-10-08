@@ -380,7 +380,9 @@ def create_demo(model_path: str = "mazesmazes/tiny-audio") -> gr.Blocks:
                     build_output_tabs()
                 )
 
-        show_diarization.change(
+        # gradio attaches event listeners at runtime and only writes the .pyi
+        # stubs declaring them on its first import, so a fresh install has none.
+        show_diarization.change(  # pyright: ignore[reportAttributeAccessIssue]
             fn=toggle_speaker_controls,
             inputs=show_diarization,
             outputs=[num_speakers, max_speakers],
@@ -388,7 +390,9 @@ def create_demo(model_path: str = "mazesmazes/tiny-audio") -> gr.Blocks:
         )
         inputs = [audio_input, show_timestamps, show_diarization, num_speakers, max_speakers]
         outputs = [output_text, conversation_output, timestamps_output, diarization_output, tabs]
-        process_btn.click(fn=process_audio, inputs=inputs, outputs=outputs, api_name="transcribe")
+        process_btn.click(  # pyright: ignore[reportAttributeAccessIssue]
+            fn=process_audio, inputs=inputs, outputs=outputs, api_name="transcribe"
+        )
 
         if EXAMPLE.exists():
             gr.Examples(
