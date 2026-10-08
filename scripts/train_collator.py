@@ -77,7 +77,8 @@ class DataCollator:
         audio_token: str = "<audio>",
     ) -> None:
         self.tokenizer = tokenizer
-        # Every concrete SequenceFeatureExtractor (Whisper, GLM-ASR) is callable.
+        # `SequenceFeatureExtractor` declares no `__call__`, but every concrete
+        # one (Whisper, GLM-ASR) has it; no library type names that surface.
         self.feature_extractor = cast(AudioFeatureExtractor, feature_extractor)
         self.sample_rate = sample_rate
         self.projector = projector
@@ -232,11 +233,7 @@ class DataCollator:
         encoder_lengths = compute_encoder_output_length(mel_lengths, self.encoder_conv_layers)
         assert self.projector is not None, "DataCollator needs a projector to count audio tokens"
         token_counts_tensor = self.projector.get_output_length(encoder_lengths).to(torch.long)
-        # torch annotates `Tensor.tolist` with a bare `list`.
-        audio_token_counts = cast(
-            list[int],
-            token_counts_tensor.tolist(),
-        )
+        audio_token_counts: list[int] = token_counts_tensor.tolist()
 
         text_features = [
             self._build_sample(f, n)

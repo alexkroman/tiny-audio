@@ -34,7 +34,6 @@ from tenacity import RetryError, retry, retry_if_result, stop_after_delay, wait_
 from scripts.deploy import gpu_catalog
 from scripts.deploy.hub_sizes import (
     NON_LM_TOWER_PREFIXES,
-    ConfigLoader,
     hidden_dim,
     lora_trainable_params,
     repo_weight_bytes,
@@ -45,6 +44,8 @@ from scripts.train_config import register_configs
 from scripts.utils import get_project_root
 
 if TYPE_CHECKING:
+    from transformers import AutoConfig
+
     from tiny_audio.asr_config import ASRConfig, ConvLayerSpec
     from tiny_audio.projectors import MLPAudioProjector
 
@@ -163,7 +164,7 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
     # Imported lazily: transformers + tiny_audio cost several seconds, which
     # every `ta runpod` command would otherwise pay because runpod.py imports
     # this module.
-    auto_config: ConfigLoader = importlib.import_module("transformers").AutoConfig
+    auto_config: type[AutoConfig] = importlib.import_module("transformers").AutoConfig
     asr_config_cls: type[ASRConfig] = importlib.import_module("tiny_audio.asr_config").ASRConfig
     projector_classes: dict[str, type[MLPAudioProjector]] = importlib.import_module(
         "tiny_audio.projectors"

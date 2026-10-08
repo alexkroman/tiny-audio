@@ -1,8 +1,8 @@
 import base64
 import io
 import pathlib
-from collections.abc import Callable, Sequence
-from typing import Any, Literal, Protocol, TypedDict, cast
+from collections.abc import Callable
+from typing import Any, TypedDict, cast
 
 import matplotlib
 
@@ -15,81 +15,14 @@ from datasets import (
     Dataset,
     load_dataset,
 )
-from matplotlib.colorbar import Colorbar
+from matplotlib.axes import Axes
 from matplotlib.figure import Figure
-from matplotlib.image import AxesImage
-from matplotlib.patches import Patch, Rectangle
+from matplotlib.patches import Rectangle
 from transformers import BatchFeature
 
 from tiny_audio.asr_modeling import ASRModel
 
 FloatArray = npt.NDArray[np.floating[Any]]
-
-
-class _Axes(Protocol):
-    """The `matplotlib.axes.Axes` calls this script makes, with the keywords it passes."""
-
-    def axis(self, arg: Literal["off"], /) -> object: ...
-    def add_patch(self, p: Patch, /) -> Patch: ...
-    def text(
-        self,
-        x: float,
-        y: float,
-        s: str,
-        *,
-        ha: str,
-        va: str,
-        fontsize: float,
-        fontweight: str,
-    ) -> object: ...
-    def annotate(
-        self,
-        text: str,
-        xy: tuple[float, float],
-        *,
-        xytext: tuple[float, float],
-        arrowprops: dict[str, Any],
-    ) -> object: ...
-    def set_xlim(self, left: float, right: float, /) -> object: ...
-    def set_ylim(self, bottom: float, top: float, /) -> object: ...
-    def set_title(
-        self, label: str, *, fontsize: float = ..., fontweight: str = ..., pad: float = ...
-    ) -> object: ...
-    def set_xlabel(self, xlabel: str, /) -> object: ...
-    def set_ylabel(self, ylabel: str, /) -> object: ...
-    def plot(
-        self, x: FloatArray, y: Sequence[float], /, *, color: str, linewidth: float
-    ) -> object: ...
-    def axhline(self, *, y: float, color: str, linestyle: str, linewidth: float) -> object: ...
-    def grid(self, visible: bool, /, *, alpha: float) -> None: ...
-    def imshow(
-        self,
-        x: FloatArray,
-        /,
-        *,
-        aspect: str,
-        origin: str,
-        cmap: str,
-        vmin: float | None = ...,
-        vmax: float | None = ...,
-    ) -> AxesImage: ...
-    def set_xticks(self, ticks: FloatArray, /) -> object: ...
-    def set_xticklabels(self, labels: Sequence[str], /) -> object: ...
-
-
-class _Figure(Protocol):
-    """The `matplotlib.figure.Figure` calls this script makes."""
-
-    def savefig(
-        self,
-        fname: io.BytesIO,
-        /,
-        *,
-        format: str,  # noqa: A002 -- matplotlib's keyword
-        dpi: int,
-        bbox_inches: str,
-    ) -> None: ...
-    def colorbar(self, mappable: AxesImage, /, *, ax: _Axes, label: str) -> Colorbar: ...
 
 
 class TensorStats(TypedDict):
@@ -125,15 +58,14 @@ class TracePayload(TypedDict):
     projector_output: ProjectorOutput
 
 
-def _subplots(width: float, height: float) -> tuple[_Figure, _Axes]:
-    """`plt.subplots(figsize=(width, height))` for a single Axes."""
+def _subplots(width: float, height: float) -> tuple[Figure, Axes]:
+    """`plt.subplots(figsize=(width, height))` for a single Axes.
+
+    pyplot types the second element as `Any` because its shape depends on
+    nrows/ncols; with the default 1x1 grid it is one `Axes`.
+    """
     fig, ax = plt.subplots(figsize=(width, height))
-    return cast(_Figure, fig), cast(_Axes, ax)
-
-
-def _to_numpy(tensor: torch.Tensor) -> FloatArray:
-    # torch annotates numpy() as a bare ndarray.
-    return cast(FloatArray, tensor.numpy())
+    return fig, ax
 
 
 def main() -> None:
@@ -144,7 +76,7 @@ def main() -> None:
         Dataset,
         load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation"),
     )
-    row = cast("dict[str, Any]", dataset[0])
+    row: dict[str, Any] = dataset[0]
     audio_sample: dict[str, Any] = row["audio"]
     waveform: FloatArray = audio_sample["array"]
     sampling_rate: int = audio_sample["sampling_rate"]
@@ -168,7 +100,7 @@ def main() -> None:
         encoder_device = "cpu"
 
     model.projector = model.projector.to(encoder_device)
-    _module_eval(model)
+    model.eval()
     print(f"✓ Model loaded to '{encoder_device}' device.")
 
     # --- 3. Process data ---
@@ -179,7 +111,7 @@ def main() -> None:
     extract_features = cast(Callable[..., BatchFeature], model.feature_extractor)
     features = extract_features(waveform, sampling_rate=sampling_rate, return_tensors="pt")
     input_features: torch.Tensor = features["input_features"]
-    spectrogram = _to_numpy(input_features.squeeze(0).cpu())
+    spectrogram: FloatArray = input_features.squeeze(0).cpu().numpy()
     print(f"  Spectrogram shape: {spectrogram.shape}")
 
     # Get Encoder Output
@@ -210,11 +142,7 @@ def main() -> None:
 
         # Normalize for cosine similarity
         proj_norm = projector_flat / projector_flat.norm(dim=-1, keepdim=True)
-        # torch leaves Tensor.norm's `dim` / `dtype` unannotated.
-        text_norms = cast(
-            torch.Tensor,
-            text_embeddings.norm(dim=-1, keepdim=True),
-        )
+        text_norms: torch.Tensor = text_embeddings.norm(dim=-1, keepdim=True)
         text_norm = text_embeddings / text_norms
 
         # Get top token for each time step
@@ -238,8 +166,8 @@ def main() -> None:
     audio_duration = len(waveform) / sampling_rate  # Calculate duration from original waveform
 
     # Use full embedding space for visualization
-    encoder_viz_data = _to_numpy(encoder_output.squeeze(0).cpu().float())
-    projector_viz_data = _to_numpy(projector_output.squeeze(0).cpu().float())
+    encoder_viz_data: FloatArray = encoder_output.squeeze(0).cpu().float().numpy()
+    projector_viz_data: FloatArray = projector_output.squeeze(0).cpu().float().numpy()
 
     data_payload: TracePayload = {
         "reference_text": reference_text,
@@ -279,15 +207,6 @@ def main() -> None:
     print(f"\n✓ Saved HTML report to '{output_path}'")
 
 
-def _module_eval(module: torch.nn.Module) -> None:
-    """`module.eval()`, in place.
-
-    transformers leaves `PreTrainedModel.eval` unannotated; typed as
-    `nn.Module` the call resolves. Same method at runtime.
-    """
-    module.eval()
-
-
 def get_stats(tensor: torch.Tensor, name: str) -> TensorStats:
     return {
         "name": name,
@@ -299,13 +218,13 @@ def get_stats(tensor: torch.Tensor, name: str) -> TensorStats:
     }
 
 
-def fig_to_base64(fig: _Figure) -> str:
+def fig_to_base64(fig: Figure) -> str:
     """Convert matplotlib figure to base64 encoded image."""
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
     buf.seek(0)
     img_base64 = base64.b64encode(buf.read()).decode("utf-8")
-    plt.close(cast(Figure, fig))
+    plt.close(fig)
     return f"data:image/png;base64,{img_base64}"
 
 

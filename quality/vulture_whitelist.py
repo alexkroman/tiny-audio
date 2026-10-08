@@ -6,8 +6,6 @@ used only in quoted annotations are invisible to vulture. Add a name here only
 for one of those reasons, never to silence genuinely dead code.
 """
 
-function  # unused variable (scripts/train.py:115)
-input_columns  # unused variable (scripts/train.py:118)
 raw_tokens  # unused variable (tiny_audio/alignment.py:17)
 processor_kwargs  # unused variable (tiny_audio/alignment.py:70)
 Gemma4TextModel  # unused import (tiny_audio/asr_modeling.py:45)

@@ -10,7 +10,7 @@ from __future__ import annotations
 import functools
 import json
 import subprocess
-from typing import Any, cast
+from typing import Any
 
 
 def runpodctl_json(*args: str) -> str:
@@ -101,7 +101,8 @@ def datacenter_catalog() -> tuple[dict[str, Any], ...]:
     """
     try:
         out = runpodctl_json("datacenter", "list")
-        return tuple(cast("list[dict[str, Any]]", json.loads(out[out.index("[") :])))
+        rows: list[dict[str, Any]] = json.loads(out[out.index("[") :])
+        return tuple(rows)
     except Exception:
         return ()
 
@@ -125,7 +126,7 @@ def datacenters_for_gpu(
     hits: list[tuple[str, str, str]] = [
         (dc["id"], dc.get("location", "?"), gpu.get("stockStatus", ""))
         for dc in catalog
-        for gpu in cast("list[dict[str, Any]]", dc.get("gpuAvailability", []))
+        for gpu in dc.get("gpuAvailability", [])
         if gpu.get("gpuId") == gpu_id
         and (not require_network_volume or dc["id"] in NETWORK_VOLUME_DATACENTERS)
     ]

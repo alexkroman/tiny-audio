@@ -4,7 +4,7 @@ This module contains all projector architectures:
 - MLPAudioProjector: Simple 2-layer MLP with frame stacking downsampling
 """
 
-from typing import cast, overload
+from typing import overload
 
 import torch
 import torch.nn as nn
@@ -134,7 +134,7 @@ class MLPAudioProjector(nn.Module):
         x = self.input_norm(x)
         x = self.linear_1(x)
         x = self.act(x)
-        return cast(torch.Tensor, self.linear_2(x))
+        return self.linear_2(x)
 
 
 # =============================================================================

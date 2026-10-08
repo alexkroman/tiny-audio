@@ -3,56 +3,16 @@
 import re
 from collections.abc import Iterator, MutableMapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, TypedDict, cast
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 import numpy as np
 import numpy.typing as npt
 import torch
 import transformers
+from transformers.pipelines.audio_utils import ffmpeg_read
 
 if TYPE_CHECKING:
-    from transformers import PreTrainedModel, PreTrainedTokenizerBase, SequenceFeatureExtractor
-
-    def ffmpeg_read(bpayload: bytes, sampling_rate: int) -> npt.NDArray[np.float32]:
-        """`transformers.pipelines.audio_utils.ffmpeg_read`: decode audio bytes to mono float32."""
-        ...
-
-    class _ASRPipelineBase(transformers.AutomaticSpeechRecognitionPipeline):
-        """Static view of the parent pipeline's constructor and parameter sanitizer.
-
-        transformers leaves these partly unannotated (or annotated with an
-        uninstalled optional dependency, pyctcdecode), so neither checker can
-        resolve a call through `super()`. This restates them. Type-checking
-        only; at runtime the base is the parent pipeline itself.
-        """
-
-        def __init__(
-            self,
-            model: PreTrainedModel,
-            feature_extractor: SequenceFeatureExtractor | None = None,
-            tokenizer: PreTrainedTokenizerBase | None = None,
-            **kwargs: Any,
-        ) -> None:
-            """`AutomaticSpeechRecognitionPipeline.__init__`."""
-            ...
-
-        def _sanitize_parameters(
-            self,
-            chunk_length_s: float | None = None,
-            stride_length_s: float | None = None,
-            ignore_warning: bool | None = None,
-            decoder_kwargs: dict[str, Any] | None = None,
-            return_timestamps: bool | str | None = None,
-            return_language: bool | None = None,
-            **generate_kwargs: Any,
-        ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-            """`AutomaticSpeechRecognitionPipeline._sanitize_parameters`."""
-            ...
-
-else:
-    from transformers.pipelines.audio_utils import ffmpeg_read
-
-    _ASRPipelineBase = transformers.AutomaticSpeechRecognitionPipeline
+    from transformers import PreTrainedTokenizerBase, SequenceFeatureExtractor
 
 if TYPE_CHECKING:
     from .alignment import QwenForcedAligner
@@ -140,47 +100,7 @@ class _DiarizationParams(TypedDict):
     max_speakers: int | None
 
 
-class _ParentStages(Protocol):
-    """The parent pipeline's stages as ASRPipeline calls them through `super()`.
-
-    transformers types `Pipeline`'s stages for single-shot pipelines (a dict
-    from `preprocess`, a `ModelOutput` from `_forward`), not for the chunked
-    ASR pipeline, whose `preprocess` is a generator and whose own overrides
-    are unannotated.
-    """
-
-    def __call__(self, inputs: Any, **kwargs: Any) -> dict[str, Any] | list[dict[str, Any]]:
-        """Run the pipeline: one dict per input, a list for a batch."""
-        ...
-
-    def preprocess(
-        self, inputs: Any, chunk_length_s: float = 0, stride_length_s: float | None = None
-    ) -> Iterator[dict[str, Any]]:
-        """Yield model-input dicts for one audio input."""
-        ...
-
-    def postprocess(
-        self,
-        model_outputs: Any,
-        decoder_kwargs: dict[str, Any] | None = None,
-        return_timestamps: bool | str | None = None,
-        return_language: bool | None = None,
-    ) -> dict[str, Any]:
-        """Decode model outputs to `{"text": ...}`."""
-        ...
-
-
-class _TokenDecoder(Protocol):
-    """`decode` as called here (transformers leaves its `**kwargs` unannotated)."""
-
-    def decode(
-        self, token_ids: list[int] | torch.Tensor, skip_special_tokens: bool = False
-    ) -> str | list[str]:
-        """Token ids to text."""
-        ...
-
-
-class ASRPipeline(_ASRPipelineBase):
+class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
     """ASR Pipeline for audio-to-text transcription."""
 
     model: ASRModel
@@ -199,12 +119,12 @@ class ASRPipeline(_ASRPipelineBase):
             feature_extractor = model.get_processor().feature_extractor
 
         super().__init__(
-            model=model, feature_extractor=feature_extractor, tokenizer=tokenizer, **kwargs
+            model=model,
+            feature_extractor=feature_extractor,
+            # Annotated as the slow `PreTrainedTokenizer`, but any tokenizer works.
+            tokenizer=tokenizer,  # pyright: ignore[reportArgumentType]
+            **kwargs,
         )
-
-    def _parent(self) -> _ParentStages:
-        """`super()`, typed as the parent stages this pipeline delegates to."""
-        return cast("_ParentStages", super())
 
     def _sanitize_parameters(
         self,
@@ -324,7 +244,7 @@ class ASRPipeline(_ASRPipelineBase):
         """
         audio = self._extract_audio(inputs)
         if audio is None:
-            return self._parent().__call__(inputs, **kwargs)
+            return super().__call__(inputs, **kwargs)
         array = np.asarray(audio["array"], dtype=np.float32)
         sr = audio.get("sampling_rate", 16000)
 
@@ -349,10 +269,10 @@ class ASRPipeline(_ASRPipelineBase):
         """One model call on one chunk; digital silence is "" without calling the model."""
         if is_silent(chunk):
             return {"text": ""}
-        # One input in, one dict out; the parent is typed for batches as well.
+        # One input in, one dict out; the parent is annotated as always returning a list.
         return cast(
             "dict[str, Any]",
-            self._parent().__call__({"raw": chunk, "sampling_rate": sample_rate}, **kwargs),
+            super().__call__({"raw": chunk, "sampling_rate": sample_rate}, **kwargs),
         )
 
     def _transcribe_timed(
@@ -416,7 +336,7 @@ class ASRPipeline(_ASRPipelineBase):
     def _extract_audio(self, inputs: object) -> _RawAudio | None:
         """Extract audio array from various input formats using HF utilities."""
         if isinstance(inputs, dict):
-            sample = cast("dict[str, Any]", inputs)
+            sample = inputs
             if "array" in sample:
                 return {
                     "array": sample["array"],
@@ -440,7 +360,7 @@ class ASRPipeline(_ASRPipelineBase):
 
         return None
 
-    # `Pipeline` annotates its stages for single-shot pipelines (see `_ParentStages`).
+    # `Pipeline` annotates its stages for single-shot pipelines; this one is a generator.
     def preprocess(  # type: ignore[override]
         self, *args: Any, **preprocess_params: Any
     ) -> Iterator[dict[str, Any]]:
@@ -458,7 +378,7 @@ class ASRPipeline(_ASRPipelineBase):
         # Handle dict with "array" key (from datasets)
         if isinstance(inputs, dict) and "array" in inputs:
             assert self.feature_extractor is not None  # always set by __init__
-            sample = cast("dict[str, Any]", inputs)
+            sample = inputs
             inputs = {
                 "raw": sample["array"],
                 "sampling_rate": sample.get("sampling_rate", self.feature_extractor.sampling_rate),
@@ -480,7 +400,7 @@ class ASRPipeline(_ASRPipelineBase):
         )
         if lead_in > 0 and isinstance(inputs, dict) and "raw" in inputs:
             assert self.feature_extractor is not None  # always set by __init__
-            padded: dict[str, Any] = dict(cast("dict[str, Any]", inputs))
+            padded: dict[str, Any] = dict(inputs)
             padded["raw"] = prepend_lead_in(
                 padded["raw"],
                 padded.get("sampling_rate", self.feature_extractor.sampling_rate),
@@ -488,7 +408,7 @@ class ASRPipeline(_ASRPipelineBase):
             )
             inputs = padded
 
-        for item in self._parent().preprocess(inputs, **preprocess_params):
+        for item in super().preprocess(inputs, **preprocess_params):
             if "is_last" not in item:
                 item["is_last"] = True
             yield item
@@ -600,7 +520,7 @@ class ASRPipeline(_ASRPipelineBase):
 
         tokens = model_outputs.get("tokens")
         if tokens is None:
-            return self._parent().postprocess(
+            return super().postprocess(
                 model_outputs,
                 decoder_kwargs=decoder_kwargs,
                 return_timestamps=return_timestamps,
@@ -624,7 +544,7 @@ class ASRPipeline(_ASRPipelineBase):
             tokens = [t for t in token_ids if t not in eos_set]
 
         assert self.tokenizer is not None  # always set by __init__
-        decoded = cast("_TokenDecoder", self.tokenizer).decode(tokens, skip_special_tokens=True)
+        decoded = self.tokenizer.decode(tokens, skip_special_tokens=True)
         assert isinstance(decoded, str)  # one sequence in, one string out
         text = decoded.strip()
         # Strip <think>...</think> tags (Qwen3 doesn't respect /no_think prompt)

@@ -68,8 +68,7 @@ def load_embedded_training_knobs() -> dict[str, float | None]:
             "projector_weight_decay": None,
         }
     cfg = OmegaConf.to_container(OmegaConf.load(yaml_path))
-    # A YAML mapping's keys are strings.
-    root = cast(dict[str, Any], cfg) if isinstance(cfg, dict) else {}
+    root = cfg if isinstance(cfg, dict) else {}
     training: dict[str, Any] = root.get("training") or {}
 
     def _to_float(v: Any) -> float | None:

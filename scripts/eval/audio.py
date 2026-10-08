@@ -3,7 +3,7 @@
 import functools
 import io
 import re
-from typing import Any, ClassVar, Protocol, TypeGuard, cast, runtime_checkable
+from typing import Any, ClassVar, Protocol, TypeGuard, runtime_checkable
 
 import librosa
 import numpy as np
@@ -49,11 +49,7 @@ def is_str_dict(value: object) -> TypeGuard[dict[str, Any]]:
 def audio_to_wav_bytes(audio_array: AudioArray | torch.Tensor, sample_rate: int) -> bytes:
     """Convert audio array to WAV bytes using soundfile."""
     if isinstance(audio_array, torch.Tensor):
-        # torch annotates numpy() as a bare ndarray.
-        audio_array = cast(
-            AudioArray,
-            audio_array.numpy(),
-        )
+        audio_array = audio_array.numpy()
     if audio_array.ndim > 1:
         audio_array = audio_array.squeeze()
 
@@ -110,11 +106,7 @@ def as_16k_array(audio: object) -> AudioArray:
         array, sample_rate = sf.read(io.BytesIO(prepare_wav_bytes(audio)))
 
     if sample_rate != 16000:
-        # librosa annotates arrays as bare np.ndarray.
-        array = cast(
-            AudioArray,
-            librosa.resample(array, orig_sr=sample_rate, target_sr=16000),
-        )
+        array = librosa.resample(array, orig_sr=sample_rate, target_sr=16000)
     return array
 
 
@@ -180,12 +172,6 @@ def _english_normalizer() -> EnglishTextNormalizer:
     Constructing it pulls the whisper-tiny tokenizer, and a `ta eval -d all`
     run builds one TextNormalizer per evaluator per dataset.
     """
-    tokenizer = cast(
-        WhisperTokenizer,
-        WhisperTokenizer.from_pretrained("openai/whisper-tiny"),
-    )
-    spelling = cast(
-        "dict[str, str]",
-        tokenizer.english_spelling_normalizer,
-    )
+    tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-tiny")
+    spelling: dict[str, str] = tokenizer.english_spelling_normalizer
     return EnglishTextNormalizer(spelling)  # type: ignore[no-untyped-call]  # unannotated __init__

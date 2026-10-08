@@ -8,8 +8,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Iterable, Mapping
-from typing import TYPE_CHECKING, Any, Protocol, Unpack, cast
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Unpack, cast
 
 import assemblyai as aai
 import numpy as np
@@ -461,7 +461,7 @@ class LocalStreamingEvaluator(Evaluator):
 
         # Collect tokens and measure TTFB
         tokens: list[str] = []
-        for text in cast(Iterable[str], streamer):
+        for text in streamer:
             if first_token_time[0] is None and text:
                 first_token_time[0] = time.time()
             tokens.append(text)
@@ -503,21 +503,12 @@ class LocalStreamingEvaluator(Evaluator):
         return metrics
 
 
-class _SpeechRecognitionClient(Protocol):
-    """The slice of `huggingface_hub.InferenceClient` EndpointEvaluator calls.
-
-    The response type is a dict subclass carrying the endpoint's JSON fields.
-    """
-
-    def automatic_speech_recognition(self, audio: bytes, /) -> Mapping[str, Any]: ...
-
-
 class EndpointEvaluator(Evaluator):
     """Evaluator for HuggingFace Inference Endpoints."""
 
     def __init__(self, endpoint_url: str, **kwargs: Unpack[EvaluatorOptions]) -> None:
         super().__init__(**kwargs)
-        self.client: _SpeechRecognitionClient = InferenceClient(base_url=endpoint_url)
+        self.client = InferenceClient(base_url=endpoint_url)
 
     def transcribe(self, audio: object) -> Transcription:
         wav_bytes = prepare_wav_bytes(audio)
@@ -526,7 +517,9 @@ class EndpointEvaluator(Evaluator):
         result = self.client.automatic_speech_recognition(wav_bytes)
         elapsed = time.time() - start
 
-        text: str = result.get("text", result.get("transcription", ""))
+        # The output is a dict subclass holding the endpoint's raw JSON fields;
+        # an endpoint that answers with `transcription` leaves `.text` unset.
+        text: str = result.text if "text" in result else result.get("transcription", "")
         return text, elapsed, None
 
 

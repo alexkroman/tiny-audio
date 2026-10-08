@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import IO, Any, Unpack, cast
+from typing import IO, Any, Unpack
 
 import numpy as np
 import soundfile as sf
@@ -281,10 +281,7 @@ class SwiftSDKEvaluator(Evaluator):
         # AudioDecoder / AudioSamples fallback for torchcodec / SDK-style inputs.
         if isinstance(audio, LazyAudioDecoder):
             samples = audio.get_all_samples()
-            data = cast(
-                "np.ndarray[Any, np.dtype[np.floating[Any]]]",
-                samples.data.detach().cpu().numpy(),
-            )
+            data: np.ndarray[Any, np.dtype[np.floating[Any]]] = samples.data.detach().cpu().numpy()
             sr = int(samples.sample_rate)
             if data.ndim > 1:
                 data = data.mean(axis=0)

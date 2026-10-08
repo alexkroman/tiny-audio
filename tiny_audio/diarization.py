@@ -1,8 +1,7 @@
 """Speaker diarization with NVIDIA Nemotron-3-Diarization."""
 
 import importlib.util
-from collections.abc import KeysView
-from typing import Any, Protocol, TypedDict, TypeVar, cast
+from typing import Any, Protocol, TypedDict
 
 import numpy as np
 import numpy.typing as npt
@@ -11,10 +10,9 @@ import torchaudio
 from transformers import (
     AutoModelForAudioFrameClassification,
     AutoProcessor,
+    BatchFeature,
     PreTrainedModel,
 )
-
-_T_co = TypeVar("_T_co", covariant=True)
 
 
 class SpeakerSegment(TypedDict):
@@ -25,34 +23,10 @@ class SpeakerSegment(TypedDict):
     end: float
 
 
-class _Loader(Protocol[_T_co]):
-    """A class with `from_pretrained`, as called here."""
-
-    def from_pretrained(self, pretrained_model_name_or_path: str, /) -> _T_co:
-        """Load from the Hub or a local directory."""
-        ...
-
-
-class _ModelInputs(Protocol):
-    """What `activity` uses of the processor's `BatchFeature`."""
-
-    def to(self, device: torch.device, *, dtype: torch.dtype) -> "_ModelInputs":
-        """Move tensors to `device`, casting floating ones to `dtype`."""
-        ...
-
-    def keys(self) -> KeysView[str]:
-        """Input names."""
-        ...
-
-    def __getitem__(self, key: str, /) -> torch.Tensor:
-        """One input tensor."""
-        ...
-
-
 class _AudioProcessor(Protocol):
     """What `activity` uses of the Nemotron processor (its class ships after 5.17)."""
 
-    def __call__(self, audio: npt.NDArray[np.float32], *, sampling_rate: int) -> _ModelInputs:
+    def __call__(self, audio: npt.NDArray[np.float32], *, sampling_rate: int) -> BatchFeature:
         """Turn 16 kHz mono audio into model inputs."""
         ...
 
@@ -81,25 +55,6 @@ def _label_runs(labels: npt.NDArray[np.generic]) -> list[tuple[int, int, int]]:
     starts = np.concatenate(([0], change))
     ends = np.concatenate((change, [labels.size]))
     return [(labels[s].item(), int(s), int(e)) for s, e in zip(starts, ends, strict=True)]
-
-
-def _module_to(module: torch.nn.Module, device: torch.device) -> None:
-    """`module.to(device)`, in place.
-
-    `PreTrainedModel.to` is wrapped with `functools.wraps`, which type checkers
-    can't bind as a method; typed as `nn.Module` the call resolves. Same method
-    at runtime: it moves the module in place and returns it.
-    """
-    module.to(device)
-
-
-def _module_eval(module: torch.nn.Module) -> None:
-    """`module.eval()`, in place.
-
-    transformers leaves `PreTrainedModel.eval` unannotated; typed as
-    `nn.Module` the call resolves. Same method at runtime.
-    """
-    module.eval()
 
 
 class NemotronDiarizer:
@@ -139,13 +94,14 @@ class NemotronDiarizer:
                     "pip install git+https://github.com/huggingface/transformers"
                 )
                 raise ImportError(msg)
-            model_loader = cast("_Loader[PreTrainedModel]", AutoModelForAudioFrameClassification)
-            model = model_loader.from_pretrained(cls.MODEL_ID)
-            _module_to(model, get_device())
-            _module_eval(model)
+            model: PreTrainedModel = AutoModelForAudioFrameClassification.from_pretrained(
+                cls.MODEL_ID
+            )
+            model.to(get_device())  # pyright: ignore[reportArgumentType]  # `to` is functools.wraps'd
+            model.eval()
             cls._model = model
-            processor_loader = cast("_Loader[_AudioProcessor]", AutoProcessor)
-            cls._processor = processor_loader.from_pretrained(cls.MODEL_ID)
+            processor: _AudioProcessor = AutoProcessor.from_pretrained(cls.MODEL_ID)
+            cls._processor = processor
         return cls._model, cls._processor
 
     @classmethod

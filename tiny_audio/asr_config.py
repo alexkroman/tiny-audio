@@ -1,7 +1,7 @@
 """Configuration for the ASR model: encoder, decoder, projector and training options."""
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, cast, overload
+from typing import TYPE_CHECKING, Any, overload
 
 import transformers
 
@@ -72,19 +72,6 @@ def compute_encoder_output_length(
     for padding, kernel_size, stride in layers:
         length = (length + 2 * padding - (kernel_size - 1) - 1) // stride + 1
     return length
-
-
-def _load_auto_config(model_id: str, **kwargs: Any) -> transformers.PretrainedConfig:
-    """`AutoConfig.from_pretrained`, whose signature transformers leaves partly untyped."""
-    return cast(
-        transformers.PretrainedConfig,
-        transformers.AutoConfig.from_pretrained(model_id, **kwargs),
-    )
-
-
-def text_config_of(config: transformers.PretrainedConfig) -> transformers.PretrainedConfig:
-    """`config.get_text_config()`: the decoder sub-config, or `config` itself."""
-    return config.get_text_config()
 
 
 def _config_from_dict(model_type: str, values: dict[str, Any]) -> transformers.PretrainedConfig:
@@ -376,7 +363,7 @@ class ASRConfig(transformers.PretrainedConfig):  # type: ignore[no-untyped-call]
 
         audio_config: transformers.PretrainedConfig | dict[str, Any]
         if "audio_config" not in kwargs:
-            audio_config = _load_auto_config(audio_model_id)
+            audio_config = transformers.AutoConfig.from_pretrained(audio_model_id)
             # Override dtype to match model_dtype
             audio_config.dtype = model_dtype
         else:
@@ -385,7 +372,9 @@ class ASRConfig(transformers.PretrainedConfig):  # type: ignore[no-untyped-call]
 
         text_config: transformers.PretrainedConfig | dict[str, Any]
         if "text_config" not in kwargs:
-            text_config = _load_auto_config(text_model_id, trust_remote_code=True)
+            text_config = transformers.AutoConfig.from_pretrained(
+                text_model_id, trust_remote_code=True
+            )
             # Override dtype to match model_dtype
             text_config.dtype = model_dtype
         else:

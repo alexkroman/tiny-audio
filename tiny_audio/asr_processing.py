@@ -1,7 +1,7 @@
 """Processor that turns raw audio (and optional text) into model inputs."""
 
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast, overload
+from typing import TYPE_CHECKING, Any, ClassVar, cast, overload
 
 import numpy as np
 import numpy.typing as npt
@@ -23,6 +23,7 @@ if TYPE_CHECKING:
         compute_encoder_output_length,
     )
     from .asr_types import AudioFeatureExtractor, AudioInput, Waveform
+    from .projectors import MLPAudioProjector
 else:
     try:
         from .asr_config import (
@@ -42,46 +43,6 @@ else:
         from asr_types import AudioInput
 
 
-class _OutputLengthProjector(Protocol):
-    """What the processor uses of the audio projector."""
-
-    def get_output_length(self, input_length: int) -> int:
-        """Number of audio embeddings for `input_length` encoder frames."""
-        ...
-
-
-class _ChatTokenizer(Protocol):
-    """`apply_chat_template` as called here (transformers leaves `**kwargs` unannotated)."""
-
-    def apply_chat_template(
-        self,
-        conversation: list[dict[str, str]],
-        *,
-        tokenize: bool,
-        add_generation_prompt: bool,
-        return_tensors: str,
-        enable_thinking: bool,
-    ) -> torch.Tensor | Mapping[str, torch.Tensor]:
-        """Render and tokenize a chat; with `return_tensors="pt"`, ids as tensors."""
-        ...
-
-
-class _AutoClassRegistrable(Protocol):
-    """`ProcessorMixin.register_for_auto_class`, which transformers leaves unannotated."""
-
-    def register_for_auto_class(self, auto_class: str = ...) -> None:
-        """Register this class with the given auto class for remote code."""
-        ...
-
-
-class _ProcessorRegistry(Protocol):
-    """`AutoProcessor.register`, which transformers leaves unannotated."""
-
-    def register(self, config_class: type[Any], processor_class: type[Any]) -> None:
-        """Map a config class to its processor class."""
-        ...
-
-
 def left_pad_prompt_rows(
     rows: list[torch.Tensor], tokenizer: PreTrainedTokenizerBase
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -92,6 +53,7 @@ def left_pad_prompt_rows(
     token, falling back to eos, then 0. Pad positions never carry
     `audio_token_id`, so the model's masked_scatter is unaffected.
     """
+    # transformers types special-token ids as any token value; a single id is an int.
     pad_id = cast("int | None", tokenizer.pad_token_id)
     if pad_id is None:
         pad_id = cast("int | None", tokenizer.eos_token_id) or 0
@@ -167,7 +129,7 @@ class ASRProcessor(ProcessorMixin):
         self,
         feature_extractor: SequenceFeatureExtractor,
         tokenizer: PreTrainedTokenizerBase,
-        projector: _OutputLengthProjector | None = None,
+        projector: "MLPAudioProjector | None" = None,
         encoder_conv_layers: list[ConvLayerSpec] | None = None,
         audio_token: str | None = None,
         lead_in_seconds: float = 0.0,
@@ -208,12 +170,16 @@ class ASRProcessor(ProcessorMixin):
         if text is not None:
             messages.append({"role": "assistant", "content": text})
 
-        tokenized = cast("_ChatTokenizer", self.tokenizer).apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=(text is None),
-            return_tensors="pt",
-            enable_thinking=False,  # Disable Qwen3 thinking mode for ASR
+        # With `tokenize=True, return_tensors="pt"` the ids come back as tensors.
+        tokenized = cast(
+            "torch.Tensor | Mapping[str, torch.Tensor]",
+            self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=(text is None),
+                return_tensors="pt",
+                enable_thinking=False,  # Disable Qwen3 thinking mode for ASR
+            ),
         )
 
         # apply_chat_template returns a bare tensor or a BatchEncoding/mapping.
@@ -297,5 +263,5 @@ class ASRProcessor(ProcessorMixin):
         return result
 
 
-cast("_AutoClassRegistrable", ASRProcessor).register_for_auto_class()
-cast("_ProcessorRegistry", transformers.AutoProcessor).register(ASRConfig, ASRProcessor)
+ASRProcessor.register_for_auto_class()
+transformers.AutoProcessor.register(ASRConfig, ASRProcessor)

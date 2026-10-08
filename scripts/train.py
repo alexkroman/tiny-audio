@@ -5,7 +5,7 @@ import contextlib
 import logging
 import os
 import subprocess
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import fields
 from pathlib import Path
 from types import ModuleType
@@ -333,9 +333,7 @@ class DatasetLoader:
             def filter_ignore_marker(text: str) -> bool:
                 return text.strip().lower() != "ignore_time_segment_in_scoring"
 
-            ds = ds.filter(
-                filter_ignore_marker, num_proc=self.num_proc, input_columns="text"
-            )
+            ds = ds.filter(filter_ignore_marker, num_proc=self.num_proc, input_columns="text")
 
         return ds
 
@@ -475,9 +473,7 @@ class DatasetLoader:
                 val_datasets.append(ds)
 
         train_ds = (
-            concatenate_datasets(train_datasets).shuffle(seed=self.seed)
-            if train_datasets
-            else None
+            concatenate_datasets(train_datasets).shuffle(seed=self.seed) if train_datasets else None
         )
         val_ds = concatenate_datasets(val_datasets) if val_datasets else None
 
@@ -976,7 +972,7 @@ def main(cfg: DictConfig) -> None:
     training_container = OmegaConf.to_container(cfg.training, resolve=True)
     assert isinstance(training_container, dict)
     # Keys are TrainingConfig field names (scripts/train_config.py), i.e. strings.
-    training_config = training_container
+    training_config = {str(k): v for k, v in training_container.items()}
     decoder_learning_rate = training_config.pop("decoder_learning_rate", None)
     projector_weight_decay = training_config.pop("projector_weight_decay", None)
     encoder_learning_rate = training_config.pop("encoder_learning_rate", None)

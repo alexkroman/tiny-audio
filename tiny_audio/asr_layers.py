@@ -10,8 +10,6 @@ loaded sub-models:
 """
 
 import math
-from collections.abc import Iterator
-from typing import cast
 
 import torch
 import torch.nn as nn
@@ -195,8 +193,7 @@ def chunk_oversized_embeddings(root: nn.Module) -> list[str]:
     pass finds nothing.
     """
     replaced: list[str] = []
-    modules = cast(Iterator[tuple[str, nn.Module]], root.named_modules())
-    for module_name, module in list(modules):
+    for module_name, module in list(root.named_modules()):
         for child_name, child in list(module.named_children()):
             if isinstance(child, nn.Embedding) and child.weight.numel() > MPS_MAX_TENSOR_ELEMENTS:
                 setattr(module, child_name, ChunkedEmbedding(child))

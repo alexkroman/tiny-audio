@@ -7,17 +7,8 @@ Nothing here downloads weights: parameter counts come from safetensors headers
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Protocol
 
 from huggingface_hub import dataset_info, get_safetensors_metadata, model_info
-
-
-class HubConfig(Protocol):
-    def get_text_config(self) -> object: ...
-
-
-class ConfigLoader(Protocol):
-    def from_pretrained(self, pretrained_model_name_or_path: str, /) -> HubConfig: ...
 
 
 def safetensors_params(repo_id: str, exclude_prefixes: tuple[str, ...] = ()) -> tuple[int, str]:
