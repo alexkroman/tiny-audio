@@ -131,6 +131,8 @@ interrogate = ">=1.5.0"
 deptry = ">=0.23.0"
 zizmor = ">=1.0.0"  # GitHub Actions security audit
 actionlint-py = ">=1.7.0"  # GitHub Actions workflow linter (bundles the actionlint binary)
+check-wheel-contents = ">=0.6.0"  # Wheel layout checks after `ta dev build`
+twine = ">=6.0.0"  # `twine check`: package metadata renders on PyPI
 pytest-mock = "^3.15.1"
 elevenlabs = "^2.31.0"
 # Apple SFSpeechRecognizer eval backend (scripts/eval/evaluators/asr.py).

@@ -2,6 +2,7 @@
 """Development commands for tiny-audio."""
 
 import subprocess
+from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -81,6 +82,41 @@ TEST_COMMAND = [
 ]
 
 
+# `--clean` empties dist/ first, so the checks below see only this build.
+BUILD_COMMAND = ["poetry", "build", "--clean"]
+DIST_DIR = Path("dist")
+
+
+def dist_check_commands() -> list[list[str]]:
+    """Checks for the artifacts `BUILD_COMMAND` just wrote to dist/.
+
+    check-wheel-contents compares the wheel against the source packages (a
+    module missing from the wheel fails here, not on the pod) and twine checks
+    the metadata of both the wheel and the sdist. W005/W009 are ignored: the
+    top-level `scripts` package is deliberate, it carries the `ta` entry point.
+    """
+    wheels = sorted(str(p) for p in DIST_DIR.glob("*.whl"))
+    artifacts = sorted(str(p) for p in DIST_DIR.iterdir()) if DIST_DIR.is_dir() else []
+    return [
+        [
+            "check-wheel-contents",
+            "--ignore",
+            "W005,W009",
+            "--package",
+            LIB_PATH,
+            "--package",
+            "scripts",
+            *wheels,
+        ],
+        ["twine", "check", "--strict", *artifacts],
+    ]
+
+
+def build_and_check() -> int:
+    """Build the wheel and sdist, then validate them; the first failure wins."""
+    return run(*BUILD_COMMAND) or run_all(*dist_check_commands())
+
+
 def run(*args: str) -> int:
     """Run a command and return exit code."""
     console.print(f"[dim]$ {' '.join(args)}[/dim]")
@@ -153,15 +189,15 @@ def check():
 
 @app.command()
 def build():
-    """Build package (wheel and sdist)."""
-    raise typer.Exit(run("poetry", "build"))
+    """Build package (wheel and sdist) and validate both."""
+    raise typer.Exit(build_and_check())
 
 
 @app.command()
 def precommit():
     """Pre-commit quality gate (format, check, test with coverage floor, build)."""
     format_code()
-    raise typer.Exit(run_all(*CHECK_COMMANDS, TEST_COMMAND, ["poetry", "build"]))
+    raise typer.Exit(run_all(*CHECK_COMMANDS, TEST_COMMAND) or build_and_check())
 
 
 @app.command("install-hooks")

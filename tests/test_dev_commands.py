@@ -105,8 +105,22 @@ class TestCommandWiring:
         assert recorded_runs[1:] == [
             *(tuple(cmd) for cmd in dev.CHECK_COMMANDS),
             tuple(dev.TEST_COMMAND),
-            ("poetry", "build"),
+            tuple(dev.BUILD_COMMAND),
+            *(tuple(cmd) for cmd in dev.dist_check_commands()),
         ]
+
+    def test_build_validates_what_it_built(self, recorded_runs):
+        assert runner.invoke(dev.app, ["build"]).exit_code == 0
+        assert recorded_runs == [
+            tuple(dev.BUILD_COMMAND),
+            *(tuple(cmd) for cmd in dev.dist_check_commands()),
+        ]
+
+    def test_failed_build_skips_the_artifact_checks(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(dev, "run", lambda *args: calls.append(args) or 1)
+        assert runner.invoke(dev.app, ["build"]).exit_code == 1
+        assert calls == [tuple(dev.BUILD_COMMAND)]
 
     def test_docstrings_is_verbose(self, recorded_runs):
         assert runner.invoke(dev.app, ["docstrings"]).exit_code == 0
@@ -259,3 +273,23 @@ class TestLazyRegistration:
 
 def test_project_root_has_pyproject():
     assert (Path(get_project_root()) / "pyproject.toml").is_file()
+
+
+class TestDistChecks:
+    """`dist_check_commands` points the checkers at exactly what is in dist/."""
+
+    def test_checks_every_artifact_and_the_wheel(self, monkeypatch, tmp_path):
+        for name in ("pkg-0.1-py3-none-any.whl", "pkg-0.1.tar.gz"):
+            (tmp_path / name).touch()
+        monkeypatch.setattr(dev, "DIST_DIR", tmp_path)
+        wheel_check, twine_check = dev.dist_check_commands()
+        assert wheel_check[0] == "check-wheel-contents"
+        assert wheel_check[-1] == str(tmp_path / "pkg-0.1-py3-none-any.whl")
+        assert twine_check[:3] == ["twine", "check", "--strict"]
+        assert twine_check[3:] == sorted(str(p) for p in tmp_path.iterdir())
+
+    def test_missing_dist_dir_yields_no_artifacts(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(dev, "DIST_DIR", tmp_path / "missing")
+        wheel_check, twine_check = dev.dist_check_commands()
+        assert not any(arg.endswith(".whl") for arg in wheel_check)
+        assert twine_check == ["twine", "check", "--strict"]
