@@ -113,12 +113,20 @@ class TestCallWithoutAudio:
 
 
 class TestEncoderLength:
-    """Custom conv layers flow through the processor's length helper."""
+    """Custom conv layers flow through to the placeholder count."""
 
     def test_custom_layers(self) -> None:
         proc = make_processor()
         proc.encoder_conv_layers = [(0, 2, 2), (0, 2, 2)]
-        assert proc._compute_encoder_output_length(100) == 25
+        cast(MagicMock, proc.feature_extractor).return_value = {
+            "input_features": torch.zeros(1, 80, 100),
+            "attention_mask": torch.ones(1, 100, dtype=torch.long),
+        }
+        proc(audio=torch.zeros(16000))
+        template = cast(MagicMock, proc.tokenizer).apply_chat_template
+        content = template.call_args.args[0][0]["content"]
+        # Encoder 100 -> 50 -> 25, projector (25-4)//4+1 = 6 placeholders.
+        assert content.count("<audio>") == 6
 
     def test_audio_token_id_comes_from_tokenizer(self) -> None:
         proc = make_processor()

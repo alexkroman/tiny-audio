@@ -16,45 +16,8 @@ from tiny_audio.asr_modeling import ASRModel
 from tiny_audio.asr_processing import ASRProcessor
 
 
-class MockProcessor:
-    encoder_conv_layers = DEFAULT_ENCODER_CONV_LAYERS
-
-    def _compute_encoder_output_length(self, mel_length: int) -> int:
-        length = mel_length
-        for padding, kernel_size, stride in self.encoder_conv_layers:
-            length = (length + 2 * padding - (kernel_size - 1) - 1) // stride + 1
-        return length
-
-
 def _quarter(x: int) -> int:
     return x // 4
-
-
-class TestComputeEncoderOutputLength:
-    """Tests for ASRProcessor._compute_encoder_output_length method."""
-
-    @pytest.fixture
-    def processor_method(self) -> MockProcessor:
-        """Get the method without creating full processor."""
-        return MockProcessor()
-
-    def test_default_conv_layers(self, processor_method: MockProcessor) -> None:
-        """Should compute correct length with default Whisper conv layers."""
-        # Whisper default: [(1, 3, 1), (1, 3, 2)]
-        # Layer 1: (100 + 2*1 - 2 - 1) // 1 + 1 = 100
-        # Layer 2: (100 + 2*1 - 2 - 1) // 2 + 1 = 50
-        result = processor_method._compute_encoder_output_length(100)
-        assert result == 50
-
-    def test_single_frame(self, processor_method: MockProcessor) -> None:
-        """Should handle single frame input."""
-        result = processor_method._compute_encoder_output_length(1)
-        assert result == 1
-
-    def test_large_input(self, processor_method: MockProcessor) -> None:
-        """Should handle large input lengths."""
-        result = processor_method._compute_encoder_output_length(3000)
-        assert result == 1500  # Halved by stride=2
 
 
 class TestProcessorConstants:

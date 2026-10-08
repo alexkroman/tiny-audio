@@ -198,10 +198,6 @@ class ASRProcessor(ProcessorMixin):
         self.encoder_conv_layers = encoder_conv_layers or DEFAULT_ENCODER_CONV_LAYERS
         self.lead_in_seconds = float(lead_in_seconds)
 
-    def _compute_encoder_output_length(self, mel_length: int) -> int:
-        """Compute encoder output length using conv layer formulas."""
-        return compute_encoder_output_length(mel_length, self.encoder_conv_layers)
-
     def _render_prompt(self, num_audio_tokens: int, text: str | None) -> torch.Tensor:
         """Tokenize one chat prompt carrying exactly `num_audio_tokens` placeholders."""
         return render_audio_prompt(
