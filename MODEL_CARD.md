@@ -125,13 +125,11 @@ for word in result["words"]:
 
 ### Speaker diarization
 
-`return_speakers=True` labels every word with a speaker (it implies `return_timestamps=True`).
-Speakers come from [Nemotron-3-Diarization](https://huggingface.co/nvidia/Nemotron-3-Diarization),
-run once over the whole recording, so labels stay consistent across hour-long meetings; it handles
-overlapping speech and up to 8 speakers. Each word goes to the speaker most active while it was
-spoken.
+Pass `return_speakers=True` to label every word with who said it. It also turns on word timestamps.
+It works on recordings of any length, keeps speaker labels consistent across hour-long meetings, and
+handles overlapping speech and up to 8 speakers.
 
-Nemotron-3-Diarization is in transformers `main`, not yet a release:
+Diarization needs transformers installed from `main` until the next release:
 
 ```bash
 pip install git+https://github.com/huggingface/transformers
@@ -163,9 +161,9 @@ go to the closest kept speaker:
 result = pipe("call.wav", return_speakers=True, num_speakers=2)
 ```
 
-If alignment or diarization fails (for example, transformers without Nemotron), the transcript is
-still returned and the error is reported under `result["timestamp_error"]` or
-`result["diarization_error"]`.
+If alignment or diarization fails (for example, on a transformers release without diarization
+support), the transcript is still returned and the error is reported under
+`result["timestamp_error"]` or `result["diarization_error"]`.
 
 ## How It Works
 
@@ -242,7 +240,7 @@ The training recipe is
   `return_speakers=True`, which transcribe in 8-18 s chunks automatically.
 - **Speaker diarization**: At most 8 speakers per recording. The count is detected automatically;
   `num_speakers` and `max_speakers` can cap it, but `min_speakers` is not supported (passing it
-  raises a `ValueError`). Needs transformers `main` until a release includes Nemotron-3-Diarization.
+  raises a `ValueError`). Needs transformers `main` until the next release.
 - **Accuracy**: May degrade on:
   - Far-field and overlapping speech (see AMI SDM)
   - Noisy or low-quality audio

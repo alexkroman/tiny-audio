@@ -55,10 +55,10 @@ pipe("audio.wav", return_timestamps=True)
 pipe("meeting.wav", return_speakers=True, num_speakers=2)
 ```
 
-Speaker diarization uses Nemotron-3-Diarization, which needs `transformers` from the commit pinned
-in [`pyproject.toml`](pyproject.toml). For token-by-token streaming output, see
-[`ASRModel.generate_streaming`](tiny_audio/asr_modeling.py). The
-[model card](https://huggingface.co/mazesmazes/tiny-audio) covers batching and GPU settings.
+Speaker diarization needs `transformers` installed from `main`
+(`pip install git+https://github.com/huggingface/transformers`) until the next release. For
+token-by-token streaming output, see [`ASRModel.generate_streaming`](tiny_audio/asr_modeling.py).
+The [model card](https://huggingface.co/mazesmazes/tiny-audio) covers batching and GPU settings.
 
 ## How good is it?
 
