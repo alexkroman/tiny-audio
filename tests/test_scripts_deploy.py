@@ -15,12 +15,12 @@ import typer
 from scripts.deploy import runpod
 from scripts.deploy.handler_local import find_latest_model
 from scripts.deploy.plan import DATASET_DISK_FACTOR, build_plan, wait_command
+from scripts.deploy.remote_scripts import build_training_script
 from scripts.deploy.runpod import (
     SSH_CONNECT_ATTEMPTS,
     SSH_KEY_PATH,
     _gitignore_aware_file_list,
     _remote_free_gib,
-    build_training_script,
     get_connection,
 )
 from scripts.utils import get_project_root

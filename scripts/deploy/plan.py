@@ -18,7 +18,6 @@ number can be argued with rather than trusted blindly.
 
 from __future__ import annotations
 
-import functools
 import importlib
 import json
 import subprocess
@@ -31,6 +30,7 @@ from huggingface_hub import dataset_info, get_safetensors_metadata, model_info
 from hydra import compose, initialize_config_dir
 from tenacity import RetryError, retry, retry_if_result, stop_after_delay, wait_fixed
 
+from scripts.deploy import gpu_catalog
 from scripts.train_config import register_configs
 from scripts.utils import get_project_root
 
@@ -718,7 +718,7 @@ def plan_command(
 
     # Pick the GPU from the VRAM estimate rather than defaulting to an H100.
     # This recipe needs ~36 GiB; an 80 GB H100 is roughly 2x the card and
-    # several times the price of the smallest part that fits. `_available_gpus`
+    # several times the price of the smallest part that fits. `gpu_catalog.available_gpus`
     # returns fitting types smallest-first, which approximates cheapest-first
     # (the catalog exposes no price field).
     #
@@ -728,11 +728,12 @@ def plan_command(
     # support, and then there is nowhere to put 1.5 TiB.
     needs_volume = disk_gb > NETWORK_VOLUME_THRESHOLD_GB
     if gpu is None:
-        fitting = _available_gpus(plan.vram["recommended (x1.25)"])
+        fitting = gpu_catalog.available_gpus(plan.vram["recommended (x1.25)"])
         placeable = [
             (vram_gib, gpu_id)
             for vram_gib, gpu_id in fitting
-            if not needs_volume or _datacenters_for_gpu(gpu_id, require_network_volume=True)
+            if not needs_volume
+            or gpu_catalog.datacenters_for_gpu(gpu_id, require_network_volume=True)
         ]
         if placeable:
             vram_gib, gpu = placeable[0]
@@ -775,9 +776,11 @@ def plan_command(
         vol_name = f"tiny-audio-{experiment}"
         capped = vol_gb >= NETWORK_VOLUME_MAX_GB
 
-        dcs = _datacenters_for_gpu(gpu, require_network_volume=True)
+        dcs = gpu_catalog.datacenters_for_gpu(gpu, require_network_volume=True)
         excluded = [
-            d for d, _, _ in _datacenters_for_gpu(gpu) if d not in NETWORK_VOLUME_DATACENTERS
+            d
+            for d, _, _ in gpu_catalog.datacenters_for_gpu(gpu)
+            if d not in gpu_catalog.NETWORK_VOLUME_DATACENTERS
         ]
         if dcs:
             print(f"  Datacenters with {gpu} AND network-volume support:")
@@ -792,7 +795,7 @@ def plan_command(
                 "\n  A network volume is pinned to one datacenter and a pod can only\n"
                 "  mount a volume in its own, so both commands below use the same id.\n"
                 "  If creation is refused, the error lists the currently supported\n"
-                "  datacenters -- refresh NETWORK_VOLUME_DATACENTERS in this file.\n"
+                "  datacenters -- refresh NETWORK_VOLUME_DATACENTERS in gpu_catalog.py.\n"
             )
             dc_id = dcs[0][0]
         else:
@@ -844,126 +847,6 @@ def plan_command(
     return 0
 
 
-def _available_gpus(min_vram_gib: float) -> list[tuple[int, str]]:
-    """GPUs the catalog claims are available with enough VRAM, smallest first.
-
-    Smallest-first approximates cheapest-first; `runpodctl gpu list` exposes no
-    price field. The returned order is a candidate list rather than a choice,
-    because `available` is not a promise -- see `provision`.
-    """
-    out = subprocess.run(
-        ["runpodctl", "gpu", "list", "-o", "json"],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    ).stdout
-    catalog = json.loads(out[out.index("[") :])
-    fitting = [
-        (g["memoryInGb"], g["gpuId"])
-        for g in catalog
-        if g.get("available") and g.get("memoryInGb", 0) >= min_vram_gib
-    ]
-    return sorted(set(fitting))
-
-
-# `runpodctl datacenter list` reports stock per GPU per datacenter. Observed
-# values are High / Medium / Low / "".
-#
-# "Low" outranks "": a reported status of any kind means the datacenter is
-# actually offering that GPU, whereas an empty string carries no stock signal
-# at all and is the weaker bet. (An earlier revision of this file had these
-# two the other way round on the theory that "Low" was an explicit scarcity
-# warning. It is not -- it is stock information, and stock information beats
-# none.) `pod create` failing with "no longer any instances" is still normal
-# on any of them; this only orders which to try first.
-_STOCK_RANK = {"High": 0, "Medium": 1, "Low": 2, "": 3}
-
-# Datacenters that actually support network volumes. This is a SEPARATE and
-# much smaller set than "datacenters that have the GPU", and nothing in
-# `runpodctl datacenter list` exposes it -- suggesting a datacenter that has
-# an H100 but no volume support gets you:
-#   create network volume: Data center "AP-IN-1" not found or does not
-#   support network volumes. Available data centers: ...
-# which is how this list was obtained (2026-09-18). The error enumerates the
-# supported set, so the cheap way to refresh it is to run
-# `runpodctl network-volume create --name x --size 1 --data-center-id NOPE`
-# and read the message; it fails without creating anything.
-#
-# Concretely, 6 of the 13 datacenters offering an H100 80GB HBM3 do NOT
-# support network volumes: AP-IN-1, CA-MTL-1, US-GA-2, US-KS-2, US-MO-1,
-# US-NE-1. Filtering matters.
-NETWORK_VOLUME_DATACENTERS = frozenset(
-    [
-        "AP-IN-2",
-        "AP-JP-1",
-        "CA-MTL-3",
-        "CA-MTL-4",
-        "EU-FR-1",
-        "EU-NL-1",
-        "EU-RO-1",
-        "EUR-IS-1",
-        "EUR-IS-3",
-        "EUR-NO-1",
-        "EUR-NO-2",
-        "US-CA-2",
-        "US-CO-1",
-        "US-IL-1",
-        "US-MO-2",
-        "US-NC-2",
-        "US-TX-3",
-    ]
-)
-
-
-@functools.cache
-def _datacenter_catalog() -> tuple:
-    """`runpodctl datacenter list`, fetched once per process.
-
-    Cached because GPU selection probes this for every candidate GPU type, and
-    shelling out ~30 times would dominate the runtime of a command that
-    otherwise only reads HTTP headers. Returns a tuple so the cache key is
-    hashable; an empty tuple means the CLI was unavailable.
-    """
-    try:
-        out = subprocess.run(
-            ["runpodctl", "datacenter", "list", "-o", "json"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        ).stdout
-        return tuple(json.loads(out[out.index("[") :]))
-    except Exception:
-        return ()
-
-
-def _datacenters_for_gpu(
-    gpu_id: str, require_network_volume: bool = False
-) -> list[tuple[str, str, str]]:
-    """Datacenters offering `gpu_id`, most likely to fill first.
-
-    Returns (datacenter_id, location, stock_status). A network volume is bound
-    to one datacenter and a pod can only mount a volume in its own, so the
-    volume has to be created where the GPU actually is -- picking the wrong
-    one means creating the volume, failing to place the pod, and deleting it
-    again.
-
-    With `require_network_volume`, the result is additionally filtered to
-    datacenters that support network volumes at all. That is a strictly
-    smaller set which no API field exposes; see NETWORK_VOLUME_DATACENTERS.
-    """
-    catalog = _datacenter_catalog()
-    hits = [
-        (dc["id"], dc.get("location", "?"), gpu.get("stockStatus", ""))
-        for dc in catalog
-        for gpu in dc.get("gpuAvailability", [])
-        if gpu.get("gpuId") == gpu_id
-        and (not require_network_volume or dc["id"] in NETWORK_VOLUME_DATACENTERS)
-    ]
-    return sorted(hits, key=lambda h: (_STOCK_RANK.get(h[2], 9), h[0]))
-
-
 def provision_command(
     experiment: str = typer.Option("granite_qwen_frozen", "--experiment", "-e"),
     seq_len: int = typer.Option(320, "--seq-len"),
@@ -988,7 +871,7 @@ def provision_command(
     plan = build_plan(experiment, list(overrides or []), seq_len)
     vram = plan.vram["recommended (x1.25)"]
     disk = int(plan.disk["recommended"] * 1.15) + 5
-    candidates = _available_gpus(vram)
+    candidates = gpu_catalog.available_gpus(vram)
 
     print(f"\n{experiment}: needs >= {vram:.1f} GiB VRAM, {disk} GB disk")
     # Surface the same warnings `plan` prints -- the network-volume one in
@@ -1078,13 +961,7 @@ def wait_command(
         wait=wait_fixed(15),
     )
     def poll() -> tuple[str, int] | None:
-        out = subprocess.run(
-            ["runpodctl", "pod", "get", pod_id, "-o", "json"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        ).stdout
+        out = gpu_catalog.runpodctl_json("pod", "get", pod_id)
         try:
             ssh = json.loads(out[out.index("{") :]).get("ssh") or {}
         except (ValueError, AttributeError):

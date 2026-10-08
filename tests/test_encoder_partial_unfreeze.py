@@ -19,7 +19,8 @@ from torch import nn
 from transformers import PreTrainedModel
 
 from tiny_audio.asr_config import ASRConfig
-from tiny_audio.asr_modeling import ASRModel, find_encoder_layer_stack, unfreeze_encoder_top_layers
+from tiny_audio.asr_layers import find_encoder_layer_stack, unfreeze_encoder_top_layers
+from tiny_audio.asr_modeling import ASRModel
 
 
 class FakeBlock(nn.Module):

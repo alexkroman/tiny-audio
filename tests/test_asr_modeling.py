@@ -12,19 +12,21 @@ from torch.nn.modules.module import _IncompatibleKeys
 from transformers.modeling_utils import PreTrainedModel
 from transformers.models.whisper.modeling_whisper import WhisperEncoder
 
-import tiny_audio.asr_modeling as mod
+import tiny_audio.asr_layers as layers_mod
 from tiny_audio.asr_config import ASRConfig
+from tiny_audio.asr_layers import (
+    MPS_MAX_TENSOR_ELEMENTS,
+    chunk_oversized_embeddings,
+    mps_unsafe_parameters,
+)
 from tiny_audio.asr_modeling import (
     FLASH_ATTENTION_MAX_HEAD_DIM,
-    MPS_MAX_TENSOR_ELEMENTS,
     VOCAB_PAD_MULTIPLE,
     ASRModel,
     _assert_projector_loaded,
     _max_attention_head_dim,
     _patch_gemma_decode_loop,
     _resolve_attn_implementation,
-    chunk_oversized_embeddings,
-    mps_unsafe_parameters,
 )
 from tiny_audio.asr_processing import ASRProcessor
 from tiny_audio.projectors import MLPAudioProjector
@@ -768,8 +770,8 @@ class TestChunkedEmbedding:
 
     def _forced(self, monkeypatch, limit):
         """Lower the element cap so a test-sized table counts as oversized."""
-        monkeypatch.setattr(mod, "MPS_MAX_TENSOR_ELEMENTS", limit)
-        return mod
+        monkeypatch.setattr(layers_mod, "MPS_MAX_TENSOR_ELEMENTS", limit)
+        return layers_mod
 
     def test_matches_the_unchunked_lookup(self, monkeypatch):
         mod = self._forced(monkeypatch, 64)

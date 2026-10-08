@@ -338,6 +338,8 @@ blocks) to train it.
 tiny-audio/
 ├── tiny_audio/              # Core library
 │   ├── asr_modeling.py      # ASRModel: encoder + projector + decoder
+│   ├── asr_layers.py        # MPS-safe embeddings, encoder top-layer unfreezing
+│   ├── asr_types.py         # Loader TypedDicts and decoder typing protocols
 │   ├── asr_config.py        # ASRConfig: all model settings
 │   ├── asr_pipeline.py      # HuggingFace pipeline for inference
 │   ├── asr_processing.py    # ASRProcessor: audio/text preprocessing

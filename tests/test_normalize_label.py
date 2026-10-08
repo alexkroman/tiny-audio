@@ -1,4 +1,4 @@
-"""Tests for scripts.train._normalize_label and _needs_truecase.
+"""Tests for scripts.labels._normalize_label and _needs_truecase.
 
 Covers the Ultravox-style training-label normalizer:
 - Gigaspeech punct-tag restoration (<COMMA> -> ',', etc.)
@@ -15,7 +15,7 @@ from typing import ClassVar
 
 import pytest
 
-from scripts.train import (
+from scripts.labels import (
     TEXT_CASE_CASED,
     TEXT_CASE_MONO,
     _needs_truecase,
