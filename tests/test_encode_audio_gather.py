@@ -8,7 +8,7 @@ from tiny_audio.asr_modeling import _gather_audio_embeds
 def _gather_reference(audio_embeds: torch.Tensor, token_counts: torch.Tensor) -> torch.Tensor:
     """Per-sample slice + cat — the implementation we are replacing."""
     batch_size, _, hidden_dim = audio_embeds.shape
-    parts = []
+    parts: list[torch.Tensor] = []
     for i in range(batch_size):
         count = int(token_counts[i].item())
         sample = audio_embeds[i, :count, :]
@@ -25,8 +25,8 @@ def _gather_reference(audio_embeds: torch.Tensor, token_counts: torch.Tensor) ->
 
 
 class TestGatherAudioEmbeds:
-    def test_matches_reference_balanced_batch(self):
-        torch.manual_seed(0)
+    def test_matches_reference_balanced_batch(self) -> None:
+        torch.manual_seed(0)  # pyright: ignore[reportUnknownMemberType]  # untyped seed param in torch
         embeds = torch.randn(4, 10, 8)
         counts = torch.tensor([10, 5, 7, 3])
         out_ref = _gather_reference(embeds, counts)
@@ -34,7 +34,7 @@ class TestGatherAudioEmbeds:
         assert out_vec.shape == out_ref.shape == (25, 8)
         torch.testing.assert_close(out_vec, out_ref)
 
-    def test_zero_count_sample(self):
+    def test_zero_count_sample(self) -> None:
         embeds = torch.randn(3, 6, 4)
         counts = torch.tensor([6, 0, 2])
         out_ref = _gather_reference(embeds, counts)
@@ -42,7 +42,7 @@ class TestGatherAudioEmbeds:
         assert out_vec.shape == (8, 4)
         torch.testing.assert_close(out_vec, out_ref)
 
-    def test_count_exceeds_max_len_pads_with_zero(self):
+    def test_count_exceeds_max_len_pads_with_zero(self) -> None:
         embeds = torch.ones(2, 4, 3)
         counts = torch.tensor([4, 6])  # second sample wants 2 more than available
         out_ref = _gather_reference(embeds, counts)
@@ -51,7 +51,7 @@ class TestGatherAudioEmbeds:
         torch.testing.assert_close(out_vec, out_ref)
         assert torch.equal(out_vec[-2:], torch.zeros(2, 3))
 
-    def test_all_zero_counts(self):
+    def test_all_zero_counts(self) -> None:
         embeds = torch.randn(2, 5, 4)
         counts = torch.tensor([0, 0])
         out_vec = _gather_audio_embeds(embeds, counts)

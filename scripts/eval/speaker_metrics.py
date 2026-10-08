@@ -90,9 +90,7 @@ def _speaker_words(text: str, normalize: Callable[[str], str]) -> dict[int, list
     return words
 
 
-def cp_errors(
-    ref: str, hyp: str, normalize: Callable[[str], str] = _identity
-) -> tuple[int, int]:
+def cp_errors(ref: str, hyp: str, normalize: Callable[[str], str] = _identity) -> tuple[int, int]:
     """(errors, reference words) of concatenated minimum-permutation WER.
 
     Each speaker's words are concatenated, and reference and hypothesis

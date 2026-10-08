@@ -54,7 +54,7 @@ class TestNativeAudioToken:
             (None, None),
         ],
     )
-    def test_lookup(self, text_model_id, expected):
+    def test_lookup(self, text_model_id, expected) -> None:
         assert native_audio_token(text_model_id) == expected
 
 
@@ -73,7 +73,7 @@ class TestIsTimeMajorEncoder:
             (None, False),
         ],
     )
-    def test_lookup(self, audio_model_id, expected):
+    def test_lookup(self, audio_model_id, expected) -> None:
         assert is_time_major_encoder(audio_model_id) is expected
 
 
@@ -86,18 +86,18 @@ class TestComputeEncoderOutputLength:
         # comment on GRANITE_ENCODER_CONV_LAYERS.
         [(50, 12), (100, 25), (250, 62), (500, 125), (1000, 250)],
     )
-    def test_granite_layers_match_documented_values(self, mel_length, expected):
+    def test_granite_layers_match_documented_values(self, mel_length, expected) -> None:
         assert compute_encoder_output_length(mel_length, GRANITE_ENCODER_CONV_LAYERS) == expected
 
     @pytest.mark.parametrize(("mel_length", "expected"), [(3000, 1500), (2999, 1500), (1, 1)])
-    def test_whisper_layers_halve(self, mel_length, expected):
+    def test_whisper_layers_halve(self, mel_length, expected) -> None:
         assert compute_encoder_output_length(mel_length) == expected
         assert compute_encoder_output_length(mel_length, DEFAULT_ENCODER_CONV_LAYERS) == expected
 
-    def test_no_layers_is_identity(self):
+    def test_no_layers_is_identity(self) -> None:
         assert compute_encoder_output_length(123, []) == 123
 
-    def test_granite_layers_accept_tensor_batches(self):
+    def test_granite_layers_accept_tensor_batches(self) -> None:
         lengths = torch.tensor([50, 100, 250, 500, 1000])
         out = compute_encoder_output_length(lengths, GRANITE_ENCODER_CONV_LAYERS)
         assert out.tolist() == [12, 25, 62, 125, 250]
@@ -106,17 +106,17 @@ class TestComputeEncoderOutputLength:
 class TestASRConfigAutoDetection:
     """Encoder-layout flags follow `audio_model_id` unless set explicitly."""
 
-    def test_whisper_is_channel_major_without_encoder_mask(self):
+    def test_whisper_is_channel_major_without_encoder_mask(self) -> None:
         cfg = make_config(audio_model_id="openai/whisper-tiny")
         assert cfg.audio_features_time_major is False
         assert cfg.encoder_attention_mask is False
 
-    def test_granite_is_time_major_with_encoder_mask(self):
+    def test_granite_is_time_major_with_encoder_mask(self) -> None:
         cfg = make_config(audio_model_id="ibm-granite/granite-speech-3.3-2b")
         assert cfg.audio_features_time_major is True
         assert cfg.encoder_attention_mask is True
 
-    def test_explicit_flags_override_detection(self):
+    def test_explicit_flags_override_detection(self) -> None:
         cfg = make_config(
             audio_model_id="ibm-granite/granite-speech-3.3-2b",
             audio_features_time_major=False,
@@ -125,10 +125,10 @@ class TestASRConfigAutoDetection:
         assert cfg.audio_features_time_major is False
         assert cfg.encoder_attention_mask is False
 
-    def test_default_conv_layers(self):
+    def test_default_conv_layers(self) -> None:
         assert make_config().encoder_conv_layers == DEFAULT_ENCODER_CONV_LAYERS
 
-    def test_custom_conv_layers_kept(self):
+    def test_custom_conv_layers_kept(self) -> None:
         cfg = make_config(encoder_conv_layers=GRANITE_ENCODER_CONV_LAYERS)
         assert cfg.encoder_conv_layers == GRANITE_ENCODER_CONV_LAYERS
 
@@ -136,13 +136,13 @@ class TestASRConfigAutoDetection:
 class TestASRConfigAudioToken:
     """The placeholder token defaults to the decoder's native one when it has one."""
 
-    def test_qwen_gets_generic_token(self):
+    def test_qwen_gets_generic_token(self) -> None:
         assert make_config(text_model_id="Qwen/Qwen3-0.6B").audio_token == "<audio>"
 
-    def test_gemma_reuses_native_token(self):
+    def test_gemma_reuses_native_token(self) -> None:
         assert make_config(text_model_id="google/gemma-4-e2b-it").audio_token == "<|audio|>"
 
-    def test_explicit_token_wins(self):
+    def test_explicit_token_wins(self) -> None:
         cfg = make_config(text_model_id="google/gemma-4-e2b-it", audio_token="<snd>")
         assert cfg.audio_token == "<snd>"
 
@@ -150,15 +150,15 @@ class TestASRConfigAudioToken:
 class TestASRConfigDefaults:
     """Derived defaults that the training recipes rely on."""
 
-    def test_projector_dtype_follows_model_dtype(self):
+    def test_projector_dtype_follows_model_dtype(self) -> None:
         assert make_config(model_dtype="bfloat16").projector_dtype == "bfloat16"
 
-    def test_projector_dtype_can_be_pinned_separately(self):
+    def test_projector_dtype_can_be_pinned_separately(self) -> None:
         cfg = make_config(model_dtype="bfloat16", projector_dtype="float32")
         assert cfg.projector_dtype == "float32"
         assert cfg.model_dtype == "bfloat16"
 
-    def test_lora_targets_default_to_all_linear_layers(self):
+    def test_lora_targets_default_to_all_linear_layers(self) -> None:
         assert make_config().lora_target_modules == [
             "q_proj",
             "k_proj",
@@ -169,26 +169,26 @@ class TestASRConfigDefaults:
             "down_proj",
         ]
 
-    def test_custom_lora_targets_kept(self):
+    def test_custom_lora_targets_kept(self) -> None:
         assert make_config(lora_target_modules=["q_proj"]).lora_target_modules == ["q_proj"]
 
-    def test_generation_defaults(self):
+    def test_generation_defaults(self) -> None:
         cfg = make_config()
         assert cfg.max_new_tokens == 128
         assert cfg.use_cache is True
 
-    def test_explicit_use_cache_false_is_kept(self):
+    def test_explicit_use_cache_false_is_kept(self) -> None:
         # `None` means "use the default"; an explicit False must not be
         # mistaken for it.
         assert make_config(use_cache=False).use_cache is False
 
-    def test_sub_configs_are_reconstructed_from_dicts(self):
+    def test_sub_configs_are_reconstructed_from_dicts(self) -> None:
         cfg = make_config()
         assert cfg.audio_config.model_type == "whisper"
         assert cfg.text_config.model_type == "llama"
         assert cfg.encoder is cfg.audio_config
 
-    def test_dict_round_trip_preserves_derived_fields(self):
+    def test_dict_round_trip_preserves_derived_fields(self) -> None:
         cfg = make_config(
             audio_model_id="ibm-granite/granite-speech-3.3-2b",
             text_model_id="google/gemma-4-e2b-it",

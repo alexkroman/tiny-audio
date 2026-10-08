@@ -57,7 +57,7 @@ def frozen_encoder():
 
 
 class TestFindLayerStack:
-    def test_finds_granite_style_layers(self, frozen_encoder):
+    def test_finds_granite_style_layers(self, frozen_encoder) -> None:
         found = find_encoder_layer_stack(frozen_encoder)
         assert found is not None
         path, stack = found
@@ -65,7 +65,7 @@ class TestFindLayerStack:
         assert isinstance(stack, nn.ModuleList)
         assert len(stack) == 16
 
-    def test_finds_nested_whisper_style(self):
+    def test_finds_nested_whisper_style(self) -> None:
         class Nested(nn.Module):
             def __init__(self):
                 super().__init__()
@@ -79,13 +79,13 @@ class TestFindLayerStack:
         assert isinstance(stack, nn.ModuleList)
         assert len(stack) == 4
 
-    def test_returns_none_when_absent(self):
+    def test_returns_none_when_absent(self) -> None:
         assert find_encoder_layer_stack(nn.Linear(4, 4)) is None
 
 
 class TestUnfreezeSelectsTheRightBlocks:
     @pytest.mark.parametrize("top_n", [1, 2, 4, 6, 16])
-    def test_exactly_the_top_n_blocks_are_trainable(self, frozen_encoder, top_n):
+    def test_exactly_the_top_n_blocks_are_trainable(self, frozen_encoder, top_n) -> None:
         unfreeze_encoder_top_layers(frozen_encoder, top_n)
         depth = len(frozen_encoder.layers)
         for i, block in enumerate(frozen_encoder.layers):
@@ -96,25 +96,25 @@ class TestUnfreezeSelectsTheRightBlocks:
                     f"for top_n={top_n} of depth={depth}"
                 )
 
-    def test_it_is_the_top_blocks_not_the_bottom(self, frozen_encoder):
+    def test_it_is_the_top_blocks_not_the_bottom(self, frozen_encoder) -> None:
         """Guards the most plausible off-by-one: slicing [:n] instead of [-n:]."""
         unfreeze_encoder_top_layers(frozen_encoder, 4)
         trainable = [i for i, b in enumerate(frozen_encoder.layers) if b.lin.weight.requires_grad]
         assert trainable == [12, 13, 14, 15]
 
-    def test_output_projections_are_unfrozen(self, frozen_encoder):
+    def test_output_projections_are_unfrozen(self, frozen_encoder) -> None:
         """`out`/`out_mid` sit between the top block and the projector; leaving
         them frozen would force the new blocks to adapt through a fixed map."""
         unfreeze_encoder_top_layers(frozen_encoder, 2)
         assert frozen_encoder.out.weight.requires_grad is True
         assert frozen_encoder.out_mid.weight.requires_grad is True
 
-    def test_input_projection_stays_frozen(self, frozen_encoder):
+    def test_input_projection_stays_frozen(self, frozen_encoder) -> None:
         """The feature front-end is the part most expensive to damage."""
         unfreeze_encoder_top_layers(frozen_encoder, 2)
         assert frozen_encoder.input_linear.weight.requires_grad is False
 
-    def test_returns_the_names_it_changed(self, frozen_encoder):
+    def test_returns_the_names_it_changed(self, frozen_encoder) -> None:
         names = unfreeze_encoder_top_layers(frozen_encoder, 2)
         assert "layers.14.lin.weight" in names
         assert "layers.15.lin.weight" in names
@@ -122,17 +122,17 @@ class TestUnfreezeSelectsTheRightBlocks:
         assert not any(n.startswith("layers.13") for n in names)
         assert not any(n.startswith("input_linear") for n in names)
 
-    def test_zero_is_a_noop(self, frozen_encoder):
+    def test_zero_is_a_noop(self, frozen_encoder) -> None:
         assert unfreeze_encoder_top_layers(frozen_encoder, 0) == []
         assert not any(p.requires_grad for p in frozen_encoder.parameters())
 
 
 class TestFailsLoudly:
-    def test_too_many_layers_raises(self, frozen_encoder):
+    def test_too_many_layers_raises(self, frozen_encoder) -> None:
         with pytest.raises(ValueError, match="exceeds the encoder's 16 blocks"):
             unfreeze_encoder_top_layers(frozen_encoder, 17)
 
-    def test_unrecognised_encoder_raises(self):
+    def test_unrecognised_encoder_raises(self) -> None:
         """Silently unfreezing nothing would make a frozen baseline masquerade
         as a partial-unfreeze experiment."""
         with pytest.raises(ValueError, match="Could not locate"):
@@ -142,7 +142,7 @@ class TestFailsLoudly:
 class TestGradientsActuallyFlowWhereIntended:
     """The decisive test: requires_grad is a flag, autograd is the truth."""
 
-    def test_grads_land_only_on_unfrozen_blocks(self, frozen_encoder):
+    def test_grads_land_only_on_unfrozen_blocks(self, frozen_encoder) -> None:
         unfreeze_encoder_top_layers(frozen_encoder, 3)
         out = frozen_encoder(torch.randn(2, 8))
         out.sum().backward()
@@ -156,7 +156,7 @@ class TestGradientsActuallyFlowWhereIntended:
         assert frozen_encoder.out.weight.grad is not None
         assert frozen_encoder.input_linear.weight.grad is None
 
-    def test_frozen_blocks_do_not_change_under_an_optimizer_step(self, frozen_encoder):
+    def test_frozen_blocks_do_not_change_under_an_optimizer_step(self, frozen_encoder) -> None:
         unfreeze_encoder_top_layers(frozen_encoder, 2)
         before_frozen = frozen_encoder.layers[0].lin.weight.detach().clone()
         before_live = frozen_encoder.layers[15].lin.weight.detach().clone()
@@ -184,7 +184,7 @@ class TestGradientsSurviveASRModelForward:
     experiment paying full AdamW state.
     """
 
-    def test_top_blocks_get_gradient_through_the_real_forward(self, base_asr_config):
+    def test_top_blocks_get_gradient_through_the_real_forward(self, base_asr_config) -> None:
         config = copy.deepcopy(base_asr_config)
         config.freeze_audio_encoder = True
         config.encoder_trainable_top_layers = 1
@@ -210,7 +210,7 @@ class TestGradientsSurviveASRModelForward:
         )
         assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in trainable)
 
-    def test_fully_frozen_encoder_still_gets_no_gradient(self, base_asr_config):
+    def test_fully_frozen_encoder_still_gets_no_gradient(self, base_asr_config) -> None:
         config = copy.deepcopy(base_asr_config)
         config.freeze_audio_encoder = True
         config.encoder_trainable_top_layers = 0
@@ -246,18 +246,18 @@ class TestPartialUnfreezeIsUsableEndToEnd:
             setattr(config, key, value)
         return config
 
-    def test_encoder_dtype_overrides_model_dtype(self, base_asr_config):
+    def test_encoder_dtype_overrides_model_dtype(self, base_asr_config) -> None:
         model = ASRModel(
             self._config(base_asr_config, model_dtype="bfloat16", encoder_dtype="float32")
         )
         assert {p.dtype for p in model.audio_tower.parameters()} == {torch.float32}
         assert {p.dtype for p in model.language_model.parameters()} == {torch.bfloat16}
 
-    def test_encoder_dtype_defaults_to_model_dtype(self, base_asr_config):
+    def test_encoder_dtype_defaults_to_model_dtype(self, base_asr_config) -> None:
         assert ASRConfig(model_dtype="bfloat16").encoder_dtype == "bfloat16"
         assert ASRConfig(model_dtype="float32").encoder_dtype == "float32"
 
-    def test_state_dict_persists_exactly_the_trainable_encoder_tensors(self, base_asr_config):
+    def test_state_dict_persists_exactly_the_trainable_encoder_tensors(self, base_asr_config) -> None:
         model = ASRModel(self._config(base_asr_config))
         trainable = sorted(n for n, p in model.audio_tower.named_parameters() if p.requires_grad)
         assert trainable, "fixture encoder exposed no trainable params"
@@ -269,11 +269,11 @@ class TestPartialUnfreezeIsUsableEndToEnd:
         )
         assert saved == trainable
 
-    def test_fully_frozen_encoder_is_still_absent_from_state_dict(self, base_asr_config):
+    def test_fully_frozen_encoder_is_still_absent_from_state_dict(self, base_asr_config) -> None:
         model = ASRModel(self._config(base_asr_config, encoder_trainable_top_layers=0))
         assert not [k for k in model.state_dict() if k.startswith("audio_tower.")]
 
-    def test_gradient_checkpointing_includes_a_partially_unfrozen_encoder(self, base_asr_config):
+    def test_gradient_checkpointing_includes_a_partially_unfrozen_encoder(self, base_asr_config) -> None:
         model = ASRModel(self._config(base_asr_config))
         assert model.audio_tower in model._gradient_checkpointing_targets()
 
@@ -284,14 +284,14 @@ class TestPartialUnfreezeIsUsableEndToEnd:
 class TestPostProjectionOptOut:
     """`out`/`out_mid` are 23% of a top-4 budget for 0.27% of its gradient."""
 
-    def test_post_projections_excluded_when_opted_out(self, frozen_encoder):
+    def test_post_projections_excluded_when_opted_out(self, frozen_encoder) -> None:
         unfreeze_encoder_top_layers(frozen_encoder, 2, include_post_projections=False)
         assert frozen_encoder.out.weight.requires_grad is False
         assert frozen_encoder.out_mid.weight.requires_grad is False
         assert frozen_encoder.layers[15].lin.weight.requires_grad is True
         assert frozen_encoder.input_linear.weight.requires_grad is False
 
-    def test_opting_out_only_drops_the_post_projections(self, frozen_encoder):
+    def test_opting_out_only_drops_the_post_projections(self, frozen_encoder) -> None:
         with_post = set(unfreeze_encoder_top_layers(frozen_encoder, 2))
         for p in frozen_encoder.parameters():
             p.requires_grad_(False)
@@ -301,11 +301,11 @@ class TestPostProjectionOptOut:
         assert without < with_post
         assert all(n.startswith(("out.", "out_mid.")) for n in with_post - without)
 
-    def test_default_still_includes_them(self, frozen_encoder):
+    def test_default_still_includes_them(self, frozen_encoder) -> None:
         unfreeze_encoder_top_layers(frozen_encoder, 2)
         assert frozen_encoder.out.weight.requires_grad is True
 
-    def test_config_flag_reaches_the_model(self, base_asr_config):
+    def test_config_flag_reaches_the_model(self, base_asr_config) -> None:
         config = copy.deepcopy(base_asr_config)
         config.freeze_audio_encoder = True
         config.encoder_trainable_top_layers = 1
@@ -340,16 +340,16 @@ class TestEncoderIsNeverLeftInTrainMode:
         return ASRModel(config)
 
     @pytest.mark.parametrize("top_n", [0, 1])
-    def test_encoder_is_in_eval_mode_straight_after_construction(self, base_asr_config, top_n):
+    def test_encoder_is_in_eval_mode_straight_after_construction(self, base_asr_config, top_n) -> None:
         model = self._model(base_asr_config, top_n)
         assert model.audio_tower.training is False
         assert not any(m.training for m in model.audio_tower.modules())
 
-    def test_partial_unfreeze_still_leaves_params_trainable(self, base_asr_config):
+    def test_partial_unfreeze_still_leaves_params_trainable(self, base_asr_config) -> None:
         model = self._model(base_asr_config, 1)
         assert any(p.requires_grad for p in model.audio_tower.parameters())
 
-    def test_model_train_does_not_wake_the_encoder(self, base_asr_config):
+    def test_model_train_does_not_wake_the_encoder(self, base_asr_config) -> None:
         """Frozen BatchNorm statistics are the point -- see _load_audio_encoder."""
         model = self._model(base_asr_config, 1)
         model.train()
@@ -387,19 +387,19 @@ class TestFullyUnfrozenEncoderStillPinsBatchNorm:
         model.audio_tower.add_module("probe_bn", nn.BatchNorm1d(4))
         return model
 
-    def test_batchnorm_stays_in_eval_mode_under_train(self, base_asr_config):
+    def test_batchnorm_stays_in_eval_mode_under_train(self, base_asr_config) -> None:
         model = self._model(base_asr_config)
         model.train()
         assert model.audio_tower.get_submodule("probe_bn").training is False
 
-    def test_the_rest_of_the_encoder_does_enter_train_mode(self, base_asr_config):
+    def test_the_rest_of_the_encoder_does_enter_train_mode(self, base_asr_config) -> None:
         """Only the BN statistics are pinned -- this is not a backdoor freeze."""
         model = self._model(base_asr_config)
         model.train()
         assert model.audio_tower.training is True
         assert model.audio_tower.get_submodule("conv1").training is True
 
-    def test_batchnorm_affine_params_remain_trainable(self, base_asr_config):
+    def test_batchnorm_affine_params_remain_trainable(self, base_asr_config) -> None:
         model = self._model(base_asr_config)
         model.train()
         bn = model.audio_tower.get_submodule("probe_bn")
@@ -407,7 +407,7 @@ class TestFullyUnfrozenEncoderStillPinsBatchNorm:
         assert bn.weight.requires_grad
         assert bn.bias.requires_grad
 
-    def test_pinned_batchnorm_does_not_update_running_stats(self, base_asr_config):
+    def test_pinned_batchnorm_does_not_update_running_stats(self, base_asr_config) -> None:
         model = self._model(base_asr_config)
         model.train()
         bn = model.audio_tower.get_submodule("probe_bn")
@@ -418,7 +418,7 @@ class TestFullyUnfrozenEncoderStillPinsBatchNorm:
         bn(torch.randn(8, 4) + 10.0)
         assert torch.equal(bn.running_mean, before)
 
-    def test_pinned_batchnorm_still_passes_gradient(self, base_asr_config):
+    def test_pinned_batchnorm_still_passes_gradient(self, base_asr_config) -> None:
         model = self._model(base_asr_config)
         model.train()
         bn = model.audio_tower.get_submodule("probe_bn")
@@ -428,7 +428,7 @@ class TestFullyUnfrozenEncoderStillPinsBatchNorm:
         assert x.grad is not None
         assert bn.weight.grad is not None
 
-    def test_frozen_encoder_path_is_unchanged(self, base_asr_config):
+    def test_frozen_encoder_path_is_unchanged(self, base_asr_config) -> None:
         """The `freeze_audio_encoder: true` branch must be untouched."""
         config = copy.deepcopy(base_asr_config)
         config.freeze_audio_encoder = True

@@ -1,6 +1,7 @@
 """Pytest configuration and fixtures."""
 
 import os
+from typing import TypedDict
 from unittest.mock import MagicMock, NonCallableMock
 
 import pytest
@@ -33,7 +34,7 @@ def stub(**attrs: object) -> NonCallableMock:
 
 
 @pytest.fixture
-def mock_feature_extractor():
+def mock_feature_extractor() -> MagicMock:
     """Standard mock feature extractor used across tests."""
     fe = MagicMock()
     fe.sampling_rate = 16000
@@ -45,7 +46,7 @@ def mock_feature_extractor():
 
 
 @pytest.fixture
-def mock_tokenizer():
+def mock_tokenizer() -> MagicMock:
     """Standard mock tokenizer."""
     tok = MagicMock()
     tok.convert_tokens_to_ids.return_value = 12345
@@ -58,7 +59,7 @@ def mock_tokenizer():
 
 
 @pytest.fixture
-def mock_projector():
+def mock_projector() -> MagicMock:
     """Standard mock projector."""
     proj = MagicMock()
     proj.get_output_length.return_value = 100
@@ -70,7 +71,15 @@ def mock_projector():
 # =============================================================================
 
 
-def build_deepgram_word(word: str, start: float, end: float):
+class DeepgramWordSpec(TypedDict):
+    """Word entry accepted by ``build_deepgram_transcription_response``."""
+
+    word: str
+    start: float
+    end: float
+
+
+def build_deepgram_word(word: str, start: float, end: float) -> MagicMock:
     """Factory for Deepgram word mocks."""
     w = MagicMock()
     w.word = word
@@ -79,7 +88,9 @@ def build_deepgram_word(word: str, start: float, end: float):
     return w
 
 
-def build_deepgram_transcription_response(transcript: str = "", words: list | None = None):
+def build_deepgram_transcription_response(
+    transcript: str = "", words: list[DeepgramWordSpec] | None = None
+) -> MagicMock:
     """Factory for Deepgram transcription API response mocks.
 
     Args:
@@ -105,7 +116,7 @@ def build_deepgram_transcription_response(transcript: str = "", words: list | No
 
 
 @pytest.fixture
-def deepgram_transcription_response():
+def deepgram_transcription_response() -> MagicMock:
     """Sample Deepgram transcription response with word timestamps."""
     return build_deepgram_transcription_response(
         transcript="hello world",
@@ -117,7 +128,7 @@ def deepgram_transcription_response():
 
 
 @pytest.fixture(scope="session")
-def base_asr_config():
+def base_asr_config() -> ASRConfig:
     """Session-scoped base ASR config (no LoRA) - loaded once per test session."""
     return ASRConfig(
         audio_model_id="openai/whisper-tiny",
@@ -129,13 +140,13 @@ def base_asr_config():
 
 
 @pytest.fixture(scope="session")
-def base_asr_model(base_asr_config):
+def base_asr_model(base_asr_config: ASRConfig) -> ASRModel:
     """Session-scoped base ASR model - loaded once per test session."""
     return ASRModel(base_asr_config)
 
 
 @pytest.fixture(scope="session")
-def lora_asr_config():
+def lora_asr_config() -> ASRConfig:
     """Session-scoped LoRA ASR config - loaded once per test session."""
     return ASRConfig(
         audio_model_id="openai/whisper-tiny",
@@ -151,7 +162,7 @@ def lora_asr_config():
 
 
 @pytest.fixture(scope="session")
-def lora_asr_model(lora_asr_config):
+def lora_asr_model(lora_asr_config: ASRConfig) -> ASRModel:
     """Session-scoped LoRA ASR model - loaded once per test session."""
     return ASRModel(lora_asr_config)
 
@@ -168,7 +179,7 @@ class MockProjectorConfig:
     Override any attribute by passing kwargs to __init__.
     """
 
-    def __init__(self, **kwargs):
+    def __init__(self, **kwargs: int) -> None:
         # Core dimensions
         self.encoder_dim = kwargs.get("encoder_dim", 256)
         self.llm_dim = kwargs.get("llm_dim", 512)
@@ -177,6 +188,6 @@ class MockProjectorConfig:
 
 
 @pytest.fixture
-def projector_config():
+def projector_config() -> type[MockProjectorConfig]:
     """Factory fixture for creating projector configs with custom settings."""
     return MockProjectorConfig

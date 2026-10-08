@@ -10,7 +10,9 @@ import sys
 from pathlib import Path
 
 import pytest
-from transformers.dynamic_module_utils import get_imports
+from transformers.dynamic_module_utils import (
+    get_imports,  # pyright: ignore[reportUnknownVariableType]  # upstream annotates bare os.PathLike
+)
 
 BUNDLED = sorted(p for p in Path("tiny_audio").glob("*.py") if p.name.startswith("asr_")) + [
     Path("tiny_audio") / n for n in ("projectors.py", "alignment.py", "diarization.py")
@@ -20,6 +22,6 @@ ALLOWED = {"transformers", "torch", "torchaudio", "peft", "safetensors", "numpy"
 
 
 @pytest.mark.parametrize("path", BUNDLED, ids=lambda p: p.name)
-def test_bundled_file_needs_only_model_requirements(path):
+def test_bundled_file_needs_only_model_requirements(path: Path) -> None:
     third_party = {m for m in get_imports(str(path)) if m not in sys.stdlib_module_names}
     assert third_party <= ALLOWED, f"{path.name} needs {sorted(third_party - ALLOWED)}"

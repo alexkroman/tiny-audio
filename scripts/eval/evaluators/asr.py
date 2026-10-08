@@ -13,8 +13,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from pathlib import Path
 from collections.abc import Callable, Iterable, Mapping
+from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Unpack, cast
 
 import assemblyai as aai
@@ -182,7 +182,8 @@ def _build_working_tree_pipeline(
     dtype goes through the config, not a `dtype=` kwarg -- see
     `_resolve_local_runtime` for why that distinction is load-bearing.
     """
-    config = ASRConfig.from_pretrained(model_path)
+    # PretrainedConfig.from_pretrained leaves PathLike unparameterized.
+    config = ASRConfig.from_pretrained(model_path)  # pyright: ignore[reportUnknownMemberType]
     for field in DTYPE_CONFIG_FIELDS:
         setattr(config, field, model_dtype)
     model = ASRModel.from_pretrained(model_path, config=config)
@@ -278,7 +279,9 @@ def _use_sdpa_where_safe(model: ASRModel) -> None:
     if resolved is None or resolved == model.language_model.config._attn_implementation:
         return
     # transformers leaves the per-submodule dict form unparameterized.
-    model.language_model.set_attn_implementation(resolved)  # pyright: ignore[reportUnknownMemberType]
+    model.language_model.set_attn_implementation(
+        resolved
+    )  # pyright: ignore[reportUnknownMemberType]
 
 
 def _build_local_pipeline(model_path: str, *, local_code: bool = False) -> ASRPipeline:
@@ -520,7 +523,9 @@ class EndpointEvaluator(Evaluator):
 
         start = time.time()
         # huggingface_hub leaves `extra_body` an unparameterized dict.
-        result = self.client.automatic_speech_recognition(wav_bytes)  # pyright: ignore[reportUnknownMemberType]
+        result = self.client.automatic_speech_recognition(
+            wav_bytes
+        )  # pyright: ignore[reportUnknownMemberType]
         elapsed = time.time() - start
 
         # The output type is a dict subclass carrying the response fields.
@@ -677,7 +682,9 @@ class AssemblyAIStreamingEvaluator(Evaluator):
             (StreamingEvents.Termination, on_terminated),
         ]
         for event, handler in handlers:
-            client.on(event, handler)  # pyright: ignore[reportUnknownMemberType]  # handler: bare Callable
+            client.on(
+                event, handler
+            )  # pyright: ignore[reportUnknownMemberType]  # handler: bare Callable
         client.connect(
             StreamingParameters(
                 sample_rate=16000,

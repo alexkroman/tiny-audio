@@ -21,27 +21,27 @@ class TestMLPAudioProjector:
     """Tests for MLPAudioProjector."""
 
     @pytest.fixture
-    def config(self):
+    def config(self) -> MockProjectorConfig:
         return MockProjectorConfig(encoder_dim=256, llm_dim=512, projector_pool_stride=4)
 
     @pytest.fixture
-    def projector(self, config):
+    def projector(self, config: MockProjectorConfig) -> MLPAudioProjector:
         return MLPAudioProjector(config)
 
-    def test_forward_shape(self, projector):
+    def test_forward_shape(self, projector: MLPAudioProjector) -> None:
         """Test that MLP projector produces correct output shape."""
         x = torch.randn(2, 100, 256)
         out = projector(x)
         # Stride-4 frame stacking quarters sequence length
         assert out.shape == (2, 25, 512)
 
-    def test_get_output_length(self, projector):
+    def test_get_output_length(self, projector: MLPAudioProjector) -> None:
         """Test output length calculation (floor division)."""
         assert projector.get_output_length(100) == 25
         assert projector.get_output_length(104) == 26
         assert projector.get_output_length(4) == 1
 
-    def test_downsampling(self, projector):
+    def test_downsampling(self, projector: MLPAudioProjector) -> None:
         """Test that downsampling reduces sequence length by k (must be divisible)."""
         for seq_len in [8, 48, 100, 200]:
             x = torch.randn(1, seq_len, 256)
@@ -49,7 +49,7 @@ class TestMLPAudioProjector:
             expected_len = projector.get_output_length(seq_len)
             assert out.shape[1] == expected_len
 
-    def test_parameter_layout(self, projector):
+    def test_parameter_layout(self, projector: MLPAudioProjector) -> None:
         """Norm on the stacked input, biased linears, nothing after linear_2."""
         assert set(dict(projector.named_parameters())) == {
             "input_norm.weight",
@@ -59,11 +59,11 @@ class TestMLPAudioProjector:
             "linear_2.bias",
         }
 
-    def test_input_norm_sized_for_stacked_frames(self, projector):
+    def test_input_norm_sized_for_stacked_frames(self, projector: MLPAudioProjector) -> None:
         """input_norm runs after frame stacking, so it spans encoder_dim * k."""
         assert projector.input_norm.weight.shape == (256 * 4,)
 
-    def test_output_scale_is_observable(self, projector):
+    def test_output_scale_is_observable(self, projector: MLPAudioProjector) -> None:
         """Scaling linear_2 must scale the output.
 
         This is the property a trailing RMSNorm destroyed: it renormalized
@@ -81,7 +81,7 @@ class TestMLPAudioProjector:
             projector.linear_2.weight.mul_(3.0)
         assert torch.allclose(projector(x), before * 3.0, atol=1e-5)
 
-    def test_input_scale_is_normalized_away(self, projector):
+    def test_input_scale_is_normalized_away(self, projector: MLPAudioProjector) -> None:
         """input_norm makes the projection invariant to encoder output scale."""
         projector.eval()
         x = torch.randn(2, 100, 256)
@@ -96,11 +96,11 @@ class TestMLPAudioProjector:
 class TestProjectorRegistry:
     """Tests for projector registry."""
 
-    def test_core_projectors_registered(self):
+    def test_core_projectors_registered(self) -> None:
         """Test that core projector types are in the registry."""
         assert "mlp" in PROJECTOR_CLASSES
 
-    def test_registry_instantiation(self):
+    def test_registry_instantiation(self) -> None:
         """Test that all registered projectors can be instantiated."""
         config = MockProjectorConfig()
         for cls in PROJECTOR_CLASSES.values():
@@ -122,7 +122,7 @@ class TestGradientFlow:
     """Tests for gradient flow through projectors."""
 
     @pytest.mark.parametrize("projector_type", GRADIENT_TEST_PROJECTORS)
-    def test_gradients_flow(self, projector_type):
+    def test_gradients_flow(self, projector_type: str) -> None:
         """Test that gradients flow through projector."""
         config = MockProjectorConfig()
         projector = PROJECTOR_CLASSES[projector_type](config)

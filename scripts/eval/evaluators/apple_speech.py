@@ -31,17 +31,15 @@ class _AppleFrameworks:
     speech: ModuleType
 
 
-def _load_apple_frameworks() -> _AppleFrameworks | None:
-    try:
-        import CoreFoundation
-        import Foundation
-        import Speech
-    except ImportError:
-        return None
-    return _AppleFrameworks(CoreFoundation, Foundation, Speech)
-
-
-_APPLE_FRAMEWORKS = _load_apple_frameworks()
+try:
+    import CoreFoundation
+    import Foundation
+    import Speech
+except ImportError:
+    _frameworks: _AppleFrameworks | None = None
+else:
+    _frameworks = _AppleFrameworks(CoreFoundation, Foundation, Speech)
+_APPLE_FRAMEWORKS = _frameworks
 
 
 def _pump_run_loop_until(

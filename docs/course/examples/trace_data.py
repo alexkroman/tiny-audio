@@ -80,7 +80,15 @@ class _Axes(Protocol):
 class _Figure(Protocol):
     """The `matplotlib.figure.Figure` calls this script makes."""
 
-    def savefig(self, fname: io.BytesIO, /, *, format: str, dpi: int, bbox_inches: str) -> None: ...
+    def savefig(
+        self,
+        fname: io.BytesIO,
+        /,
+        *,
+        format: str,  # noqa: A002 -- matplotlib's keyword
+        dpi: int,
+        bbox_inches: str,
+    ) -> None: ...
     def colorbar(self, mappable: AxesImage, /, *, ax: _Axes, label: str) -> Colorbar: ...
 
 
@@ -203,7 +211,9 @@ def main() -> None:
         # Normalize for cosine similarity
         proj_norm = projector_flat / projector_flat.norm(dim=-1, keepdim=True)
         # torch leaves Tensor.norm's `dim` / `dtype` unannotated.
-        text_norms: torch.Tensor = text_embeddings.norm(dim=-1, keepdim=True)  # pyright: ignore[reportUnknownMemberType]
+        text_norms = cast(
+            torch.Tensor, text_embeddings.norm(dim=-1, keepdim=True)
+        )  # pyright: ignore[reportUnknownMemberType]
         text_norm = text_embeddings / text_norms
 
         # Get top token for each time step

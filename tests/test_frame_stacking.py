@@ -3,6 +3,7 @@
 import pytest
 import torch
 
+from tiny_audio.asr_modeling import _int_list
 from tiny_audio.projectors import _frame_stack, _frame_stack_length
 
 
@@ -12,14 +13,14 @@ class TestFrameStacking:
     @pytest.mark.parametrize(
         ("length", "k", "expected"), [(8, 4, 2), (7, 4, 1), (3, 4, 0), (9, 2, 4)]
     )
-    def test_length_rule(self, length, k, expected):
+    def test_length_rule(self, length: int, k: int, expected: int) -> None:
         assert _frame_stack_length(length, k) == expected
 
-    def test_length_rule_on_tensor(self):
+    def test_length_rule_on_tensor(self) -> None:
         out = _frame_stack_length(torch.tensor([8, 9, 3]), 4)
-        assert out.tolist() == [2, 2, 0]
+        assert _int_list(out) == [2, 2, 0]
 
-    def test_stack_concatenates_adjacent_frames(self):
+    def test_stack_concatenates_adjacent_frames(self) -> None:
         x = torch.arange(2 * 5 * 3, dtype=torch.float32).reshape(2, 5, 3)
         out = _frame_stack(x, 2)
         assert out.shape == (2, 2, 6)

@@ -50,7 +50,9 @@ def audio_to_wav_bytes(audio_array: AudioArray | torch.Tensor, sample_rate: int)
     """Convert audio array to WAV bytes using soundfile."""
     if isinstance(audio_array, torch.Tensor):
         # torch annotates numpy() as a bare ndarray.
-        audio_array = cast(AudioArray, audio_array.numpy())  # pyright: ignore[reportUnknownMemberType]
+        audio_array = cast(
+            AudioArray, audio_array.numpy()
+        )  # pyright: ignore[reportUnknownMemberType]
     if audio_array.ndim > 1:
         audio_array = audio_array.squeeze()
 
@@ -110,7 +112,9 @@ def as_16k_array(audio: object) -> AudioArray:
         # librosa annotates arrays as bare np.ndarray.
         array = cast(
             AudioArray,
-            librosa.resample(array, orig_sr=sample_rate, target_sr=16000),  # pyright: ignore[reportUnknownMemberType]
+            librosa.resample(
+                array, orig_sr=sample_rate, target_sr=16000
+            ),  # pyright: ignore[reportUnknownMemberType]
         )
     return array
 
@@ -179,7 +183,9 @@ def _english_normalizer() -> EnglishTextNormalizer:
     """
     tokenizer = cast(
         WhisperTokenizer,
-        WhisperTokenizer.from_pretrained("openai/whisper-tiny"),  # pyright: ignore[reportUnknownMemberType]
+        WhisperTokenizer.from_pretrained(
+            "openai/whisper-tiny"
+        ),  # pyright: ignore[reportUnknownMemberType]
     )
     spelling = cast(
         "dict[str, str]",

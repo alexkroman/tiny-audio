@@ -33,7 +33,7 @@ import html
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Annotated, Any, NotRequired, TypedDict, TypeVar, cast
+from typing import Annotated, Any, NotRequired, TypedDict, cast
 
 import gradio as gr
 import soundfile
@@ -41,8 +41,6 @@ import torch
 import typer
 from gradio import themes
 from transformers import pipeline
-
-_F = TypeVar("_F", bound=Callable[..., Any])
 
 
 class Word(TypedDict):
@@ -86,7 +84,7 @@ def gpu_seconds(audio: str, kwargs: Mapping[str, Any]) -> int:
     return int(min(120, max(20, 10 + per_second * seconds)))
 
 
-def gpu(fn: _F) -> _F:
+def gpu[F: Callable[..., Any]](fn: F) -> F:
     return zero_gpu(duration=gpu_seconds)(fn) if zero_gpu else fn
 
 
