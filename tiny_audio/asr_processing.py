@@ -1,21 +1,28 @@
 """Processor that turns raw audio (and optional text) into model inputs."""
 
-from typing import ClassVar, Union
+from typing import TYPE_CHECKING, Any, ClassVar, Union
 
 import numpy as np
 import torch
 import transformers
 from torch.nn.utils.rnn import pad_sequence
-from transformers import ProcessorMixin
+from transformers import BatchFeature, ProcessorMixin
 
-try:
+if TYPE_CHECKING:
     from .asr_config import DEFAULT_ENCODER_CONV_LAYERS, ASRConfig, compute_encoder_output_length
-except ImportError:
-    from asr_config import (  # type: ignore[no-redef]
-        DEFAULT_ENCODER_CONV_LAYERS,
-        ASRConfig,
-        compute_encoder_output_length,
-    )
+else:
+    try:
+        from .asr_config import (
+            DEFAULT_ENCODER_CONV_LAYERS,
+            ASRConfig,
+            compute_encoder_output_length,
+        )
+    except ImportError:  # flat layout on the Hub: sibling modules, no package
+        from asr_config import (
+            DEFAULT_ENCODER_CONV_LAYERS,
+            ASRConfig,
+            compute_encoder_output_length,
+        )
 
 
 def left_pad_prompt_rows(rows: list[torch.Tensor], tokenizer) -> tuple[torch.Tensor, torch.Tensor]:
@@ -143,9 +150,18 @@ class ASRProcessor(ProcessorMixin):
         """Stack per-sample prompt rows into a batch (see `left_pad_prompt_rows`)."""
         return left_pad_prompt_rows(rows, self.tokenizer)
 
-    def __call__(
+    def __call__(self, *args: Any, **kwargs: Any) -> BatchFeature:
+        """Process audio and text inputs for inference; see `_process` for the arguments.
+
+        `ProcessorMixin.__call__` takes `(images, text, videos, audio, ...)`; this
+        processor takes audio first, so the arguments are forwarded unchanged to
+        `_process`, which carries the real signature.
+        """
+        return BatchFeature(data=self._process(*args, **kwargs))
+
+    def _process(
         self,
-        audio: Union[list, "torch.Tensor"] | None = None,
+        audio: Union[list, "torch.Tensor", np.ndarray] | None = None,
         text: str | None = None,
         return_tensors: str = "pt",
         **kwargs,
@@ -166,9 +182,9 @@ class ASRProcessor(ProcessorMixin):
         # Process audio
         if audio is not None:
             sr = getattr(self.feature_extractor, "sampling_rate", 16000)
-            audio = prepend_lead_in(audio, sr, self.lead_in_seconds)
+            padded_audio = prepend_lead_in(audio, sr, self.lead_in_seconds)
             audio_inputs = self.feature_extractor(
-                audio,
+                padded_audio,
                 sampling_rate=getattr(self.feature_extractor, "sampling_rate", 16000),
                 return_attention_mask=True,
                 return_tensors=return_tensors,
@@ -178,10 +194,11 @@ class ASRProcessor(ProcessorMixin):
             result["audio_attention_mask"] = audio_inputs["attention_mask"]
 
             if self.projector is None:
-                raise ValueError(
+                msg = (
                     "ASRProcessor needs a projector to size the audio prompt. Build it "
                     "with ASRModel.get_processor() instead of constructing it directly."
                 )
+                raise ValueError(msg)
 
             # One count per sample, from that sample's own mel length. Sizing a
             # single shared prompt from the batch max -- which this used to do --

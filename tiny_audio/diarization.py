@@ -1,7 +1,23 @@
 """Speaker diarization with NVIDIA Nemotron-3-Diarization."""
 
+import importlib.util
+from typing import Protocol, cast
+
 import numpy as np
 import torch
+import torchaudio
+from transformers import (
+    AutoModelForAudioFrameClassification,
+    AutoProcessor,
+    BatchFeature,
+    PreTrainedModel,
+)
+
+
+class _AudioProcessor(Protocol):
+    """What `activity` uses of the Nemotron processor (its class ships after 5.17)."""
+
+    def __call__(self, audio: np.ndarray, *, sampling_rate: int) -> BatchFeature: ...
 
 
 def _get_device() -> torch.device:
@@ -27,7 +43,17 @@ def _label_runs(labels: np.ndarray) -> list[tuple[int, int, int]]:
     change = np.flatnonzero(labels[1:] != labels[:-1]) + 1
     starts = np.concatenate(([0], change))
     ends = np.concatenate((change, [labels.size]))
-    return [(labels[s].item(), int(s), int(e)) for s, e in zip(starts, ends)]
+    return [(labels[s].item(), int(s), int(e)) for s, e in zip(starts, ends, strict=True)]
+
+
+def _module_to(module: torch.nn.Module, device: torch.device) -> None:
+    """`module.to(device)`, in place.
+
+    `PreTrainedModel.to` is wrapped with `functools.wraps`, which type checkers
+    can't bind as a method; typed as `nn.Module` the call resolves. Same method
+    at runtime: it moves the module in place and returns it.
+    """
+    module.to(device)
 
 
 class NemotronDiarizer:
@@ -53,25 +79,25 @@ class NemotronDiarizer:
     FRAME_S = 0.01
     SEGMENT_THRESHOLD = 0.5  # a speaker's segment = frames above this
     MIN_WORD_ACTIVITY = 0.1  # below this nobody is heard: the word inherits its neighbour
-    _model = None
-    _processor = None
+    _model: PreTrainedModel | None = None
+    _processor: _AudioProcessor | None = None
 
     @classmethod
-    def get_instance(cls):
-        if cls._model is None:
-            import importlib.util
-
+    def get_instance(cls) -> tuple[PreTrainedModel, _AudioProcessor]:
+        if cls._model is None or cls._processor is None:
             if importlib.util.find_spec("transformers.models.nemotron3_diarization") is None:
-                raise ImportError(
+                msg = (
                     "Speaker diarization uses Nemotron-3-Diarization, which needs a transformers "
                     "build with `nemotron3_diarization`: "
                     "pip install git+https://github.com/huggingface/transformers"
                 )
-            from transformers import AutoModelForAudioFrameClassification, AutoProcessor
-
-            model = AutoModelForAudioFrameClassification.from_pretrained(cls.MODEL_ID)
-            cls._model = model.to(_get_device()).eval()
-            cls._processor = AutoProcessor.from_pretrained(cls.MODEL_ID)
+                raise ImportError(msg)
+            model: PreTrainedModel = AutoModelForAudioFrameClassification.from_pretrained(
+                cls.MODEL_ID
+            )
+            _module_to(model, _get_device())
+            cls._model = model.eval()
+            cls._processor = cast("_AudioProcessor", AutoProcessor.from_pretrained(cls.MODEL_ID))
         return cls._model, cls._processor
 
     @classmethod
@@ -79,8 +105,6 @@ class NemotronDiarizer:
     def activity(cls, audio: np.ndarray, sample_rate: int = 16000) -> np.ndarray:
         """(frames, 8) speech probabilities at 10 ms; columns in arrival order."""
         if sample_rate != 16000:
-            import torchaudio
-
             audio = torchaudio.functional.resample(
                 torch.as_tensor(audio, dtype=torch.float32), sample_rate, 16000
             ).numpy()
@@ -165,6 +189,6 @@ class NemotronDiarizer:
         """Label each `{"start", "end"}` word `SPEAKER_i` by `speaker_columns`."""
         names = {c: f"SPEAKER_{i}" for i, c in enumerate(keep)}
         spans = [(w["start"], w["end"]) for w in words]
-        for word, col in zip(words, cls.speaker_columns(spans, activity, keep)):
+        for word, col in zip(words, cls.speaker_columns(spans, activity, keep), strict=True):
             word["speaker"] = names[col]
         return words
