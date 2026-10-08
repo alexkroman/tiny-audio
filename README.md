@@ -363,10 +363,23 @@ poetry run ta dev format      # Format code (black, ruff, mdformat)
 poetry run ta dev lint        # Lint + format check (poetry check --lock, ruff, black, yamllint, taplo,
                               #   actionlint, zizmor, mdformat --check)
 poetry run ta dev type-check  # Type check (mypy, pyright)
-poetry run ta dev check       # Lint + type-check + security + dead code + duplication + deptry +
-                              #   docstrings
+poetry run ta dev check       # Lint + type-check + security + dead code + duplication + ratchets
+                              #   + deptry + docstrings
 poetry run ta dev precommit   # Full quality gate
 ```
+
+`ta dev check` and `ta dev test` also run three ratchets (`scripts/quality.py`), each against a
+baseline committed under `quality/` that may only improve:
+
+- **File length:** Python files are capped at 600 code lines; files already over it may not grow.
+- **Per-file coverage:** each file keeps its recorded line coverage, and new files need 50%. Runs
+  after the tests, from `coverage.json`.
+- **Test assertions:** every test must assert something (an `assert`, `pytest.raises`, a mock
+  `assert_*`, or a call to a guard such as `_require_*`).
+
+After an intended improvement, refresh a baseline with `ta dev quality file-length --update` or
+`ta dev quality coverage-floors --update` (record coverage floors from a run with Hub access) and
+commit the diff.
 
 ### Adding a New Projector
 

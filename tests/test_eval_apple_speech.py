@@ -145,3 +145,5 @@ class TestAppleSpeechEvaluator:
         ev = fake_speech_frameworks["asr"].AppleSpeechEvaluator()
         ev.close()
         ev.close()
+
+        assert ev.temp_dir is None

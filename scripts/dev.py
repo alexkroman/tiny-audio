@@ -2,10 +2,13 @@
 """Development commands for tiny-audio."""
 
 import subprocess
+import sys
 from pathlib import Path
 
 import typer
 from rich.console import Console
+
+from scripts import quality
 
 app = typer.Typer(
     name="dev",
@@ -13,6 +16,7 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
+app.add_typer(quality.app)
 console = Console()
 
 CODE_PATHS = ["tiny_audio", "scripts", "tests"]
@@ -51,6 +55,12 @@ SECURITY_COMMAND = ["bandit", "-c", "pyproject.toml", "-r", "tiny_audio", "scrip
 # Unused, missing, transitive-only and misplaced dependencies; configured in
 # `[tool.deptry]` (pyproject.toml).
 DEPS_COMMAND = ["deptry", "."]
+# Ratchets in scripts/quality.py, against baselines committed under quality/.
+QUALITY = [sys.executable, "-m", "scripts.quality"]
+FILE_LENGTH_COMMAND = [*QUALITY, "file-length"]
+TEST_ASSERTIONS_COMMAND = [*QUALITY, "test-assertions"]
+# Reads the coverage.json TEST_COMMAND writes, so it runs after the tests.
+COVERAGE_FLOORS_COMMAND = [*QUALITY, "coverage-floors"]
 # Copy-pasted blocks of 4+ lines across tiny_audio/ and scripts/ (comments,
 # docstrings, imports and signatures ignored). demo/ is left out: it deploys
 # to the Space on its own and cannot share code with scripts/.
@@ -80,6 +90,8 @@ ANALYSIS_COMMANDS = [
     SECURITY_COMMAND,
     DEAD_CODE_COMMAND,
     DUPLICATION_COMMAND,
+    FILE_LENGTH_COMMAND,
+    TEST_ASSERTIONS_COMMAND,
     DEPS_COMMAND,
     *DOCSTRINGS_COMMANDS,
 ]
@@ -92,6 +104,7 @@ TEST_COMMAND = [
     "--cov=scripts",
     "--cov-report=term-missing",
     "--cov-report=xml",
+    "--cov-report=json",
 ]
 
 
@@ -197,8 +210,8 @@ def type_check():
 
 @app.command()
 def test():
-    """Run pytest with the coverage floor enforced."""
-    raise typer.Exit(run(*TEST_COMMAND))
+    """Run pytest with the coverage floor and per-file floors enforced."""
+    raise typer.Exit(run_all(TEST_COMMAND, COVERAGE_FLOORS_COMMAND))
 
 
 @app.command()
@@ -209,7 +222,7 @@ def coverage():
 
 @app.command()
 def check():
-    """Run all checks (lint, type-check, security, dead code, duplication, deps, docstrings)."""
+    """Run all checks (lint, types, security, dead code, duplication, ratchets, deps, docs)."""
     raise typer.Exit(run_all(*check_commands()))
 
 
@@ -223,7 +236,9 @@ def build():
 def precommit():
     """Pre-commit quality gate (format, check, test with coverage floor, build)."""
     format_code()
-    raise typer.Exit(run_all(*check_commands(), TEST_COMMAND) or build_and_check())
+    raise typer.Exit(
+        run_all(*check_commands(), TEST_COMMAND, COVERAGE_FLOORS_COMMAND) or build_and_check()
+    )
 
 
 @app.command("install-hooks")

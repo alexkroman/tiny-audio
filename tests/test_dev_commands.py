@@ -86,11 +86,14 @@ class TestCommandWiring:
 
     def test_test_enforces_coverage(self, recorded_runs):
         assert runner.invoke(dev.app, ["test"]).exit_code == 0
-        (cmd,) = recorded_runs
+        cmd, floors = recorded_runs
         assert cmd[0] == "pytest"
         assert "--cov=tiny_audio" in cmd
         assert "--cov=scripts" in cmd
         assert "--cov-report=xml" in cmd
+        # The per-file floors read the JSON report the test run just wrote.
+        assert "--cov-report=json" in cmd
+        assert floors == tuple(dev.COVERAGE_FLOORS_COMMAND)
 
     def test_coverage_adds_html_report(self, recorded_runs):
         assert runner.invoke(dev.app, ["coverage"]).exit_code == 0
@@ -105,6 +108,7 @@ class TestCommandWiring:
         assert recorded_runs[1:] == [
             *(tuple(cmd) for cmd in dev.check_commands()),
             tuple(dev.TEST_COMMAND),
+            tuple(dev.COVERAGE_FLOORS_COMMAND),
             tuple(dev.BUILD_COMMAND),
             *(tuple(cmd) for cmd in dev.dist_check_commands()),
         ]
@@ -183,6 +187,8 @@ class TestQualityGateContents:
         assert dev.DEAD_CODE_COMMAND in dev.check_commands()
         assert dev.DEPS_COMMAND in dev.check_commands()
         assert dev.DUPLICATION_COMMAND in dev.check_commands()
+        assert dev.FILE_LENGTH_COMMAND in dev.check_commands()
+        assert dev.TEST_ASSERTIONS_COMMAND in dev.check_commands()
         for cmd in dev.DOCSTRINGS_COMMANDS:
             assert cmd in dev.check_commands()
 
