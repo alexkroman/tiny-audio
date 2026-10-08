@@ -66,7 +66,9 @@ class TestRunHelpers:
         assert dev.run_all(["a"], ["b"], ["c"]) == 3
         assert executed == [("a",), ("b",)]
 
-    def test_run_all_succeeds_when_everything_passes(self, recorded_runs: list[tuple[str, ...]]) -> None:
+    def test_run_all_succeeds_when_everything_passes(
+        self, recorded_runs: list[tuple[str, ...]]
+    ) -> None:
         assert dev.run_all(["a"], ["b"]) == 0
         assert recorded_runs == [("a",), ("b",)]
 
@@ -104,7 +106,9 @@ class TestCommandWiring:
         assert cmd[: len(dev.TEST_COMMAND)] == tuple(dev.TEST_COMMAND)
         assert cmd[-1] == "--cov-report=html"
 
-    def test_precommit_formats_then_checks_tests_and_builds(self, recorded_runs: list[tuple[str, ...]], monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_precommit_formats_then_checks_tests_and_builds(
+        self, recorded_runs: list[tuple[str, ...]], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setattr(dev, "format_code", lambda: recorded_runs.append(("<format>",)))
         assert runner.invoke(dev.app, ["precommit"]).exit_code == 0
         assert recorded_runs[0] == ("<format>",)
@@ -143,7 +147,9 @@ class TestCommandWiring:
         assert runner.invoke(dev.app, ["dead-code"]).exit_code == 0
         assert recorded_runs == [tuple(dev.DEAD_CODE_COMMAND)]
 
-    def test_duplication_uses_the_shared_command(self, recorded_runs: list[tuple[str, ...]]) -> None:
+    def test_duplication_uses_the_shared_command(
+        self, recorded_runs: list[tuple[str, ...]]
+    ) -> None:
         assert runner.invoke(dev.app, ["duplication"]).exit_code == 0
         assert recorded_runs == [tuple(dev.DUPLICATION_COMMAND)]
 
@@ -170,7 +176,9 @@ class TestFormatCode:
     def _fake_ls_files(self, cmd: list[str], **_kw: object) -> SimpleNamespace:
         return SimpleNamespace(stdout=self.LISTINGS[cmd[-1]])
 
-    def test_every_tracked_markdown_and_json_file_is_formatted(self, recorded_runs: list[tuple[str, ...]], monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_every_tracked_markdown_and_json_file_is_formatted(
+        self, recorded_runs: list[tuple[str, ...]], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setattr("scripts.dev.subprocess.run", self._fake_ls_files)
         dev.format_code()
         assert ("mdformat", "README.md", "MODEL_CARD.md", "demo/README.md") in recorded_runs
@@ -178,7 +186,9 @@ class TestFormatCode:
         assert ("taplo", "fmt", *dev.TOML_FILES) in recorded_runs
         assert [c[0] for c in recorded_runs[:3]] == ["black", "ruff", "ruff"]
 
-    def test_no_markdown_means_no_mdformat_call(self, recorded_runs: list[tuple[str, ...]], monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_no_markdown_means_no_mdformat_call(
+        self, recorded_runs: list[tuple[str, ...]], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         def empty_ls_files(*_a: object, **_kw: object) -> SimpleNamespace:
             return SimpleNamespace(stdout="")
 
@@ -276,7 +286,9 @@ class TestLazyRegistration:
         """Reload scripts.cli so its LazyGroup starts with an empty cache."""
         importlib.reload(cli_module)  # re-executes the module in place
 
-    def test_root_lists_every_subcommand_without_importing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_root_lists_every_subcommand_without_importing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         self._fresh_cli()
         for module in cli_module.SUBCOMMANDS.values():
             monkeypatch.delitem(sys.modules, module, raising=False)
@@ -286,7 +298,9 @@ class TestLazyRegistration:
         assert group.list_commands(ctx) == list(cli_module.SUBCOMMANDS)
         assert not any(m in sys.modules for m in cli_module.SUBCOMMANDS.values())
 
-    def test_resolving_one_command_imports_only_its_module(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_resolving_one_command_imports_only_its_module(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         self._fresh_cli()
         for module in cli_module.SUBCOMMANDS.values():
             monkeypatch.delitem(sys.modules, module, raising=False)
@@ -322,7 +336,9 @@ def test_project_root_has_pyproject() -> None:
 class TestDistChecks:
     """`dist_check_commands` points the checkers at exactly what is in dist/."""
 
-    def test_checks_every_artifact_and_the_wheel(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def test_checks_every_artifact_and_the_wheel(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         for name in ("pkg-0.1-py3-none-any.whl", "pkg-0.1.tar.gz"):
             (tmp_path / name).touch()
         monkeypatch.setattr(dev, "DIST_DIR", tmp_path)
@@ -332,7 +348,9 @@ class TestDistChecks:
         assert twine_check[:3] == ["twine", "check", "--strict"]
         assert twine_check[3:] == sorted(str(p) for p in tmp_path.iterdir())
 
-    def test_missing_dist_dir_yields_no_artifacts(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def test_missing_dist_dir_yields_no_artifacts(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         monkeypatch.setattr(dev, "DIST_DIR", tmp_path / "missing")
         wheel_check, twine_check = dev.dist_check_commands()
         assert not any(arg.endswith(".whl") for arg in wheel_check)

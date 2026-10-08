@@ -28,7 +28,9 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
         ("asr", "scripts.train", "+experiments=stage_1"),
     ],
 )
-def test_experiment_flag_spells_each_trees_preset_key(calls: list[list[str]], recipe: str, module: str, preset: str) -> None:
+def test_experiment_flag_spells_each_trees_preset_key(
+    calls: list[list[str]], recipe: str, module: str, preset: str
+) -> None:
     result = runner.invoke(app, ["train", recipe, "-e", "stage_1", "training.max_steps=5"])
     assert result.exit_code == 0, result.output
     assert calls == [[sys.executable, "-m", module, preset, "training.max_steps=5"]]

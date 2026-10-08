@@ -64,7 +64,9 @@ class TestCoverage:
         assert "new-file floor" in problem
         assert quality.coverage_violations({"new.py": floor}, {}) == []
 
-    def test_update_records_floors_the_same_run_passes(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def test_update_records_floors_the_same_run_passes(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         report, baseline = tmp_path / "coverage.json", tmp_path / "floors.json"
         report.write_text(json.dumps(self.report(**{"a.py": (2, 3)})))  # 66.666...%
         monkeypatch.setattr(quality, "COVERAGE_REPORT", report)
