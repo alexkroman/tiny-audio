@@ -261,7 +261,7 @@ ______________________________________________________________________
 | `HF_TOKEN` warning at launch | Export a write token (or pass `--hf-token`) before `ta runpod train` |
 | `not logged in` from `ta push` | Run `hf auth login`, export `HF_TOKEN`, or pass `--hf-token`; the push needs a write token |
 | W&B prompts for login | Paste your key, or pass `training.report_to=none` |
-| Hydra "could not override" | Use `key=value`; check the key exists in `config.yaml` or `production.yaml` |
+| Hydra "could not override" | Use `key=value`; check the key exists in `scripts/train_config.py` (the config schema), or add it with `+training.<key>=` |
 | `analysis` finds no results | Use the short model name (after the last `/`); it must match exactly |
 | Space serves the wrong model | Set `MODEL_ID` in the Space's variables |
 

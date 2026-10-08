@@ -44,6 +44,7 @@ from transformers import (
 )
 from trl.experimental.utils import DataCollatorForChatML  # pyright: ignore[reportMissingImports]
 
+from scripts import train_config  # noqa: F401  (registers the `base_config` schema)
 from tiny_audio.asr_config import (
     DEFAULT_ENCODER_CONV_LAYERS,
     ASRConfig,
@@ -1220,9 +1221,13 @@ class PushToHubCallback(TrainerCallback):
 
 
 def get_valid_training_args(config: dict) -> dict:
-    """Filter config to only valid TrainingArguments fields."""
+    """Filter config to only valid, set TrainingArguments fields.
+
+    None means "unset" in the structured-config schema (scripts/train_config.py),
+    so those keys are dropped and TrainingArguments applies its own default.
+    """
     valid_fields = {f.name for f in fields(TrainingArguments)}
-    return {k: v for k, v in config.items() if k in valid_fields}
+    return {k: v for k, v in config.items() if k in valid_fields and v is not None}
 
 
 def _git_state() -> tuple[str | None, bool]:
@@ -1423,7 +1428,9 @@ def main(cfg: DictConfig) -> None:
     model_config_dict["transcribe_prompt"] = _resolve_transcribe_prompt(
         model_config_dict.get("transcribe_prompt"), cfg.data.get("datasets") or []
     )
-    asr_config = ASRConfig(**model_config_dict)
+    # None marks a schema field the configs left unset; drop it so ASRConfig's
+    # own default applies (see ModelConfig in scripts/train_config.py).
+    asr_config = ASRConfig(**{k: v for k, v in model_config_dict.items() if v is not None})
 
     model = ASRModel(asr_config)
 
