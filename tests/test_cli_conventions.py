@@ -29,7 +29,6 @@ RESERVED_SHORT_FLAGS = {
     "-d": "--datasets",
     "-e": "--experiment",
     "-f": "--force",
-    "-k": "--top-k",
     "-l": "--list",
     "-m": "--model",
     "-n": "--max-samples",
@@ -37,8 +36,6 @@ RESERVED_SHORT_FLAGS = {
     "-p": "--port",
     "-r": "--repo-id",
     "-s": "--streaming",
-    "-t": "--threshold",
-    "-v": "--verbose",
     "-w": "--num-workers",
 }
 

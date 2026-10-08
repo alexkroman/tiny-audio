@@ -78,17 +78,12 @@ Results: `outputs/<timestamp>_<short-name>_<dataset>/{results.txt,metrics.txt}`
 
 ### Analysis
 
-The model argument is the **short name** (text after the last `/`), matched exactly.
-
 ```bash
-poetry run ta analysis high-wer <short-name> --threshold 50 [--latest] [--output-file file.md]
-poetry run ta analysis compare <short-name> tiny-audio assemblyai
-poetry run ta analysis extract-entities               # build outputs/keywords.json first
-poetry run ta analysis entity-errors <short-name> [--entity-type PERSON]
+# Worst samples of a run
+grep -h "WER:" outputs/*_<short-name>_<dataset>/results.txt | sort -t: -k2 -rn | head -20
+# Corpus WER of every run on a dataset
+grep -H "^wer:" outputs/*_<dataset>/metrics.txt
 
-poetry run ta debug analyze-weights <model>
-poetry run ta debug compare-to-base <model> [--per-layer]
-poetry run ta debug analyze-lora <model>
 poetry run ta debug check-gradient-flow <model>
 ```
 
@@ -138,10 +133,7 @@ transcript as the assistant turn, via Qwen3's chat template.
 | Config | Encoder | Decoder | Trains | Data |
 |--------|---------|---------|--------|------|
 | `stage_1` | GLM-ASR-Nano (frozen) | Qwen3-0.6B | Projector + decoder + embeddings | `multiasr` |
-| `encoder_train` | Whisper-medium.en (trained) | Qwen3-0.6B (frozen) | Projector + encoder | `multiasr` |
-| `granite_qwen` | Granite Speech 470M | Qwen3.5-2B | Projector + decoder | `multiasr` |
-| `granite_gemma` | Granite Speech 470M | Gemma 4 E2B (frozen) | Projector | `loquacious_medium` |
-| `granite_gemma_smoke` | as above | as above | 50 steps | `librispeech_dummy` |
+| `granite_qwen_frozen` | Granite Speech 470M | Qwen3.5-4B (frozen) | Projector + decoder LoRA | `multiasr` |
 | `mps_smoke` | GLM-ASR-Nano | Qwen3-0.6B | 10 steps, batch 1 | `librispeech_dummy` |
 
 ### Freeze Flags
@@ -211,7 +203,7 @@ transcript as the assistant turn, via Qwen3's chat template.
 configs/
 ├── config.yaml               # model defaults, imports data + training
 ├── training/production.yaml  # trainer defaults
-├── data/                     # multiasr, loquacious_medium, librispeech_dummy, (your own)
+├── data/                     # multiasr, librispeech_dummy, (your own)
 └── experiments/              # recipes; use with +experiments=<name>
 ```
 
@@ -229,9 +221,8 @@ Override syntax is `key=value` (Hydra), never `--key value`. Experiment files st
 | `--max-samples` | `-n` | `eval` |
 | `--num-workers` | `-w` | `eval` with API backends |
 | `--output-dir` | `-o` | `eval` (default `outputs`) |
-| `--threshold` | `-t` | `analysis high-wer` |
-| `--experiment` | `-e` | `runpod plan`, `runpod train`, `runpod up` |
-| `--repo-id` | `-r` | `push`, `deploy`, `debug analyze-lora` |
+| `--experiment` | `-e` | `train asr`, `runpod plan`, `runpod train`, `runpod up` |
+| `--repo-id` | `-r` | `push`, `deploy` |
 
 ---
 

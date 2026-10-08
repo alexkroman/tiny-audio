@@ -187,12 +187,12 @@ Words that sound alike but are spelled differently ("to / too / two"). The decod
 knowledge is what resolves them.
 
 **Entity**
-A name, place, organization, number, or date in a transcript. `ta analysis extract-entities`
-tags them; `entity-errors` reports the ones your model got wrong.
+A name, place, organization, number, or date in a transcript. Entities are where WER hides
+the most user-visible errors: one wrong surname costs a single word but breaks the transcript.
 
 **Corpus WER vs. Per-Sample WER**
 Corpus WER pools all edits and all reference words across a dataset. Per-sample WER is
-computed per clip and is what `high-wer` sorts by.
+computed per clip and is what each `Sample N - WER:` line of `results.txt` reports.
 
 ---
 

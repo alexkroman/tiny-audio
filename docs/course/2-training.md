@@ -76,9 +76,7 @@ same shape stretched or compressed along the step axis.
 | Experiment | Encoder | Decoder | What trains | Data |
 |------------|---------|---------|-------------|------|
 | `stage_1` | GLM-ASR-Nano (frozen) | Qwen3-0.6B | Projector + decoder + embeddings | `multiasr` |
-| `encoder_train` | Whisper-medium.en (**trained**) | Qwen3-0.6B (frozen) | Projector + encoder | `multiasr` |
-| `granite_qwen` | Granite Speech 470M (frozen) | Qwen3.5-2B | Projector + decoder | `multiasr` |
-| `granite_gemma` | Granite Speech 470M (frozen) | Gemma 4 E2B (frozen) | Projector only | `loquacious_medium` |
+| `granite_qwen_frozen` | Granite Speech 470M (frozen) | Qwen3.5-4B (frozen) | Projector + decoder LoRA | `multiasr` |
 | `mps_smoke` | GLM-ASR-Nano (frozen) | Qwen3-0.6B | Projector + decoder, 10 steps | `librispeech_dummy` |
 
 Every recipe is the same code with different freeze flags and model IDs. The flags:

@@ -213,8 +213,7 @@ The `ta` command (short for `tiny-audio`) groups every tool in the repo:
 ```bash
 poetry run ta --help            # all command groups
 poetry run ta eval --help       # evaluation options
-poetry run ta analysis --help   # high-wer, compare, entity-errors
-poetry run ta debug --help      # weight and gradient inspection
+poetry run ta debug --help      # gradient-flow check
 poetry run ta runpod --help     # cloud training (Class 2)
 poetry run ta dev --help        # lint, test, format
 ```
@@ -287,13 +286,10 @@ configs/
 ├── training/production.yaml  # Trainer defaults: LRs, batch size, schedule, checkpointing
 ├── data/
 │   ├── multiasr.yaml         # Production mix: 10 corpora, ~3M clips
-│   ├── loquacious_medium.yaml
 │   └── librispeech_dummy.yaml  # 73 clips, for smoke tests
 └── experiments/
     ├── stage_1.yaml          # Production recipe (frozen encoder, joint projector + decoder)
-    ├── encoder_train.yaml    # Trains a Whisper encoder instead, decoder frozen
-    ├── granite_qwen.yaml     # Granite Speech encoder + Qwen3.5-2B
-    ├── granite_gemma.yaml    # Granite Speech encoder + Gemma 4
+    ├── granite_qwen_frozen.yaml  # Published model: Granite Speech encoder + LoRA on Qwen3.5
     └── mps_smoke.yaml        # 10 steps on a laptop
 ```
 
