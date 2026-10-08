@@ -6,7 +6,7 @@ import json
 import logging
 import shutil
 from collections.abc import Callable, Iterator
-from copy import copy
+from copy import deepcopy
 from os import PathLike
 from pathlib import Path
 from threading import Thread
@@ -1852,25 +1852,18 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         )
         self._assert_sdpa_safe_on_mps(attention_mask)
 
-        # transformers v5 deprecates passing generation flags as kwargs when a
-        # `generation_config` is also passed — the kwargs get silently dropped.
-        # Pull any score-related flags out of generate_kwargs and apply them to
-        # a derived generation_config so they actually take effect.
-        gen_cfg = self.generation_config
-        score_flags: dict[str, Any] = {}
-        for flag in ("output_scores", "output_logits", "return_dict_in_generate"):
-            if flag in generate_kwargs:
-                score_flags[flag] = generate_kwargs.pop(flag)
-        if score_flags:
-            gen_cfg = copy(self.generation_config)
-            for flag, value in score_flags.items():
-                setattr(gen_cfg, flag, value)
-            # output_scores requires return_dict_in_generate for HF generate to
-            # actually populate .scores on the output object.
-            if getattr(gen_cfg, "output_scores", None) and not getattr(
-                gen_cfg, "return_dict_in_generate", None
-            ):
-                gen_cfg.return_dict_in_generate = True
+        # Fold generation flags (max_new_tokens, num_beams, output_scores, ...)
+        # into a private copy of generation_config instead of passing them
+        # alongside it: transformers v5 still applies such kwargs but warns that
+        # combining them with `generation_config` is deprecated. update() returns
+        # the kwargs that aren't config fields (streamer, logits_processor, ...),
+        # which still go to generate() directly.
+        gen_cfg = deepcopy(self.generation_config)
+        generate_kwargs = gen_cfg.update(**generate_kwargs)
+        # output_scores requires return_dict_in_generate for HF generate to
+        # actually populate .scores on the output object.
+        if gen_cfg.output_scores:
+            gen_cfg.return_dict_in_generate = True
 
         lm_inputs = self._lm_generate_inputs(input_ids, inputs_embeds)
         output = self.language_model.generate(
@@ -1946,10 +1939,13 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # Prepare generation kwargs
         # Same prompt arguments as generate(); with input_ids present the
         # streamer's skip_prompt drops the echoed prompt tokens.
+        # Generation flags go into a copy of generation_config, as in generate().
+        gen_cfg = deepcopy(self.generation_config)
+        generate_kwargs = gen_cfg.update(**generate_kwargs)
         gen_kwargs: dict[str, Any] = {
             **self._lm_generate_inputs(input_ids, inputs_embeds),
             "attention_mask": attention_mask,
-            "generation_config": self.generation_config,
+            "generation_config": gen_cfg,
             "streamer": streamer,
             **generate_kwargs,
         }
@@ -2042,30 +2038,31 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # Don't save embedding layers - the <audio> token embedding is never used
         # (it's replaced with projected audio embeddings before the LLM sees it)
         if hasattr(self.language_model, "peft_config"):
-            self.language_model.save_pretrained(save_dir, save_embedding_layers=False)
-
-            # Clear base_model_name_or_path in adapter_config.json to prevent HF pipeline
-            # from redirecting to the base LLM repo (like Qwen) which breaks feature
-            # extractor loading for multimodal models. If a repo_id is provided, use that
-            # so the model can be loaded directly from the Hub.
-            adapter_config_path = save_dir / "adapter_config.json"
-            if adapter_config_path.exists():
-                with adapter_config_path.open() as f:
-                    adapter_config = json.load(f)
-
-                # Use repo_id if available, otherwise clear to prevent redirect.
-                # Use empty string instead of None to avoid str(None) -> "None" bug
-                # in some transformers/PEFT versions.
-                repo_id = (
-                    kwargs.get("repo_id")
-                    or kwargs.get("push_to_hub_model_id")
-                    or getattr(self.config, "pretrained_model_path", None)
-                    or ""  # Use empty string instead of None
-                )
-                adapter_config["base_model_name_or_path"] = repo_id
-
-                with adapter_config_path.open("w") as f:
-                    json.dump(adapter_config, f, indent=2)
+            # Override base_model_name_or_path in the saved adapter_config.json to
+            # prevent HF pipeline from redirecting to the base LLM repo (like Qwen),
+            # which breaks feature extractor loading for multimodal models. If a
+            # repo_id is provided, use that so the model can be loaded directly
+            # from the Hub. Use empty string instead of None: PeftModel.save_pretrained
+            # fills the field with the base LLM's name only when it is None, and an
+            # empty string also avoids the str(None) -> "None" bug in some
+            # transformers/PEFT versions.
+            repo_id = (
+                kwargs.get("repo_id")
+                or kwargs.get("push_to_hub_model_id")
+                or getattr(self.config, "pretrained_model_path", None)
+                or ""
+            )
+            peft_configs = list(self.language_model.peft_config.values())
+            # Set on the live configs only for the save, then restore, so the
+            # in-memory model keeps its real base model name.
+            original_names = [cfg.base_model_name_or_path for cfg in peft_configs]
+            try:
+                for cfg in peft_configs:
+                    cfg.base_model_name_or_path = repo_id
+                self.language_model.save_pretrained(save_dir, save_embedding_layers=False)
+            finally:
+                for cfg, name in zip(peft_configs, original_names, strict=True):
+                    cfg.base_model_name_or_path = name
 
         # Add processor auto_map to preprocessor_config.json
         config_path = save_dir / "preprocessor_config.json"

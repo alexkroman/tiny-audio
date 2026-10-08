@@ -326,6 +326,45 @@ class TestGenerate:
         assert out.shape[0] == 1
         assert out.shape[1] <= 4
 
+    def test_generate_folds_flags_into_config_copy(
+        self, base_asr_model: ASRModel, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Generation flags land on a copied generation_config, not as kwargs.
+
+        output_scores implies return_dict_in_generate, non-config kwargs still
+        pass through, and the model's own generation_config is left untouched.
+        """
+        captured: dict[str, Any] = {}
+        real_generate = base_asr_model.language_model.generate
+
+        def spy(**kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return real_generate(**kwargs)
+
+        monkeypatch.setattr(base_asr_model.language_model, "generate", spy)
+        processor_list: list[Any] = []
+        out = base_asr_model.generate(
+            input_features=torch.zeros(1, 80, 3000),
+            audio_attention_mask=torch.ones(1, 3000, dtype=torch.long),
+            max_new_tokens=2,
+            output_scores=True,
+            logits_processor=processor_list,
+        )
+
+        gen_cfg = captured["generation_config"]
+        assert gen_cfg is not base_asr_model.generation_config
+        assert gen_cfg.max_new_tokens == 2
+        assert gen_cfg.output_scores is True
+        assert gen_cfg.return_dict_in_generate is True
+        for flag in ("max_new_tokens", "output_scores", "return_dict_in_generate"):
+            assert flag not in captured
+        assert captured["logits_processor"] is processor_list
+        assert not base_asr_model.generation_config.output_scores
+        assert not base_asr_model.generation_config.return_dict_in_generate
+        assert not isinstance(out, torch.Tensor)
+        assert out.scores is not None
+        assert out.sequences.shape[1] == len(out.scores)
+
 
 class TestSavePretrained:
     """save_pretrained writes config, weights, tokenizer, and source files."""
@@ -391,6 +430,16 @@ class TestSavePretrained:
             adapter_cfg = json.load(f)
 
         assert adapter_cfg["base_model_name_or_path"] == "alex/test-model"
+
+    def test_save_lora_keeps_in_memory_base_model_path(
+        self, lora_asr_model: ASRModel, tmp_path: Path
+    ) -> None:
+        """The adapter_config.json override is restored on the live peft_config."""
+        peft_configs = lora_asr_model.language_model.peft_config.values()
+        before = [cfg.base_model_name_or_path for cfg in peft_configs]
+        lora_asr_model.save_pretrained(tmp_path / "lora_model", repo_id="alex/test-model")
+
+        assert [cfg.base_model_name_or_path for cfg in peft_configs] == before
 
 
 class TestProcessor:

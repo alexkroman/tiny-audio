@@ -115,11 +115,10 @@ def find_encoder_layer_stack(encoder: nn.Module) -> tuple[str, nn.ModuleList] | 
     """
     candidates = ("layers", "blocks", "encoder_layers", "encoder.layers", "encoder.blocks")
     for path in candidates:
-        obj: nn.Module | None = encoder
-        for part in path.split("."):
-            obj = getattr(obj, part, None)
-            if obj is None:
-                break
+        try:
+            obj = encoder.get_submodule(path)
+        except AttributeError:
+            continue
         if isinstance(obj, nn.ModuleList) and len(obj) > 0:
             return path, obj
     return None
