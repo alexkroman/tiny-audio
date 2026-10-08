@@ -170,11 +170,22 @@ class TestPipelineCall:
 
     @pytest.fixture
     def pipeline(self, base_asr_model: ASRModel) -> ASRPipeline:
+        # device="cpu": with no device, transformers' Pipeline moves the model to
+        # the default accelerator IN PLACE. base_asr_model is session-scoped, so
+        # on a Mac every later test got an MPS model fed CPU tensors.
         return ASRPipeline(
             model=base_asr_model,
             feature_extractor=base_asr_model.feature_extractor,
             tokenizer=base_asr_model.tokenizer,
+            device="cpu",
         )
+
+    def test_shared_model_stays_on_cpu(
+        self, pipeline: ASRPipeline, base_asr_model: ASRModel
+    ) -> None:
+        """Wrapping the session model must not move it for the tests that follow."""
+        assert pipeline.device == torch.device("cpu")
+        assert {p.device.type for p in base_asr_model.parameters()} == {"cpu"}
 
     def test_call_basic_transcription(self, pipeline: ASRPipeline) -> None:
         """Plain call returns dict with 'text' key."""
