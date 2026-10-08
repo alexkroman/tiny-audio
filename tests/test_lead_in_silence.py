@@ -63,10 +63,7 @@ class TestConfigField:
 
     def test_survives_json_round_trip(self) -> None:
         cfg = ASRConfig(inference_lead_in_seconds=0.4)
-        # transformers' PretrainedConfig.from_dict leaves **kwargs untyped
-        restored = ASRConfig.from_dict(  # pyright: ignore[reportUnknownMemberType]
-            json.loads(cfg.to_json_string())
-        )
+        restored = ASRConfig.from_dict(json.loads(cfg.to_json_string()))
         assert restored.inference_lead_in_seconds == 0.4
 
 

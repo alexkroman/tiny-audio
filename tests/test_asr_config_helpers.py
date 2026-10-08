@@ -103,8 +103,7 @@ class TestComputeEncoderOutputLength:
     def test_granite_layers_accept_tensor_batches(self) -> None:
         lengths = torch.tensor([50, 100, 250, 500, 1000])
         out = compute_encoder_output_length(lengths, GRANITE_ENCODER_CONV_LAYERS)
-        # torch types Tensor.tolist() as list[Unknown]
-        assert out.tolist() == [12, 25, 62, 125, 250]  # pyright: ignore[reportUnknownMemberType]
+        assert out.tolist() == [12, 25, 62, 125, 250]
 
 
 class TestASRConfigAutoDetection:

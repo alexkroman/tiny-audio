@@ -69,9 +69,7 @@ def _has_sliding_window_attention(model_id: str) -> bool:
     try:
         probe = cast(
             PretrainedConfig,
-            AutoConfig.from_pretrained(  # pyright: ignore[reportUnknownMemberType]
-                model_id, trust_remote_code=True
-            ),
+            AutoConfig.from_pretrained(model_id, trust_remote_code=True),
         )
         text_config = text_config_of(probe) if hasattr(probe, "get_text_config") else probe
     except Exception:
@@ -172,9 +170,7 @@ def resolve_decoder_attn_implementation(requested: str | None, model_id: str) ->
     if attn_implementation == "flash_attention_2":
         probe = cast(
             PretrainedConfig,
-            AutoConfig.from_pretrained(  # pyright: ignore[reportUnknownMemberType]
-                model_id, trust_remote_code=True
-            ),
+            AutoConfig.from_pretrained(model_id, trust_remote_code=True),
         )
         text_probe = text_config_of(probe) if hasattr(probe, "get_text_config") else probe
         head_dim = _max_attention_head_dim(text_probe)

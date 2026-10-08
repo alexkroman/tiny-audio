@@ -283,7 +283,7 @@ class SwiftSDKEvaluator(Evaluator):
             samples = audio.get_all_samples()
             data = cast(
                 "np.ndarray[Any, np.dtype[np.floating[Any]]]",
-                samples.data.detach().cpu().numpy(),  # pyright: ignore[reportUnknownMemberType]
+                samples.data.detach().cpu().numpy(),
             )
             sr = int(samples.sample_rate)
             if data.ndim > 1:

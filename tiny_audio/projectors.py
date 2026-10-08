@@ -98,7 +98,7 @@ class MLPAudioProjector(nn.Module):
         Args:
             config: ASRConfig with encoder_dim, llm_dim, projector_pool_stride
         """
-        super().__init__()  # pyright: ignore[reportUnknownMemberType]  # untyped *args
+        super().__init__()
 
         encoder_dim: int = getattr(config, "encoder_dim", 768)
         llm_dim: int = getattr(config, "llm_dim", 2048)

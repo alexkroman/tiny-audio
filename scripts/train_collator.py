@@ -235,7 +235,7 @@ class DataCollator:
         # torch annotates `Tensor.tolist` with a bare `list`.
         audio_token_counts = cast(
             list[int],
-            token_counts_tensor.tolist(),  # pyright: ignore[reportUnknownMemberType]
+            token_counts_tensor.tolist(),
         )
 
         text_features = [

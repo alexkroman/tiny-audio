@@ -58,13 +58,11 @@ class _StreamClosedError(RuntimeError):
 
 
 def _save_config(config: ASRConfig, path: Path) -> None:
-    config.save_pretrained(path)  # pyright: ignore[reportUnknownMemberType]  # untyped kwargs
+    config.save_pretrained(path)
 
 
 def _load_config(path: Path, **kwargs: Unpack[_ConfigOverrides]) -> ASRConfig:
-    return ASRConfig.from_pretrained(  # pyright: ignore[reportUnknownMemberType]  # untyped kwargs
-        path, **kwargs
-    )
+    return ASRConfig.from_pretrained(path, **kwargs)
 
 
 class TestDatasetConfig:
@@ -272,9 +270,7 @@ class TestMergeLoraAdapters:
             config_class = PretrainedConfig
 
             def __init__(self) -> None:
-                super().__init__(  # pyright: ignore[reportUnknownMemberType]  # untyped *inputs
-                    PretrainedConfig()
-                )
+                super().__init__(PretrainedConfig())
                 self.lin = nn.Linear(4, 4)
 
         peft_model = get_peft_model(Tiny(), LoraConfig(target_modules=["lin"], r=2))

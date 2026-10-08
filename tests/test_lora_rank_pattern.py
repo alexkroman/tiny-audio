@@ -32,7 +32,7 @@ class GateBlock(nn.Module):
     """Mirrors Qwen3.5's linear_attn geometry: two (16, 2048) gates, two wide ones."""
 
     def __init__(self, dim: int = 2048, heads: int = 16) -> None:
-        super().__init__()  # pyright: ignore[reportUnknownMemberType]  # untyped *args
+        super().__init__()
         self.in_proj_a = nn.Linear(dim, heads, bias=False)
         self.in_proj_b = nn.Linear(dim, heads, bias=False)
         self.in_proj_qkv = nn.Linear(dim, 3 * dim, bias=False)
@@ -47,7 +47,7 @@ class FakeDecoder(PreTrainedModel):  # type: ignore[no-untyped-call]  # untyped 
     config_class = FakeDecoderConfig
 
     def __init__(self, depth: int = 2) -> None:
-        super().__init__(FakeDecoderConfig())  # pyright: ignore[reportUnknownMemberType]
+        super().__init__(FakeDecoderConfig())
         self.layers = nn.ModuleList(GateBlock() for _ in range(depth))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -93,8 +93,7 @@ class TestASRConfigFields:
         config = ASRConfig(
             lora_rank_pattern={"in_proj_a": 16}, lora_alpha_pattern={"in_proj_a": 32}
         )
-        # transformers' PretrainedConfig.from_dict leaves **kwargs untyped
-        revived = ASRConfig.from_dict(config.to_dict())  # pyright: ignore[reportUnknownMemberType]
+        revived = ASRConfig.from_dict(config.to_dict())
         assert revived.lora_rank_pattern == {"in_proj_a": 16}
         assert revived.lora_alpha_pattern == {"in_proj_a": 32}
 

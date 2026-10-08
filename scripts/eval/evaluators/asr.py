@@ -176,8 +176,7 @@ def _build_working_tree_pipeline(
     dtype goes through the config, not a `dtype=` kwarg -- see
     `_resolve_local_runtime` for why that distinction is load-bearing.
     """
-    # PretrainedConfig.from_pretrained leaves PathLike unparameterized.
-    config = ASRConfig.from_pretrained(model_path)  # pyright: ignore[reportUnknownMemberType]
+    config = ASRConfig.from_pretrained(model_path)
     for field in DTYPE_CONFIG_FIELDS:
         setattr(config, field, model_dtype)
     model = ASRModel.from_pretrained(model_path, config=config)
@@ -273,10 +272,7 @@ def _use_sdpa_where_safe(model: ASRModel) -> None:
     current = lm_config._attn_implementation  # pyright: ignore[reportPrivateUsage]
     if resolved is None or resolved == current:
         return
-    # transformers leaves the per-submodule dict form unparameterized.
-    model.language_model.set_attn_implementation(  # pyright: ignore[reportUnknownMemberType]
-        resolved
-    )
+    model.language_model.set_attn_implementation(resolved)
 
 
 def _build_local_pipeline(model_path: str, *, local_code: bool = False) -> ASRPipeline:
@@ -682,8 +678,7 @@ class AssemblyAIStreamingEvaluator(Evaluator):
             (StreamingEvents.Termination, on_terminated),
         ]
         for event, handler in handlers:
-            # `handler` is annotated as a bare Callable.
-            client.on(event, handler)  # pyright: ignore[reportUnknownMemberType]
+            client.on(event, handler)
         client.connect(
             StreamingParameters(
                 sample_rate=16000,

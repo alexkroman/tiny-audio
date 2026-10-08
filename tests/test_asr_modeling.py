@@ -458,14 +458,14 @@ class TestGradientCheckpointing:
     override directly, so a future kwarg fails here instead of on a GPU."""
 
     def test_enable_via_upstream_entry_point(self, base_asr_model: ASRModel) -> None:
-        base_asr_model.gradient_checkpointing_enable()  # pyright: ignore[reportUnknownMemberType]  # untyped kwargs dict upstream
+        base_asr_model.gradient_checkpointing_enable()
         assert base_asr_model.language_model.is_gradient_checkpointing
         base_asr_model.gradient_checkpointing_disable()  # type: ignore[no-untyped-call]  # untyped upstream
         assert not base_asr_model.language_model.is_gradient_checkpointing
 
     def test_enable_accepts_upstream_kwargs(self, base_asr_model: ASRModel) -> None:
         # Mirrors the exact call transformers.Trainer makes.
-        base_asr_model.gradient_checkpointing_enable(  # pyright: ignore[reportUnknownMemberType]  # untyped kwargs dict upstream
+        base_asr_model.gradient_checkpointing_enable(
             gradient_checkpointing_kwargs={"use_reentrant": False},
             every_n_layers=1,
         )
@@ -473,9 +473,7 @@ class TestGradientCheckpointing:
         base_asr_model.gradient_checkpointing_disable()  # type: ignore[no-untyped-call]  # untyped upstream
 
     def test_signature_matches_upstream(self, base_asr_model: ASRModel) -> None:
-        upstream = inspect.signature(
-            PreTrainedModel._set_gradient_checkpointing  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]  # untyped callable param upstream
-        ).parameters
+        upstream = inspect.signature(PreTrainedModel._set_gradient_checkpointing).parameters
         ours = inspect.signature(base_asr_model._set_gradient_checkpointing).parameters
         accepts_var_kwargs = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in ours.values())
         missing = [n for n in upstream if n != "self" and n not in ours]
@@ -785,7 +783,7 @@ class TestChunkedEmbedding:
 
     def test_matches_the_unchunked_lookup(self, monkeypatch: pytest.MonkeyPatch) -> None:
         mod = self._forced(monkeypatch, 64)
-        torch.manual_seed(0)  # pyright: ignore[reportUnknownMemberType]  # untyped seed arg
+        torch.manual_seed(0)
         emb = torch.nn.Embedding(50, 8)
         ids = torch.tensor([[0, 7, 49, 23]])
         expected = emb(ids)
@@ -796,7 +794,7 @@ class TestChunkedEmbedding:
 
     def test_preserves_the_gemma_embed_scale(self, monkeypatch: pytest.MonkeyPatch) -> None:
         mod = self._forced(monkeypatch, 64)
-        torch.manual_seed(0)  # pyright: ignore[reportUnknownMemberType]  # untyped seed arg
+        torch.manual_seed(0)
         emb = torch.nn.Embedding(50, 8)
         # Gemma4TextScaledWordEmbedding multiplies the lookup by embed_scale;
         # dropping it would shrink every per-layer embedding by sqrt(dim).

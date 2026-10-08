@@ -364,8 +364,7 @@ def create_demo(model_path: str = "mazesmazes/tiny-audio") -> gr.Blocks:
         process_btn.click(fn=process_audio, inputs=inputs, outputs=outputs, api_name="transcribe")
 
         if EXAMPLE.exists():
-            # gradio annotates `fn` as a bare Callable.
-            gr.Examples(  # pyright: ignore[reportUnknownMemberType]
+            gr.Examples(
                 examples=[[str(EXAMPLE), True, True, 0, 0]],
                 inputs=inputs,
                 label="Try a two-person meeting (AMI Meeting Corpus, CC BY 4.0)",

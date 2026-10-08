@@ -229,9 +229,7 @@ def synthetic_batch(
     sr = model.feature_extractor.sampling_rate
     n_samples = int(audio_seconds * sr)
     audio_arrays: list[npt.NDArray[np.float32]] = [
-        # torch annotates Tensor.numpy's result as a bare ndarray.
-        torch.randn(n_samples).numpy()  # pyright: ignore[reportUnknownMemberType]
-        for _ in range(batch_size)
+        torch.randn(n_samples).numpy() for _ in range(batch_size)
     ]
     feature_extractor = cast(AudioFeatureExtractor, model.feature_extractor)
     audio_out = feature_extractor(
@@ -259,11 +257,10 @@ def synthetic_batch(
             {"role": "user", "content": user},
             {"role": "assistant", "content": response},
         ]
-        # apply_chat_template's `tools`/`documents` parameters are unannotated.
-        full_text = tok.apply_chat_template(  # pyright: ignore[reportUnknownMemberType]
+        full_text = tok.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=False, enable_thinking=False
         )
-        prompt_text = tok.apply_chat_template(  # pyright: ignore[reportUnknownMemberType]
+        prompt_text = tok.apply_chat_template(
             messages[:1],
             tokenize=False,
             add_generation_prompt=True,
@@ -426,10 +423,7 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
     assert isinstance(embed_weight, torch.Tensor)
     if embed_weight.grad is not None:
         row_grad = embed_weight.grad[audio_id].detach().float()
-        # torch leaves Tensor.norm's `dim` / `dtype` parameters unannotated.
-        print(
-            f"    embed_tokens[<audio>] ||grad|| = {row_grad.norm().item():.6e}"  # pyright: ignore[reportUnknownMemberType]
-        )
+        print(f"    embed_tokens[<audio>] ||grad|| = {row_grad.norm().item():.6e}")
         print("    (should be zero if labels mask user prompt and no assistant token is <audio>)")
     out_emb = model.get_output_embeddings()
     out_weight = out_emb.weight if out_emb is not None else None
@@ -438,9 +432,7 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
     if out_weight is not None and out_weight.grad is not None and not tied:
         # Untied head — separate gradient meaningful.
         row_grad = out_weight.grad[audio_id].detach().float()
-        print(
-            f"    lm_head[<audio>]      ||grad|| = {row_grad.norm().item():.6e}"  # pyright: ignore[reportUnknownMemberType]
-        )
+        print(f"    lm_head[<audio>]      ||grad|| = {row_grad.norm().item():.6e}")
     else:
         print(f"    lm_head tied to embed_tokens: {tied}")
     print()
@@ -587,7 +579,7 @@ def main(
         Dtype.bfloat16: torch.bfloat16,
         Dtype.float16: torch.float16,
     }[Dtype(dtype)]
-    torch.manual_seed(0)  # pyright: ignore[reportUnknownMemberType]
+    torch.manual_seed(0)
     built = build_model(torch_dtype, device, model_id=model)
     report(built, torch_dtype, device)
 

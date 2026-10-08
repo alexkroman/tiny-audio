@@ -13,7 +13,7 @@ import numpy.typing as npt
 import torch
 from datasets import (
     Dataset,
-    load_dataset,  # pyright: ignore[reportUnknownVariableType]  # untyped **config_kwargs
+    load_dataset,
 )
 from matplotlib.colorbar import Colorbar
 from matplotlib.figure import Figure
@@ -127,13 +127,13 @@ class TracePayload(TypedDict):
 
 def _subplots(width: float, height: float) -> tuple[_Figure, _Axes]:
     """`plt.subplots(figsize=(width, height))` for a single Axes."""
-    fig, ax = plt.subplots(figsize=(width, height))  # pyright: ignore[reportUnknownMemberType]
+    fig, ax = plt.subplots(figsize=(width, height))
     return cast(_Figure, fig), cast(_Axes, ax)
 
 
 def _to_numpy(tensor: torch.Tensor) -> FloatArray:
     # torch annotates numpy() as a bare ndarray.
-    return cast(FloatArray, tensor.numpy())  # pyright: ignore[reportUnknownMemberType]
+    return cast(FloatArray, tensor.numpy())
 
 
 def main() -> None:
@@ -213,7 +213,7 @@ def main() -> None:
         # torch leaves Tensor.norm's `dim` / `dtype` unannotated.
         text_norms = cast(
             torch.Tensor,
-            text_embeddings.norm(dim=-1, keepdim=True),  # pyright: ignore[reportUnknownMemberType]
+            text_embeddings.norm(dim=-1, keepdim=True),
         )
         text_norm = text_embeddings / text_norms
 
@@ -222,7 +222,7 @@ def main() -> None:
         top_tokens = similarities.argmax(dim=-1)  # [seq_len]
 
         # Decode to text
-        nearest_tokens = model.tokenizer.batch_decode(  # pyright: ignore[reportUnknownMemberType]
+        nearest_tokens = model.tokenizer.batch_decode(
             top_tokens.cpu().unsqueeze(1), skip_special_tokens=False
         )
         nearest_tokens_text = " ".join([t.strip() for t in nearest_tokens])  # All tokens

@@ -124,16 +124,14 @@ class LoadStateDictResult(Protocol):
 
 def int_list(values: torch.Tensor) -> list[int]:
     """`values.tolist()` for an integer tensor, typed as the ints it holds."""
-    return cast(list[int], values.tolist())  # pyright: ignore[reportUnknownMemberType]
+    return cast(list[int], values.tolist())
 
 
 def apply_chat_template(
     tokenizer: PreTrainedTokenizerBase, conversation: list[dict[str, str]], **kwargs: Any
 ) -> object:
     """`tokenizer.apply_chat_template`; callers narrow the result to what they asked for."""
-    return tokenizer.apply_chat_template(  # pyright: ignore[reportUnknownMemberType]
-        conversation, **kwargs
-    )
+    return tokenizer.apply_chat_template(conversation, **kwargs)
 
 
 def module_to_dtype(module: nn.Module, dtype: torch.dtype) -> nn.Module:

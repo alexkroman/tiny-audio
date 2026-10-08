@@ -37,7 +37,7 @@ def _ops(ds: Dataset) -> _DatasetOps:
 
 def _label_id(feature: ClassLabel, name: str) -> int:
     # `str2int` returns `int | Iterable` with the iterable's element type unannotated.
-    return cast(int, feature.str2int(name))  # pyright: ignore[reportUnknownMemberType]
+    return cast(int, feature.str2int(name))
 
 
 def _make_cfg(

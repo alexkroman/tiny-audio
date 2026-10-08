@@ -60,7 +60,7 @@ class ChunkedEmbedding(nn.Module):
 
     def __init__(self, embedding: nn.Embedding) -> None:
         """Split `embedding`'s table into MPS-safe column chunks, keeping its metadata."""
-        super().__init__()  # pyright: ignore[reportUnknownMemberType]  # untyped *args
+        super().__init__()
         self.num_embeddings = embedding.num_embeddings
         self.embedding_dim = embedding.embedding_dim
         self.padding_idx = embedding.padding_idx

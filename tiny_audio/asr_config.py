@@ -78,21 +78,19 @@ def _load_auto_config(model_id: str, **kwargs: Any) -> transformers.PretrainedCo
     """`AutoConfig.from_pretrained`, whose signature transformers leaves partly untyped."""
     return cast(
         transformers.PretrainedConfig,
-        transformers.AutoConfig.from_pretrained(  # pyright: ignore[reportUnknownMemberType]
-            model_id, **kwargs
-        ),
+        transformers.AutoConfig.from_pretrained(model_id, **kwargs),
     )
 
 
 def text_config_of(config: transformers.PretrainedConfig) -> transformers.PretrainedConfig:
     """`config.get_text_config()`: the decoder sub-config, or `config` itself."""
-    return config.get_text_config()  # pyright: ignore[reportUnknownMemberType]
+    return config.get_text_config()
 
 
 def _config_from_dict(model_type: str, values: dict[str, Any]) -> transformers.PretrainedConfig:
     """Rebuild a serialized sub-config as the config class registered for `model_type`."""
     auto_config = transformers.AutoConfig
-    default = auto_config.for_model(model_type)  # pyright: ignore[reportUnknownMemberType]
+    default = auto_config.for_model(model_type)
     return default.__class__(**values)
 
 
@@ -427,4 +425,4 @@ class ASRConfig(transformers.PretrainedConfig):  # type: ignore[no-untyped-call]
         self.pipeline_tag = "automatic-speech-recognition"
 
 
-transformers.AutoConfig.register("asr_model", ASRConfig)  # pyright: ignore[reportUnknownMemberType]
+transformers.AutoConfig.register("asr_model", ASRConfig)

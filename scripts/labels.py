@@ -219,7 +219,7 @@ def _post_truecase_cleanup(text: str) -> str:
 # package ships without annotations; `get_true_case` maps a str to a str.
 _get_true_case = cast(
     Callable[[str], str],
-    truecase.get_true_case,  # pyright: ignore[reportUnknownMemberType]
+    truecase.get_true_case,
 )
 # LOCAL_RANK=0 guard mirrors Ultravox — avoids multiple workers racing on the
 # punkt download.
@@ -236,7 +236,7 @@ if int(os.environ.get("LOCAL_RANK", "0")) == 0:
         # nltk leaves `download`'s parameters unannotated.
         download = cast(
             Callable[..., bool],
-            nltk.download,  # pyright: ignore[reportUnknownMemberType]
+            nltk.download,
         )
         download("punkt_tab", quiet=True)
         download("punkt", quiet=True)

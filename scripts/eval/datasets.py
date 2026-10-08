@@ -6,7 +6,7 @@ from typing import cast
 from datasets import (
     Audio,
     IterableDataset,
-    load_dataset,  # pyright: ignore[reportUnknownVariableType]  # untyped **config_kwargs
+    load_dataset,
 )
 
 
@@ -179,12 +179,7 @@ def load_eval_dataset(
             else load_dataset(cfg.path, split=split, streaming=True)
         ),
     )
-    # datasets leaves the feature dict/list/seed parameters unparameterized.
-    ds = ds.cast_column(  # pyright: ignore[reportUnknownMemberType]
-        cfg.audio_field, Audio(sampling_rate=16000)
-    )
+    ds = ds.cast_column(cfg.audio_field, Audio(sampling_rate=16000))
     if shuffle:
-        ds = ds.shuffle(  # pyright: ignore[reportUnknownMemberType]
-            seed=SHUFFLE_SEED, buffer_size=SHUFFLE_BUFFER_SIZE
-        )
+        ds = ds.shuffle(seed=SHUFFLE_SEED, buffer_size=SHUFFLE_BUFFER_SIZE)
     return ds

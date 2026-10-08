@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Self, cast, overload
 import torch
 import torch.nn as nn
 from peft import LoraConfig, PeftModel, get_peft_model
-from safetensors.torch import load_file  # pyright: ignore[reportUnknownVariableType]
+from safetensors.torch import load_file
 from torch.nn import functional
 from transformers import (
     AutoFeatureExtractor,
@@ -33,7 +33,7 @@ from transformers import __version__ as transformers_version
 from transformers.generation.utils import GenerateOutput, GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.utils.hub import (
-    cached_file,  # pyright: ignore[reportUnknownVariableType]
+    cached_file,
 )
 
 if TYPE_CHECKING:
@@ -365,9 +365,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
 
         config = kwargs.pop("config", None)
         if config is None:
-            config = ASRConfig.from_pretrained(  # pyright: ignore[reportUnknownMemberType]
-                pretrained_model_name_or_path, **kwargs
-            )
+            config = ASRConfig.from_pretrained(pretrained_model_name_or_path, **kwargs)
 
         # Set flag to avoid device_map="auto" in sub-model loaders
         cls._is_loading_from_pretrained = True
@@ -414,7 +412,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
                     # available, which ZeroGPU Spaces do at startup without a
                     # GPU attached ("No CUDA GPUs are available").
                     base_device = next(model.language_model.parameters()).device
-                    peft = PeftModel.from_pretrained(  # pyright: ignore[reportUnknownMemberType]
+                    peft = PeftModel.from_pretrained(
                         model.language_model,
                         pretrained_model_name_or_path,
                         is_trainable=True,
@@ -439,7 +437,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
         `**kwargs` are the loader arguments `from_pretrained` forwards (e.g.
         `device_map`); they are intentionally ignored, see `from_pretrained`.
         """
-        super().__init__(config)  # pyright: ignore[reportUnknownMemberType]
+        super().__init__(config)
 
         # Shadows the class attribute when the config names one, so a run that
         # trained under a specific instruction decodes under the same one.
@@ -616,9 +614,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
 
         encoder: nn.Module
         if "whisper" in config.audio_model_id.lower():
-            full_model = WhisperModel.from_pretrained(  # pyright: ignore[reportUnknownMemberType]
-                config.audio_model_id, **encoder_kwargs
-            )
+            full_model = WhisperModel.from_pretrained(config.audio_model_id, **encoder_kwargs)
             encoder = cast(nn.Module, full_model.encoder)
             del full_model
         elif "granite-speech" in config.audio_model_id.lower():
@@ -646,9 +642,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
             # at load. Pin sdpa regardless of what the config asks for.
             granite_kwargs: LoadKwargs = {**encoder_kwargs, "attn_implementation": "sdpa"}
             granite = GraniteSpeech5Encoder
-            encoder = granite.from_pretrained(  # pyright: ignore[reportUnknownMemberType]
-                config.audio_model_id, **granite_kwargs
-            )
+            encoder = granite.from_pretrained(config.audio_model_id, **granite_kwargs)
         elif "glm" in config.audio_model_id.lower():
             # GLM-ASR stores its encoder at audio_tower (GlmAsrEncoder), but
             # which object owns that attribute depends on the transformers
@@ -661,7 +655,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
             # at load.
             glm_model = cast(
                 nn.Module,
-                AutoModelForSeq2SeqLM.from_pretrained(  # pyright: ignore[reportUnknownMemberType]
+                AutoModelForSeq2SeqLM.from_pretrained(
                     config.audio_model_id, trust_remote_code=True, **encoder_kwargs
                 ),
             )
@@ -688,9 +682,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
         else:
             encoder = cast(
                 nn.Module,
-                AutoModel.from_pretrained(  # pyright: ignore[reportUnknownMemberType]
-                    config.audio_model_id, **encoder_kwargs
-                ),
+                AutoModel.from_pretrained(config.audio_model_id, **encoder_kwargs),
             )
 
         # Explicit cast: from_pretrained's `dtype=` kwarg is honored
@@ -781,9 +773,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
 
         decoder = cast(
             "GenerativeDecoder",
-            AutoModelForCausalLM.from_pretrained(  # pyright: ignore[reportUnknownMemberType]
-                config.text_model_id, **decoder_kwargs
-            ),
+            AutoModelForCausalLM.from_pretrained(config.text_model_id, **decoder_kwargs),
         )
 
         # Gemma 4 checkpoints are natively multimodal: AutoModelForCausalLM maps
@@ -956,9 +946,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
         """Initialize tokenizer with audio token."""
         self.tokenizer = cast(
             PreTrainedTokenizerBase,
-            AutoTokenizer.from_pretrained(  # pyright: ignore[reportUnknownMemberType]
-                config.text_model_id, trust_remote_code=True
-            ),
+            AutoTokenizer.from_pretrained(config.text_model_id, trust_remote_code=True),
         )
 
         # Set pad token. Prefer a dedicated pad token if the tokenizer has one
@@ -2098,7 +2086,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
         del self.tokenizer
 
         try:
-            super().save_pretrained(  # pyright: ignore[reportUnknownMemberType]
+            super().save_pretrained(
                 save_dir,
                 *args,
                 **kwargs,
@@ -2107,16 +2095,14 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
             self.tokenizer = tokenizer
 
         # Save tokenizer and feature extractor
-        self.tokenizer.save_pretrained(save_dir)  # pyright: ignore[reportUnknownMemberType]
-        self.feature_extractor.save_pretrained(save_dir)  # pyright: ignore[reportUnknownMemberType]
+        self.tokenizer.save_pretrained(save_dir)
+        self.feature_extractor.save_pretrained(save_dir)
 
         # Save LoRA adapters if present (creates adapter_model.safetensors and adapter_config.json)
         # Don't save embedding layers - the <audio> token embedding is never used
         # (it's replaced with projected audio embeddings before the LLM sees it)
         if hasattr(self.language_model, "peft_config"):
-            self.language_model.save_pretrained(  # pyright: ignore[reportUnknownMemberType]
-                save_dir, save_embedding_layers=False
-            )
+            self.language_model.save_pretrained(save_dir, save_embedding_layers=False)
 
             # Clear base_model_name_or_path in adapter_config.json to prevent HF pipeline
             # from redirecting to the base LLM repo (like Qwen) which breaks feature
@@ -2217,8 +2203,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
         """
         # Store repo_id in config so save_pretrained can access it
         self.config.pretrained_model_path = repo_id
-        # Call parent's push_to_hub. Its wrapper is an untyped (*args, **kwargs).
-        url: str = PreTrainedModel.push_to_hub(  # pyright: ignore[reportUnknownMemberType]
+        # Call parent's push_to_hub
+        url: str = PreTrainedModel.push_to_hub(
             self,
             repo_id,
             commit_message=commit_message,
@@ -2235,4 +2221,4 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
 
 # Register with transformers Auto classes
 # (AutoConfig.register is handled in asr_config.py at module load.)
-AutoModel.register(ASRConfig, ASRModel)  # pyright: ignore[reportUnknownMemberType]
+AutoModel.register(ASRConfig, ASRModel)

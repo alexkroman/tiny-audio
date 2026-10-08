@@ -27,7 +27,7 @@ from tiny_audio.asr_modeling import ASRModel
 
 class FakeBlock(nn.Module):
     def __init__(self, dim: int = 8) -> None:
-        super().__init__()  # pyright: ignore[reportUnknownMemberType]  # untyped *args
+        super().__init__()
         self.lin = nn.Linear(dim, dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -38,7 +38,7 @@ class FakeGraniteEncoder(nn.Module):
     """Mirrors GraniteSpeech5Encoder's children: input_linear, layers, out, out_mid."""
 
     def __init__(self, depth: int = 16, dim: int = 8) -> None:
-        super().__init__()  # pyright: ignore[reportUnknownMemberType]  # untyped *args
+        super().__init__()
         self.input_linear = nn.Linear(dim, dim)
         self.layers = cast(Sequence[FakeBlock], nn.ModuleList(FakeBlock(dim) for _ in range(depth)))
         self.out = nn.Linear(dim, dim)
@@ -70,7 +70,7 @@ class TestFindLayerStack:
     def test_finds_nested_whisper_style(self) -> None:
         class Nested(nn.Module):
             def __init__(self) -> None:
-                super().__init__()  # pyright: ignore[reportUnknownMemberType]  # untyped *args
+                super().__init__()
                 self.encoder = nn.Module()
                 self.encoder.layers = nn.ModuleList(FakeBlock() for _ in range(4))
 
@@ -169,7 +169,7 @@ class TestGradientsActuallyFlowWhereIntended:
 
         opt = torch.optim.SGD([p for p in frozen_encoder.parameters() if p.requires_grad], lr=0.1)
         frozen_encoder(torch.randn(4, 8)).sum().backward()
-        opt.step()  # pyright: ignore[reportUnknownMemberType]  # untyped closure param
+        opt.step()
 
         assert torch.equal(frozen_encoder.layers[0].lin.weight, before_frozen)
         assert not torch.equal(frozen_encoder.layers[15].lin.weight, before_live)

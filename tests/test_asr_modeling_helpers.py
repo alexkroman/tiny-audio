@@ -284,9 +284,8 @@ class TestLeftPadPromptRows:
         ids, mask = ASRModel._left_pad_prompt_rows(
             fake, [torch.tensor([1, 2]), torch.tensor([3])], torch.device("cpu")
         )
-        # torch types Tensor.tolist() as list[Unknown]
-        assert ids.tolist() == [[1, 2], [9, 3]]  # pyright: ignore[reportUnknownMemberType]
-        assert mask.tolist() == [[1, 1], [0, 1]]  # pyright: ignore[reportUnknownMemberType]
+        assert ids.tolist() == [[1, 2], [9, 3]]
+        assert mask.tolist() == [[1, 1], [0, 1]]
 
     def test_falls_back_to_eos_then_zero(self) -> None:
         fake = stub(tokenizer=SimpleNamespace(pad_token_id=None, eos_token_id=2))
@@ -316,8 +315,7 @@ class TestRenderAudioPrompt:
         assert call.args[0] == [{"role": "user", "content": "<audio><audio><audio> Transcribe"}]
         assert call.kwargs["add_generation_prompt"] is True
         assert call.kwargs["enable_thinking"] is False
-        # torch types Tensor.tolist() as list[Unknown]
-        assert row.tolist() == [1, 2, 3]  # pyright: ignore[reportUnknownMemberType]
+        assert row.tolist() == [1, 2, 3]
         assert row.dtype == torch.long
 
     def test_empty_instruction_leaves_placeholders_alone(self) -> None:

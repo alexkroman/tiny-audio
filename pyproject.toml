@@ -227,6 +227,14 @@ stubPath = "typings"
 # nltk, ...) are still analysed from source (`useLibraryCodeForTypes`); this
 # rule only reports that a package ships no stubs, which is not ours to fix.
 reportMissingTypeStubs = "none"
+# torch, transformers, datasets and peft leak unannotated `**kwargs` and bare
+# `dict`s through otherwise-typed APIs. These three rules report that leakage at
+# every call site; they say nothing about our own annotations, which the rest of
+# strict mode (and mypy --strict) still enforces. Off, library values that are
+# untyped flow in as Any, exactly as mypy treats them.
+reportUnknownMemberType = "none"
+reportUnknownArgumentType = "none"
+reportUnknownVariableType = "none"
 # Tests exercise private helpers directly; that is the point of a unit test.
 executionEnvironments = [
   { root = "tests", reportPrivateUsage = "none" },

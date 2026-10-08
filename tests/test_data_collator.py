@@ -44,9 +44,7 @@ def tokenizer() -> PreTrainedTokenizerBase:
     """Load the SmolLM tokenizer with <audio> token added."""
     tok = cast(
         PreTrainedTokenizerBase,
-        AutoTokenizer.from_pretrained(  # pyright: ignore[reportUnknownMemberType]
-            "HuggingFaceTB/SmolLM2-135M-Instruct"
-        ),
+        AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM2-135M-Instruct"),
     )
     # Add <audio> token like ASRModel does
     existing_special: list[str] = getattr(tok, "additional_special_tokens", None) or []
@@ -58,9 +56,7 @@ def tokenizer() -> PreTrainedTokenizerBase:
 @pytest.fixture
 def feature_extractor() -> WhisperFeatureExtractor:
     """Load Whisper feature extractor."""
-    return WhisperFeatureExtractor.from_pretrained(  # pyright: ignore[reportUnknownMemberType]
-        "openai/whisper-tiny"
-    )
+    return WhisperFeatureExtractor.from_pretrained("openai/whisper-tiny")
 
 
 @pytest.fixture

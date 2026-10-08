@@ -26,7 +26,7 @@ def _gather_reference(audio_embeds: torch.Tensor, token_counts: torch.Tensor) ->
 
 class TestGatherAudioEmbeds:
     def test_matches_reference_balanced_batch(self) -> None:
-        torch.manual_seed(0)  # pyright: ignore[reportUnknownMemberType]  # untyped seed arg
+        torch.manual_seed(0)
         embeds = torch.randn(4, 10, 8)
         counts = torch.tensor([10, 5, 7, 3])
         out_ref = _gather_reference(embeds, counts)

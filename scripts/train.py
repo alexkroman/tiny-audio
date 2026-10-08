@@ -19,7 +19,7 @@ from datasets import (
     ClassLabel,
     Dataset,
     concatenate_datasets,
-    load_dataset,  # pyright: ignore[reportUnknownVariableType]
+    load_dataset,
 )
 from omegaconf import DictConfig, OmegaConf
 from tqdm.auto import tqdm
@@ -33,7 +33,7 @@ from transformers import (
 )
 from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
 from transformers.trainer_pt_utils import (
-    get_parameter_names,  # pyright: ignore[reportUnknownVariableType]
+    get_parameter_names,
 )
 
 from scripts.labels import TEXT_CASE_CASED, TEXT_CASE_MONO
@@ -278,11 +278,7 @@ class DatasetLoader:
                             f"{dataset_path} (defined: {feature.names})"
                         )
                         raise ValueError(msg)
-                    # `str2int` leaves its Iterable overload's element type unannotated.
-                    wanted = {
-                        feature.str2int(n)  # pyright: ignore[reportUnknownMemberType]
-                        for n in names
-                    }
+                    wanted = {feature.str2int(n) for n in names}
                 else:
                     wanted = set(names)
 
@@ -528,7 +524,7 @@ class DatasetLoader:
 
 def _trainer_model(trainer: Trainer) -> torch.nn.Module | None:
     """`trainer.model`, whose declared union includes one unannotated assignment."""
-    return trainer.model  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    return trainer.model
 
 
 def decay_parameter_ids(model: torch.nn.Module) -> set[int]:
@@ -613,8 +609,7 @@ class ASRTrainer(Trainer):
         encoder_weight_decay: float | None = None,
         **kwargs: Any,
     ) -> None:
-        # Trainer.__init__ leaves some of its parameters unannotated.
-        super().__init__(*args, **kwargs)  # pyright: ignore[reportUnknownMemberType]
+        super().__init__(*args, **kwargs)
         self.decoder_learning_rate = decoder_learning_rate
         self.projector_weight_decay = projector_weight_decay
         self.encoder_learning_rate = encoder_learning_rate
@@ -644,8 +639,7 @@ class ASRTrainer(Trainer):
             or self.encoder_weight_decay is not None
         )
         if self.optimizer is not None or not overrides:
-            # Trainer.create_optimizer leaves `model` unannotated.
-            return super().create_optimizer(model)  # pyright: ignore[reportUnknownMemberType]
+            return super().create_optimizer(model)
 
         # Same model resolution as Trainer.create_optimizer, which train() calls
         # with the accelerator-prepared model when optimizer creation is delayed.
@@ -996,7 +990,7 @@ def main(cfg: DictConfig) -> None:
     # transformers assigns `chat_template` from an unannotated kwargs.pop.
     chat_template = cast(
         str | dict[str, str] | None,
-        model.tokenizer.chat_template,  # pyright: ignore[reportUnknownMemberType]
+        model.tokenizer.chat_template,
     )
     if isinstance(chat_template, str) and "enable_thinking" in chat_template:
         model.tokenizer.chat_template = chat_template.replace(
@@ -1056,10 +1050,7 @@ def main(cfg: DictConfig) -> None:
         encoder_weight_decay=encoder_weight_decay,
     )
 
-    # Trainer.train leaves its `trial` parameter's type partly unannotated.
-    trainer.train(  # pyright: ignore[reportUnknownMemberType]
-        resume_from_checkpoint=cfg.training.get("resume_from_checkpoint")
-    )
+    trainer.train(resume_from_checkpoint=cfg.training.get("resume_from_checkpoint"))
     # `_internal_call=True` suppresses Trainer's own hub push, which
     # `upload_folder`s the entire output_dir. The explicit push below is the
     # one that matters: it runs through `ASRModel.push_to_hub`, which sets

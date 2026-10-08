@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 from transformers.dynamic_module_utils import (
-    get_imports,  # pyright: ignore[reportUnknownVariableType]  # upstream annotates bare os.PathLike
+    get_imports,
 )
 
 BUNDLED = sorted(p for p in Path("tiny_audio").glob("*.py") if p.name.startswith("asr_")) + [
