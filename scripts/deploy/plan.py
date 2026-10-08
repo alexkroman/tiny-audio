@@ -60,6 +60,7 @@ OPTIMIZER_STATES = 2
 # activation term is calibrated against a real run, this is pure safety margin
 # again.
 OVERHEAD_FACTOR = 1.25
+VRAM_RECOMMENDED_KEY = f"recommended (x{OVERHEAD_FACTOR})"
 # The analytical per-layer activation formula further down is a FLOOR, not an
 # estimate, and this reconciles it with reality.
 #
@@ -138,6 +139,20 @@ class Plan:
     warnings: list[str] = field(default_factory=list[str])
     vram: dict[str, float] = field(default_factory=dict[str, float])
     disk: dict[str, float] = field(default_factory=dict[str, float])
+
+    @property
+    def trainable_params(self) -> int:
+        return sum(c.params for c in self.components if c.trainable)
+
+    @property
+    def need_vram_gib(self) -> float:
+        """Overhead-padded VRAM a GPU must have to fit this plan."""
+        return self.vram[VRAM_RECOMMENDED_KEY]
+
+    @property
+    def disk_gb(self) -> int:
+        """Disk to request: the estimate plus 15% and 5 GB of slack."""
+        return int(self.disk["recommended"] * 1.15) + 5
 
 
 def _load_cfg(experiment: str, overrides: list[str]) -> DictConfig:
@@ -337,6 +352,27 @@ def _add_datasets(plan: Plan, data: DictConfig) -> None:
         plan.dataset_rows.append((f"{path}" + (f":{name}" if name else ""), size))
 
 
+def _tape_bytes(
+    batch: int, seq: int, dim: int, inter: int, layers: int, act_bytes_per: int, ckpt: bool
+) -> float:
+    """Activation tape retained across `layers` transformer-shaped blocks.
+
+    Per token per layer: attention q/k/v/o + residual (~6*dim) and the MLP's
+    gate/up/down (~3*inter). Coarse but the right order. Scaled by
+    ACTIVATION_CALIBRATION -- see its definition; unscaled this term is 2.55x
+    under what the granite_qwen run actually used, which is enough to
+    recommend a 48 GB card for a job that needs ~42 GiB.
+    """
+    per_tok_layer = act_bytes_per * (6 * dim + 3 * inter) * ACTIVATION_CALIBRATION
+    if ckpt:
+        # Only layer boundaries are kept; one layer is recomputed at a time.
+        # The boundary term is a plain hidden-sized tensor per layer and is
+        # NOT subject to the calibration, which corrects the within-layer
+        # tape; only the single recomputed layer carries that.
+        return batch * seq * dim * layers * act_bytes_per + batch * seq * per_tok_layer
+    return batch * seq * layers * per_tok_layer
+
+
 def _decoder_activation_bytes(
     train: DictConfig, text_cfg: Any, llm_dim: int, seq_len: int, act_bytes_per: int
 ) -> float:
@@ -344,19 +380,8 @@ def _decoder_activation_bytes(
     batch = int(_get(train, "per_device_train_batch_size", 1))
     layers = int(getattr(text_cfg, "num_hidden_layers", 0) or 0)
     inter = int(getattr(text_cfg, "intermediate_size", 0) or 0)
-    # Per token per layer: attention q/k/v/o + residual (~6*hidden) and the
-    # MLP's gate/up/down (~3*intermediate). Coarse but the right order.
-    # Scaled by ACTIVATION_CALIBRATION -- see its definition; unscaled this
-    # term is 2.55x under what the granite_qwen run actually used, which is
-    # enough to recommend a 48 GB card for a job that needs ~42 GiB.
-    per_tok_layer = act_bytes_per * (6 * llm_dim + 3 * inter) * ACTIVATION_CALIBRATION
-    if bool(_get(train, "gradient_checkpointing", False)):
-        # Only layer boundaries are kept; one layer is recomputed at a time.
-        # The boundary term is a plain hidden-sized tensor per layer and is
-        # NOT subject to the calibration, which corrects the within-layer
-        # tape; only the single recomputed layer carries that.
-        return batch * seq_len * llm_dim * layers * act_bytes_per + batch * seq_len * per_tok_layer
-    return batch * seq_len * layers * per_tok_layer
+    ckpt = bool(_get(train, "gradient_checkpointing", False))
+    return _tape_bytes(batch, seq_len, llm_dim, inter, layers, act_bytes_per, ckpt)
 
 
 def _encoder_activation_bytes(
@@ -402,12 +427,10 @@ def _encoder_activation_bytes(
         asr_config.compute_encoder_output_length
     )
     enc_seq = encoder_output_length(enc_seq, cfg.model.get("encoder_conv_layers") or None)
-    per_tok_enc = act_bytes_per * (6 * encoder_dim + 3 * 4 * encoder_dim) * ACTIVATION_CALIBRATION
-    if bool(_get(train, "gradient_checkpointing", False)):
-        return batch * enc_seq * encoder_dim * trainable_blocks * act_bytes_per + (
-            batch * enc_seq * per_tok_enc
-        )
-    return batch * enc_seq * trainable_blocks * per_tok_enc
+    ckpt = bool(_get(train, "gradient_checkpointing", False))
+    return _tape_bytes(
+        batch, enc_seq, encoder_dim, 4 * encoder_dim, trainable_blocks, act_bytes_per, ckpt
+    )
 
 
 def _precision(cfg: DictConfig) -> _Precision:
@@ -455,7 +478,7 @@ def _cross_entropy_bytes(train: DictConfig, text_cfg: Any, seq_len: int) -> int:
 def _estimate_vram(plan: Plan, prec: _Precision, acts: float, enc_acts: float, logits: int) -> None:
     """Fill `plan.vram` with the static + activation breakdown and the overhead-padded total."""
     total_params = sum(c.params for c in plan.components)
-    trainable_params = sum(c.params for c in plan.components if c.trainable)
+    trainable_params = plan.trainable_params
     frozen_params = total_params - trainable_params
     weights = frozen_params * prec.weights + trainable_params * prec.trainable
     grads = trainable_params * prec.trainable
@@ -479,7 +502,7 @@ def _estimate_vram(plan: Plan, prec: _Precision, acts: float, enc_acts: float, l
         "autocast bf16 weight cache": autocast_cache / GIB,
         "cross-entropy": logits / GIB,
         "subtotal": subtotal / GIB,
-        "recommended (x1.25)": subtotal * OVERHEAD_FACTOR / GIB,
+        VRAM_RECOMMENDED_KEY: subtotal * OVERHEAD_FACTOR / GIB,
     }
 
 
@@ -504,9 +527,8 @@ def _add_vram_warnings(
             "audio_tower. -- are no longer counted; see NON_LM_TOWER_PREFIXES.)"
         )
 
-    trainable_params = sum(c.params for c in plan.components if c.trainable)
     ckpt = bool(_get(train, "gradient_checkpointing", False))
-    if not dec_trainable and trainable_params and not ckpt:
+    if not dec_trainable and plan.trainable_params and not ckpt:
         plan.warnings.append(
             "Decoder is frozen but the projector feeds its input, so activations "
             "are still held for every decoder layer. gradient_checkpointing=true "
@@ -530,9 +552,8 @@ def _estimate_disk(plan: Plan, train: DictConfig, trainable_bytes_per: int) -> N
     # param. save_total_limit copies sit on disk simultaneously, so retention
     # multiplies -- charging one projector-sized checkpoint understated a joint
     # fine-tune by ~500x.
-    trainable_params = sum(c.params for c in plan.components if c.trainable)
     keep = max(int(_get(train, "save_total_limit", 1) or 1), 1)
-    ckpt_each = trainable_params * trainable_bytes_per * (1 + OPTIMIZER_STATES)
+    ckpt_each = plan.trainable_params * trainable_bytes_per * (1 + OPTIMIZER_STATES)
     ckpt_bytes = ckpt_each * keep
 
     weights_bytes = sum(c.download_bytes for c in plan.components)
@@ -678,7 +699,7 @@ def _pick_gpu(plan: Plan, needs_volume: bool) -> str:
     # the GPU has to exist in a datacenter that also supports volumes. Picking
     # on VRAM alone selects e.g. an A40, whose datacenters have no volume
     # support, and then there is nowhere to put 1.5 TiB.
-    need_gib = plan.vram["recommended (x1.25)"]
+    need_gib = plan.need_vram_gib
     fitting = gpu_catalog.available_gpus(need_gib)
     placeable = [
         (vram_gib, gpu_id)
@@ -738,7 +759,7 @@ def _print_volume_provision(plan: Plan, experiment: str, gpu: str, image: str) -
     # the python env. Asking for a >1 TB container disk is the usual cause
     # of "no instances available" on every GPU type -- container disks come
     # from host-local storage.
-    vol_gb = min(int(plan.disk["recommended"] * 1.15) + 5, NETWORK_VOLUME_MAX_GB)
+    vol_gb = min(plan.disk_gb, NETWORK_VOLUME_MAX_GB)
     vol_name = f"tiny-audio-{experiment}"
     capped = vol_gb >= NETWORK_VOLUME_MAX_GB
     dc_id = _volume_datacenter(gpu)
@@ -796,7 +817,7 @@ def plan_command(
 
     _print_plan_tables(plan, experiment, seq_len)
 
-    disk_gb = int(plan.disk["recommended"] * 1.15) + 5
+    disk_gb = plan.disk_gb
     print("\n--- Provision ---")
     needs_volume = disk_gb > NETWORK_VOLUME_THRESHOLD_GB
     if gpu is None:
@@ -811,7 +832,7 @@ def plan_command(
             f"    --container-disk-in-gb {disk_gb} --ports '22/tcp' \\\n"
             f'    --env "{{\\"SSH_PUBLIC_KEY\\":\\"$(cat ~/.ssh/id_ed25519.pub)\\"}}"\n'
         )
-    print(f"  Needs a GPU with >= {plan.vram['recommended (x1.25)']:.0f} GiB VRAM.")
+    print(f"  Needs a GPU with >= {plan.need_vram_gib:.0f} GiB VRAM.")
     print(
         "  Disk note: the remote training script exports HF_HOME=/workspace/.cache\n"
         "  and HF_DATASETS_CACHE=/workspace/datasets, so the figure above must be\n"
@@ -845,8 +866,8 @@ def provision_command(
     This walks the fitting GPU types smallest-first until one actually comes up.
     """
     plan = build_plan(experiment, list(overrides or []), seq_len)
-    vram = plan.vram["recommended (x1.25)"]
-    disk = int(plan.disk["recommended"] * 1.15) + 5
+    vram = plan.need_vram_gib
+    disk = plan.disk_gb
     candidates = gpu_catalog.available_gpus(vram)
 
     print(f"\n{experiment}: needs >= {vram:.1f} GiB VRAM, {disk} GB disk")

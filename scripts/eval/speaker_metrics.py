@@ -74,6 +74,20 @@ def plain_text(text: str) -> str:
     return " ".join(t for _, t in parse_turns(text))
 
 
+def scoring_text(text: str) -> str:
+    """Text WER is computed on: speaker tokens (`<SPK_n>`) dropped, if present.
+
+    Shared by `ta eval` and `ta analysis` so both score the same words; left
+    in, the tokens become extra words and push WER up.
+    """
+    return plain_text(text) if has_speakers(text) else text
+
+
+def speaker_count(text: str) -> int:
+    """Number of distinct speakers in a labelled transcript."""
+    return len({label for label, _ in parse_turns(text)})
+
+
 def word_errors(ref: list[str], hyp: list[str]) -> int:
     """Word-level Levenshtein distance (substitutions + deletions + insertions).
 
@@ -125,8 +139,7 @@ def speaker_metrics(
         errors, words = cp_errors(ref, hyp, normalize)
         cp_err += errors
         n_words += words
-        n_ref = len({label for label, _ in parse_turns(ref)})
-        n_hyp = len({label for label, _ in parse_turns(hyp)})
+        n_ref, n_hyp = speaker_count(ref), speaker_count(hyp)
         count_hits += n_ref == n_hyp
         count_abs += abs(n_ref - n_hyp)
         bucket = by_count.setdefault(n_ref, [0, 0])

@@ -11,6 +11,11 @@ from collections.abc import Sequence
 from huggingface_hub import dataset_info, get_safetensors_metadata, model_info
 
 
+def _in_towers(name: str, prefixes: Sequence[str]) -> bool:
+    """True when tensor `name` belongs to one of the `prefixes` towers, at any depth."""
+    return any(name.startswith(p) or f".{p}" in name for p in prefixes)
+
+
 def safetensors_params(repo_id: str, exclude_prefixes: tuple[str, ...] = ()) -> tuple[int, str]:
     """Exact parameter count from the safetensors header (no weight download).
 
@@ -36,7 +41,7 @@ def safetensors_params(repo_id: str, exclude_prefixes: tuple[str, ...] = ()) -> 
         counts = {}
         for f in meta.files_metadata.values():
             for name, info in f.tensors.items():
-                if any(name.startswith(p) or f".{p}" in name for p in exclude_prefixes):
+                if _in_towers(name, exclude_prefixes):
                     continue
                 counts[info.dtype] = counts.get(info.dtype, 0) + info.parameter_count
     # Ignore integer buffers (rotary caches, position ids); they aren't params.
@@ -85,7 +90,7 @@ def lora_trainable_params(
     for name, shape in shapes.items():
         if len(shape) != 2 or ".layers." not in name:
             continue
-        if any(name.startswith(p) or f".{p}" in name for p in NON_LM_TOWER_PREFIXES):
+        if _in_towers(name, NON_LM_TOWER_PREFIXES):
             continue
         # lm_head and the embedding table are never adapted by "all-linear",
         # and adapting lm_head would be wrong here anyway -- it is tied to the

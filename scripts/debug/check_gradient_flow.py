@@ -34,7 +34,7 @@ import typer
 from omegaconf import OmegaConf
 from torch.nn.utils.rnn import pad_sequence
 
-from scripts.train import decay_parameter_ids
+from scripts.train import optimizer_param_groups
 from scripts.utils import get_project_root
 from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
@@ -82,62 +82,35 @@ def load_embedded_training_knobs() -> dict[str, float | None]:
     }
 
 
+_GROUP_LABELS = {"other": "projector", "decoder": "decoder", "encoder": "encoder"}
+
+
 def build_param_groups(
     model: ASRModel,
     knobs: dict[str, float | None],
 ) -> list[ParamGroup]:
-    """Mirror scripts/train.py ASRTrainer.create_optimizer's four-group split.
+    """ASRTrainer.create_optimizer's component x decay split, labelled for the audit.
 
-    Groups: (is_decoder, decay) for is_decoder in {False, True} and
-    decay in {True, False}. is_decoder = name.startswith("language_model.").
-    decay comes from scripts/train.py's decay_parameter_ids, the same rule
-    the trainer applies. Each group dict also carries `param_names` for the
-    routing audit and the configured `lr` / `wd` that ASRTrainer would
-    apply under embedded.yaml's knobs.
+    Built by scripts/train.py's optimizer_param_groups, the same routing the
+    trainer applies; each group also carries `param_names` and the configured
+    `lr` / `wd` under embedded.yaml's knobs (encoder knobs fall back to base).
     """
-    decay_ids = decay_parameter_ids(model)
-
-    base_lr = knobs["learning_rate"]
-    base_wd = knobs["weight_decay"]
-    dec_lr = (
-        knobs["decoder_learning_rate"] if knobs["decoder_learning_rate"] is not None else base_lr
-    )
-    dec_wd = base_wd  # ASRTrainer falls back to args.weight_decay when no decoder override
-    proj_wd = (
-        knobs["projector_weight_decay"] if knobs["projector_weight_decay"] is not None else base_wd
-    )
-
-    buckets: dict[tuple[bool, bool], list[tuple[str, torch.nn.Parameter]]] = {
-        (False, True): [],
-        (False, False): [],
-        (True, True): [],
-        (True, False): [],
-    }
-    for name, param in model.named_parameters():
-        if not param.requires_grad:
-            continue
-        key = (name.startswith("language_model."), id(param) in decay_ids)
-        buckets[key].append((name, param))
-
-    labels = {
-        (False, True): ("projector / decay", base_lr, proj_wd),
-        (False, False): ("projector / no-decay", base_lr, 0.0),
-        (True, True): ("decoder   / decay", dec_lr, dec_wd),
-        (True, False): ("decoder   / no-decay", dec_lr, 0.0),
-    }
-    groups: list[ParamGroup] = []
-    for key, items in buckets.items():
-        label, lr, wd = labels[key]
-        groups.append(
-            {
-                "label": label,
-                "params": [p for _, p in items],
-                "param_names": [n for n, _ in items],
-                "lr": lr,
-                "wd": wd,
-            }
+    return [
+        {
+            "label": f"{_GROUP_LABELS[g.component]:9s} / {'decay' if g.decay else 'no-decay'}",
+            "params": g.params,
+            "param_names": g.names,
+            "lr": g.lr,
+            "wd": g.weight_decay,
+        }
+        for g in optimizer_param_groups(
+            model,
+            lr=knobs["learning_rate"],
+            weight_decay=knobs["weight_decay"],
+            decoder_lr=knobs["decoder_learning_rate"],
+            projector_wd=knobs["projector_weight_decay"],
         )
-    return groups
+    ]
 
 
 def effective_update_norms(groups: list[ParamGroup]) -> dict[str, float]:
@@ -158,7 +131,7 @@ def effective_update_norms(groups: list[ParamGroup]) -> dict[str, float]:
         contribution = lr * gn
         if g["label"].startswith("projector"):
             proj_total += contribution
-        else:
+        elif g["label"].startswith("decoder"):
             dec_total += contribution
     ratio = (proj_total / dec_total) if dec_total > 0 else float("inf")
     return {
@@ -251,7 +224,7 @@ def synthetic_batch(
     samples_labels: list[list[int]] = []
     for i in range(batch_size):
         n_audio = int(token_counts[i].item())
-        user = ("<audio>" * n_audio) + " Transcribe the speech to text"
+        user = ("<audio>" * n_audio) + " " + ASRModel.TRANSCRIBE_PROMPT
         messages = [
             {"role": "user", "content": user},
             {"role": "assistant", "content": response},

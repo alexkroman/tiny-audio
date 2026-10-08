@@ -22,6 +22,7 @@ from tiny_audio.asr_config import (
     ConvLayerSpec,
     compute_encoder_output_length,
 )
+from tiny_audio.asr_processing import ASRProcessor
 from tiny_audio.asr_types import AudioFeatureExtractor, OutputLengthProjector
 
 # trl.experimental warns (TRLExperimentalWarning) the first time it is
@@ -32,7 +33,8 @@ with warnings.catch_warnings():
 
 logger = logging.getLogger(__name__)
 
-TRANSCRIBE_PROMPT = "Transcribe the speech to text"
+# The inference default: training and decoding must share one conditioning.
+TRANSCRIBE_PROMPT = ASRProcessor.TRANSCRIBE_PROMPT
 # Used for sources whose transcripts natively carry punctuation, selected per
 # row via the `text_punct` dataset field. Granite Speech 4.1 documents exactly
 # this mechanism -- its model card says punctuation and truecasing are chosen
@@ -72,7 +74,7 @@ class DataCollator:
         tokenizer: PreTrainedTokenizerBase,
         feature_extractor: SequenceFeatureExtractor,
         sample_rate: int,
-        projector: OutputLengthProjector | None = None,
+        projector: OutputLengthProjector,
         encoder_conv_layers: Sequence[ConvLayerSpec] | None = None,
         audio_token: str = "<audio>",
     ) -> None:
@@ -156,6 +158,12 @@ class DataCollator:
         # cluster from saturating an eval batch.
         if audio.size == 0:
             return False
+        # Duration first: it is O(1) and drops the most rows (see
+        # _MAX_AUDIO_SECONDS), so they skip the full-array scan and label
+        # normalization below.
+        duration_s = audio.size / self.sample_rate
+        if not self._MIN_AUDIO_SECONDS <= duration_s <= self._MAX_AUDIO_SECONDS:
+            return False
         if not np.isfinite(audio).all():
             return False
         # Drop rows whose entire text was an annotation marker
@@ -169,10 +177,7 @@ class DataCollator:
         # retains it, which supervises onset/offset truncation — the
         # measured root cause of this recipe's Peoples regression.
         # See scripts/labels.py _EDGE_CONTENT_TAG_RE for the rates and the evidence.
-        if has_edge_content_tag(raw_text):
-            return False
-        duration_s = audio.size / self.sample_rate
-        return self._MIN_AUDIO_SECONDS <= duration_s <= self._MAX_AUDIO_SECONDS
+        return not has_edge_content_tag(raw_text)
 
     def _extract_audio_arrays(
         self, features: list[dict[str, Any]]
@@ -240,7 +245,6 @@ class DataCollator:
         input_features: torch.Tensor = audio_out["input_features"]
         mel_lengths = audio_attention_mask.sum(dim=-1)
         encoder_lengths = compute_encoder_output_length(mel_lengths, self.encoder_conv_layers)
-        assert self.projector is not None, "DataCollator needs a projector to count audio tokens"
         token_counts_tensor = self.projector.get_output_length(encoder_lengths).to(torch.long)
         audio_token_counts: list[int] = token_counts_tensor.tolist()
 

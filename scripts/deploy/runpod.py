@@ -18,7 +18,7 @@ from tenacity import RetryError, retry, stop_after_attempt, wait_fixed
 
 from scripts.deploy import plan as deploy_plan
 from scripts.deploy import remote_scripts
-from scripts.eval.constants import AssemblyAIModel
+from scripts.eval.constants import DEFAULT_DATASET, AssemblyAIModel, get_model_name
 from scripts.utils import get_project_root
 
 app = typer.Typer(help="Train and evaluate on remote RunPod pods.", add_completion=False)
@@ -144,12 +144,9 @@ def connect(host: str, port: int) -> Connection:
 
 def list_tmux_sessions(conn: Connection) -> list[str]:
     """Get list of tmux session names on remote host."""
-    try:
-        result = conn.run('tmux list-sessions -F "#S" 2>/dev/null', hide=True, warn=True)
-        if result.ok and result.stdout.strip():
-            return result.stdout.strip().split("\n")
-    except UnexpectedExit:
-        pass
+    result = conn.run('tmux list-sessions -F "#S" 2>/dev/null', hide=True, warn=True)
+    if result.ok and result.stdout.strip():
+        return result.stdout.strip().split("\n")
     return []
 
 
@@ -161,17 +158,12 @@ def kill_tmux_session(conn: Connection, session_name: str) -> bool:
 
 def get_tmux_logs(conn: Connection, session_name: str, lines: int = 100) -> str | None:
     """Capture recent output from a tmux session."""
-    try:
-        result = conn.run(
-            f"tmux capture-pane -t {shlex.quote(session_name)} -p -S -{lines}",
-            hide=True,
-            warn=True,
-        )
-        if result.ok:
-            return result.stdout
-    except UnexpectedExit:
-        pass
-    return None
+    result = conn.run(
+        f"tmux capture-pane -t {shlex.quote(session_name)} -p -S -{lines}",
+        hide=True,
+        warn=True,
+    )
+    return result.stdout if result.ok else None
 
 
 def attach_tmux_session(host: str, port: int, session_name: str) -> None:
@@ -823,7 +815,7 @@ def eval_model(
     """
     conn = connect(host, port)
 
-    model_short = model.rsplit("/", maxsplit=1)[-1] if "/" in model else model
+    model_short = get_model_name(model)
     session_name = _prepare_session(
         conn, session_name or _auto_session_name(f"eval_{model_short}"), force, hf_token
     )
@@ -832,7 +824,7 @@ def eval_model(
         raise typer.BadParameter(msg, param_hint="--assemblyai-api-key")
 
     if datasets is None:
-        datasets = ["loquacious"]
+        datasets = [DEFAULT_DATASET]
 
     print(f"\nStarting eval session '{session_name}'...")
     print(f"Model: {model}")
