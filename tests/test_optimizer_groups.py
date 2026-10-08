@@ -12,11 +12,11 @@ from typing import Any, cast
 
 import pytest
 import torch
+from conftest import make_asr_config
 from torch import nn
 from transformers import TrainingArguments
 
 from scripts.train import ASRTrainer
-from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
 
 
@@ -29,15 +29,7 @@ def joint_asr_model() -> ASRModel:
     the optimizer entirely — there would be nothing to assert about decoder
     weight-decay routing.
     """
-    config = ASRConfig(
-        audio_model_id="openai/whisper-tiny",
-        text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
-        projector_type="mlp",
-        model_dtype="float32",
-        attn_implementation="eager",
-        freeze_language_model=False,
-    )
-    return ASRModel(config)
+    return ASRModel(make_asr_config(freeze_language_model=False))
 
 
 @pytest.fixture(scope="module")

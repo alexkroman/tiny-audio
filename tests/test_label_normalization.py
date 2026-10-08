@@ -284,13 +284,7 @@ class TestEdAccNormalization:
         # Short total letter count (< 5 after strip) → truecase SKIPPED.
         assert normalize_label("UM <LIPSMACK> SO") == "UM SO"
 
-    @pytest.mark.parametrize(
-        "marker",
-        ["overlap", "laugh", "dtmf", "foreign", "no-speech", "lipsmack"],
-    )
-    def test_lowercase_form_also_stripped(self, marker: str) -> None:
-        # Generic `<[^>]+>` strip is case-agnostic — both cases handled.
-        assert normalize_label(f"hello <{marker}> world") == "Hello world"
+    # Lowercase forms are covered by TestBodilyNoiseMarkers' generic-strip test.
 
 
 class TestEarnings22Normalization:
@@ -315,9 +309,14 @@ class TestBodilyNoiseMarkers:
 
     @pytest.mark.parametrize(
         "marker",
-        ["sigh", "inhale", "exhale", "breath", "cough", "throat", "sniff", "click"],
+        # Bodily noise, plus the lowercase forms of the EdAcc markers above:
+        # the generic `<[^>]+>` strip is case-agnostic.
+        [
+            *("sigh", "inhale", "exhale", "breath", "cough", "throat", "sniff", "click"),
+            *("overlap", "laugh", "dtmf", "foreign", "no-speech", "lipsmack"),
+        ],
     )
-    def test_bodily_noise_marker_stripped(self, marker: str) -> None:
+    def test_marker_stripped(self, marker: str) -> None:
         assert normalize_label(f"hello <{marker}> world") == "Hello world"
 
 

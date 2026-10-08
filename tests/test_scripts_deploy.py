@@ -293,16 +293,9 @@ def test_generic_training_script_runs_scripts_train() -> None:
     assert "python -m scripts.train +experiments=granite_qwen" in script
 
 
+@pytest.mark.usefixtures("no_retry_backoff")
 class TestDeployRetries:
     """`wait` polling and the SSH probe retry through tenacity."""
-
-    @pytest.fixture(autouse=True)
-    def _no_sleep(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # tenacity sleeps through time.sleep; skip the backoff in tests.
-        def no_sleep(_s: float) -> None:
-            return None
-
-        monkeypatch.setattr("tenacity.nap.time.sleep", no_sleep)
 
     def test_wait_polls_until_ssh_endpoint_appears(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

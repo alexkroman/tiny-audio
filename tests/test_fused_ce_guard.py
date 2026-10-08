@@ -10,10 +10,10 @@ smoke run or a deliberate unfused run is never blocked.
 
 import logging
 from types import SimpleNamespace
-from typing import cast
 from unittest.mock import patch
 
 import pytest
+from conftest import stub
 from omegaconf import DictConfig
 
 from scripts.train import _require_fused_cross_entropy
@@ -25,13 +25,13 @@ def _model(accepts: bool, vocab: int = 248320, name: str = "Qwen3_5ForCausalLM")
     """Minimal stand-in: the guard reads only these three attributes."""
     lm_cls = type(name, (), {"config": SimpleNamespace(vocab_size=vocab)})
     lm = lm_cls()
-    return cast(ASRModel, SimpleNamespace(_lm_accepts_skip_logits=accepts, language_model=lm))
+    return stub(_lm_accepts_skip_logits=accepts, language_model=lm)
 
 
 def _cfg(**training: object) -> DictConfig:
     base: dict[str, object] = {"use_liger": True, "per_device_train_batch_size": 48}
     base.update(training)
-    return cast(DictConfig, SimpleNamespace(training=base))
+    return stub(training=base)
 
 
 class TestRaisesWhereItCosts:

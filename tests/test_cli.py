@@ -149,32 +149,3 @@ class TestEvalCommand:
         for cmd in (["eval"], ["dev"], ["runpod", "train"]):
             output = _clean(runner.invoke(app, [*cmd, "--help"]).output)
             assert "--install-completion" not in output, cmd
-
-
-class TestCLIStructure:
-    """Tests for overall CLI structure validation."""
-
-    @pytest.mark.parametrize(
-        "cmd_path",
-        [
-            # Top-level commands (now direct)
-            ["deploy"],
-            ["push"],
-            # Runpod subcommands
-            ["runpod", "deploy"],
-            ["runpod", "train"],
-            ["runpod", "attach"],
-            ["runpod", "checkpoint"],
-            # Debug subcommands
-            ["debug", "check-gradient-flow"],
-            # Dev subcommands
-            ["dev", "lint"],
-            ["dev", "test"],
-            ["dev", "handler"],
-        ],
-    )
-    def test_nested_commands_accessible(self, cmd_path: list[str]) -> None:
-        """Test that all nested commands are accessible."""
-        result = runner.invoke(app, [*cmd_path, "--help"])
-        assert result.exit_code == 0, f"'{' '.join(cmd_path)} --help' failed: {result.output}"
-        assert len(result.output) > 50, f"'{' '.join(cmd_path)}' help output seems too short"

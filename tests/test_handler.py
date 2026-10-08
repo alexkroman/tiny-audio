@@ -7,7 +7,6 @@ import pytest
 import torch
 from pytest_mock import MockerFixture
 
-from tiny_audio.diarization import get_device as _best_device
 from tiny_audio.handler import EndpointHandler
 
 
@@ -55,14 +54,13 @@ class TestEndpointHandlerInit:
     """Tests for EndpointHandler initialization logic."""
 
     def test_device_detection_cpu(self, mocker: MockerFixture) -> None:
-        """Should fall back to CPU when neither CUDA nor MPS is available.
+        """The model is moved to whatever device the handler picks.
 
-        The handler picks cuda > mps > cpu itself (it no longer reads the device
-        off the model's parameters), so both accelerators have to be stubbed out
-        or this test picks MPS on Apple Silicon.
+        The cuda > mps > cpu ordering itself is covered by
+        test_alignment_device.py; stub the choice so this test is
+        host-independent.
         """
-        mocker.patch("torch.cuda.is_available", return_value=False)
-        mocker.patch("torch.backends.mps.is_available", return_value=False)
+        mocker.patch("tiny_audio.handler._best_device", return_value=torch.device("cpu"))
         mock_model = mocker.patch("tiny_audio.handler.ASRModel")
         mocker.patch("tiny_audio.handler.ASRPipeline")
         mock_model.from_pretrained.return_value = mocker.MagicMock()
@@ -71,23 +69,6 @@ class TestEndpointHandlerInit:
 
         assert handler.device == torch.device("cpu")
         mock_model.from_pretrained.return_value.to.assert_called_once_with(torch.device("cpu"))
-
-    @pytest.mark.parametrize(
-        ("cuda", "mps", "expected"),
-        [
-            (True, True, "cuda"),
-            (False, True, "mps"),
-            (False, False, "cpu"),
-        ],
-    )
-    def test_best_device_prefers_cuda_then_mps(
-        self, mocker: MockerFixture, cuda: bool, mps: bool, expected: str
-    ) -> None:
-        """_best_device should prefer CUDA, then MPS, then CPU."""
-        mocker.patch("torch.cuda.is_available", return_value=cuda)
-        mocker.patch("torch.backends.mps.is_available", return_value=mps)
-
-        assert _best_device() == torch.device(expected)
 
     def test_handler_sets_tf32_flags(self) -> None:
         """Handler __init__ should set TF32 flags."""

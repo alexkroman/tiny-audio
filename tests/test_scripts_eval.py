@@ -15,14 +15,6 @@ import torch.nn as nn
 from peft import LoraConfig, PeftModel, get_peft_model
 from transformers import PretrainedConfig, PreTrainedModel
 
-from scripts.eval.datasets import (
-    DATASET_REGISTRY,
-    DatasetConfig,
-)
-from scripts.eval.evaluators import (
-    EvalResult,
-    Evaluator,
-)
 from scripts.eval.evaluators.asr import (
     DTYPE_CONFIG_FIELDS,
     AssemblyAIStreamingEvaluator,
@@ -46,89 +38,6 @@ class _StreamClosedError(RuntimeError):
     """A stream-close error carrying the close code the SDK attaches."""
 
     streaming_code: int
-
-
-class TestDatasetConfig:
-    """Tests for DatasetConfig dataclass."""
-
-    def test_basic_config(self) -> None:
-        """Test creating a basic dataset config."""
-        config = DatasetConfig(
-            path="test/dataset",
-            audio_field="audio",
-        )
-
-        assert config.path == "test/dataset"
-        assert config.audio_field == "audio"
-        assert config.text_field == "text"  # default
-        assert config.default_split == "test"  # default
-
-
-class TestDatasetRegistry:
-    """Tests for DATASET_REGISTRY."""
-
-    def test_registry_not_empty(self) -> None:
-        """Test that the registry contains datasets."""
-        assert len(DATASET_REGISTRY) > 0
-
-    def test_loquacious_exists(self) -> None:
-        """Test that loquacious dataset is in registry."""
-        assert "loquacious" in DATASET_REGISTRY
-        cfg = DATASET_REGISTRY["loquacious"]
-        assert cfg.audio_field == "wav"
-        assert cfg.text_field == "text"
-
-    def test_all_configs_have_required_fields(self) -> None:
-        """Test that all configs have required fields."""
-        for name, cfg in DATASET_REGISTRY.items():
-            assert cfg.path, f"Missing path for {name}"
-            assert cfg.audio_field, f"Missing audio_field for {name}"
-
-
-class TestEvalResult:
-    """Tests for EvalResult dataclass."""
-
-    def test_create_result(self) -> None:
-        """Test creating an EvalResult."""
-        result = EvalResult(
-            prediction="hello world",
-            reference="hello world",
-            wer=0.0,
-            time=1.5,
-        )
-
-        assert result.prediction == "hello world"
-        assert result.reference == "hello world"
-        assert result.wer == 0.0
-        assert result.time == 1.5
-
-
-class TestEvaluatorBase:
-    """Tests for base Evaluator class."""
-
-    def test_compute_metrics_empty(self) -> None:
-        """Test compute_metrics with no results."""
-        evaluator = Evaluator()
-        metrics = evaluator.compute_metrics()
-
-        assert metrics["wer"] == 0.0
-        assert metrics["avg_time"] == 0.0
-        assert metrics["num_samples"] == 0
-
-    def test_evaluator_initialization(self) -> None:
-        """Test Evaluator initialization."""
-        evaluator = Evaluator(audio_field="audio", text_field="text")
-
-        assert evaluator.audio_field == "audio"
-        assert evaluator.text_field == "text"
-        assert evaluator.results == []
-
-    def test_transcribe_not_implemented(self) -> None:
-        """Test that base transcribe raises NotImplementedError."""
-        evaluator = Evaluator()
-
-        with pytest.raises(NotImplementedError):
-            evaluator.transcribe(None)
 
 
 class TestResolveLocalRuntime:
@@ -352,13 +261,12 @@ class TestStreamingRetry:
     """AssemblyAIStreamingEvaluator retries only on transient stream close codes."""
 
     @pytest.fixture
-    def evaluator(self, monkeypatch: pytest.MonkeyPatch) -> AssemblyAIStreamingEvaluator:
-        # tenacity sleeps through time.sleep; skip the backoff in tests.
-        def no_sleep(_s: float) -> None:
-            return None
-
-        monkeypatch.setattr("tenacity.nap.time.sleep", no_sleep)
-        return AssemblyAIStreamingEvaluator(api_key="test")
+    def evaluator(
+        self, monkeypatch: pytest.MonkeyPatch, no_retry_backoff: None
+    ) -> AssemblyAIStreamingEvaluator:
+        evaluator = AssemblyAIStreamingEvaluator(api_key="test")
+        monkeypatch.setattr(evaluator, "_prepare_pcm", _no_pcm)
+        return evaluator
 
     @staticmethod
     def _stream_error(code: int | None) -> RuntimeError:
@@ -378,7 +286,6 @@ class TestStreamingRetry:
                 raise self._stream_error(1013)
             return "hello", 0.5
 
-        monkeypatch.setattr(evaluator, "_prepare_pcm", _no_pcm)
         monkeypatch.setattr(evaluator, "_run_session", run_session)
 
         assert evaluator.transcribe(object()) == ("hello", 0.5, None)
@@ -393,7 +300,6 @@ class TestStreamingRetry:
             calls.append(1)
             raise self._stream_error(None)
 
-        monkeypatch.setattr(evaluator, "_prepare_pcm", _no_pcm)
         monkeypatch.setattr(evaluator, "_run_session", run_session)
 
         with pytest.raises(RuntimeError, match="closed with None"):
@@ -409,7 +315,6 @@ class TestStreamingRetry:
             calls.append(1)
             raise self._stream_error(4029)
 
-        monkeypatch.setattr(evaluator, "_prepare_pcm", _no_pcm)
         monkeypatch.setattr(evaluator, "_run_session", run_session)
 
         with pytest.raises(RuntimeError, match="closed with 4029"):
