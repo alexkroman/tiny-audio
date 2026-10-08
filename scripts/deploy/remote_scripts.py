@@ -30,13 +30,16 @@ fi
 # Every remote script shares this header: the fd limit, the nvidia-lib
 # LD_LIBRARY_PATH repair, and the HF cache/token exports. It lived inline in all
 # three builders below and had already drifted between them.
-_SCRIPT_PREAMBLE = """#!/bin/bash
+_SCRIPT_PREAMBLE = (
+    """#!/bin/bash
 # NOTE: "set -e" intentionally removed so session stays active on crash for debugging
 
 ulimit -n 65536
 {pip_install}export PATH="/root/.local/bin:$PATH"
 
-""" + NVIDIA_LD_PATH_FIX + """export HF_HOME=/workspace/.cache/huggingface
+"""
+    + NVIDIA_LD_PATH_FIX
+    + """export HF_HOME=/workspace/.cache/huggingface
 export HF_DATASETS_CACHE=/workspace/datasets
 export HF_XET_HIGH_PERFORMANCE=1
 export HF_TOKEN="{hf_token}"
@@ -48,6 +51,7 @@ export HF_TOKEN="{hf_token}"
 # the same reason HF_HOME is redirected above.
 export TILELANG_CACHE_DIR=/workspace/.cache/tilelang
 """
+)
 
 
 def script_preamble(hf_token: str, *, pip_packages: str = "", extras: str = "") -> str:

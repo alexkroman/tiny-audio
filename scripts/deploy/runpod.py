@@ -294,7 +294,8 @@ def install_dependencies(conn: Connection) -> None:
     """
     print("\nInstalling Python dependencies...")
 
-    setup_script = """\
+    setup_script = (
+        """\
 #!/bin/bash
 # `pipefail` ensures `pip ... | grep ...` fails when pip fails — without it,
 # pip errors are masked by grep's exit code.
@@ -302,7 +303,9 @@ set -eo pipefail
 
 export PATH="/root/.local/bin:$PATH"
 
-""" + remote_scripts.NVIDIA_LD_PATH_FIX + """export PIP_ROOT_USER_ACTION=ignore
+"""
+        + remote_scripts.NVIDIA_LD_PATH_FIX
+        + """export PIP_ROOT_USER_ACTION=ignore
 export POETRY_VIRTUALENVS_CREATE=false
 export PIP_BREAK_SYSTEM_PACKAGES=1
 
@@ -415,7 +418,7 @@ FLA_CHECK
 # project install ordering above left it behind.
 pip install --user --upgrade liger-kernel --quiet
 
-# Pre-fetch the NLTK punkt tokenizer used by truecase in scripts/train.py's
+# Pre-fetch the NLTK punkt tokenizer used by truecase in scripts/labels.py's
 # label normalizer. NLTK 3.9+ uses `punkt_tab` (new data package format);
 # older NLTKs use `punkt`. Download both so the code works regardless of
 # which NLTK version the base image ships. Doing the download here (during
@@ -444,6 +447,7 @@ if ! "$TA_PYTHON" -c "import typer, hydra, omegaconf, datasets, transformers, tr
 fi
 echo "Dependencies verified for $TA_PYTHON"
 """
+    )
 
     # Upload over SFTP so apostrophes, dollar signs, and other shell metachars
     # in the body are preserved verbatim without any quoting.
