@@ -12,7 +12,7 @@ import pytest
 from scripts.eval.evaluators.asr import SmallestEvaluator
 
 
-def _response(payload: dict) -> MagicMock:
+def _response(payload: dict[str, str]) -> MagicMock:
     resp = MagicMock()
     resp.read.return_value = json.dumps(payload).encode()
     resp.__enter__.return_value = resp
@@ -24,18 +24,23 @@ def _http_error(code: int) -> urllib.error.HTTPError:
 
 
 @pytest.fixture
-def audio():
+def audio() -> dict[str, object]:
     return {"array": np.zeros(16000, dtype=np.float32), "sampling_rate": 16000}
 
 
 @pytest.fixture(autouse=True)
-def no_backoff(monkeypatch):
+def no_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
     # tenacity sleeps between attempts; skip the wait so retry tests stay fast.
-    monkeypatch.setattr("tenacity.nap.time.sleep", lambda _s: None)
+    def no_sleep(_s: float) -> None:
+        return None
+
+    monkeypatch.setattr("tenacity.nap.time.sleep", no_sleep)
 
 
 class TestSmallestEvaluator:
-    def test_returns_transcription_and_sends_wav(self, monkeypatch, audio):
+    def test_returns_transcription_and_sends_wav(
+        self, monkeypatch: pytest.MonkeyPatch, audio: dict[str, object]
+    ) -> None:
         urlopen = MagicMock(return_value=_response({"status": "success", "transcription": "hi"}))
         monkeypatch.setattr("urllib.request.urlopen", urlopen)
 
@@ -50,7 +55,9 @@ class TestSmallestEvaluator:
         assert request.get_header("Content-type") == "audio/wav"
         assert request.data[:4] == b"RIFF"
 
-    def test_retries_rate_limit(self, monkeypatch, audio):
+    def test_retries_rate_limit(
+        self, monkeypatch: pytest.MonkeyPatch, audio: dict[str, object]
+    ) -> None:
         ok = _response({"status": "success", "transcription": "ok"})
         urlopen = MagicMock(side_effect=[_http_error(429), _http_error(503), ok])
         monkeypatch.setattr("urllib.request.urlopen", urlopen)
@@ -60,7 +67,9 @@ class TestSmallestEvaluator:
         assert text == "ok"
         assert urlopen.call_count == 3
 
-    def test_client_error_is_not_retried(self, monkeypatch, audio):
+    def test_client_error_is_not_retried(
+        self, monkeypatch: pytest.MonkeyPatch, audio: dict[str, object]
+    ) -> None:
         urlopen = MagicMock(side_effect=_http_error(401))
         monkeypatch.setattr("urllib.request.urlopen", urlopen)
 
@@ -68,7 +77,9 @@ class TestSmallestEvaluator:
             SmallestEvaluator(api_key="sk").transcribe(audio)
         assert urlopen.call_count == 1
 
-    def test_non_success_payload_raises(self, monkeypatch, audio):
+    def test_non_success_payload_raises(
+        self, monkeypatch: pytest.MonkeyPatch, audio: dict[str, object]
+    ) -> None:
         urlopen = MagicMock(return_value=_response({"status": "error", "message": "bad"}))
         monkeypatch.setattr("urllib.request.urlopen", urlopen)
 

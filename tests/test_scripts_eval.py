@@ -5,7 +5,9 @@ are in test_eval_audio.py to avoid duplication.
 """
 
 import types
-from typing import TypedDict
+from collections.abc import Callable
+from pathlib import Path
+from typing import TypedDict, Unpack, cast
 
 import pytest
 import torch
@@ -29,11 +31,21 @@ from scripts.eval.evaluators.asr import (
     _use_sdpa_where_safe,
 )
 from tiny_audio.asr_config import ASRConfig
+from tiny_audio.asr_modeling import ASRModel
 
 
 class _DtypeOverrides(TypedDict):
     """One value per entry of DTYPE_CONFIG_FIELDS, as ASRConfig kwargs."""
 
+    model_dtype: str
+    projector_dtype: str
+    encoder_dtype: str
+
+
+class _ConfigOverrides(TypedDict, total=False):
+    """`ASRConfig.from_pretrained` overrides these tests pass."""
+
+    dtype: torch.dtype
     model_dtype: str
     projector_dtype: str
     encoder_dtype: str
@@ -45,10 +57,20 @@ class _StreamClosedError(RuntimeError):
     streaming_code: int
 
 
+def _save_config(config: ASRConfig, path: Path) -> None:
+    config.save_pretrained(path)  # pyright: ignore[reportUnknownMemberType]  # untyped kwargs
+
+
+def _load_config(path: Path, **kwargs: Unpack[_ConfigOverrides]) -> ASRConfig:
+    return ASRConfig.from_pretrained(  # pyright: ignore[reportUnknownMemberType]  # untyped kwargs
+        path, **kwargs
+    )
+
+
 class TestDatasetConfig:
     """Tests for DatasetConfig dataclass."""
 
-    def test_basic_config(self):
+    def test_basic_config(self) -> None:
         """Test creating a basic dataset config."""
         config = DatasetConfig(
             path="test/dataset",
@@ -64,18 +86,18 @@ class TestDatasetConfig:
 class TestDatasetRegistry:
     """Tests for DATASET_REGISTRY."""
 
-    def test_registry_not_empty(self):
+    def test_registry_not_empty(self) -> None:
         """Test that the registry contains datasets."""
         assert len(DATASET_REGISTRY) > 0
 
-    def test_loquacious_exists(self):
+    def test_loquacious_exists(self) -> None:
         """Test that loquacious dataset is in registry."""
         assert "loquacious" in DATASET_REGISTRY
         cfg = DATASET_REGISTRY["loquacious"]
         assert cfg.audio_field == "wav"
         assert cfg.text_field == "text"
 
-    def test_all_configs_have_required_fields(self):
+    def test_all_configs_have_required_fields(self) -> None:
         """Test that all configs have required fields."""
         for name, cfg in DATASET_REGISTRY.items():
             assert cfg.path, f"Missing path for {name}"
@@ -85,7 +107,7 @@ class TestDatasetRegistry:
 class TestEvalResult:
     """Tests for EvalResult dataclass."""
 
-    def test_create_result(self):
+    def test_create_result(self) -> None:
         """Test creating an EvalResult."""
         result = EvalResult(
             prediction="hello world",
@@ -103,7 +125,7 @@ class TestEvalResult:
 class TestEvaluatorBase:
     """Tests for base Evaluator class."""
 
-    def test_compute_metrics_empty(self):
+    def test_compute_metrics_empty(self) -> None:
         """Test compute_metrics with no results."""
         evaluator = Evaluator()
         metrics = evaluator.compute_metrics()
@@ -112,7 +134,7 @@ class TestEvaluatorBase:
         assert metrics["avg_time"] == 0.0
         assert metrics["num_samples"] == 0
 
-    def test_evaluator_initialization(self):
+    def test_evaluator_initialization(self) -> None:
         """Test Evaluator initialization."""
         evaluator = Evaluator(audio_field="audio", text_field="text")
 
@@ -120,7 +142,7 @@ class TestEvaluatorBase:
         assert evaluator.text_field == "text"
         assert evaluator.results == []
 
-    def test_transcribe_not_implemented(self):
+    def test_transcribe_not_implemented(self) -> None:
         """Test that base transcribe raises NotImplementedError."""
         evaluator = Evaluator()
 
@@ -137,14 +159,14 @@ class TestResolveLocalRuntime:
     """
 
     @staticmethod
-    def _resolver():
+    def _resolver() -> Callable[[], tuple[int | str, str]]:
         return _resolve_local_runtime
 
-    def test_cuda_prefers_bfloat16(self, monkeypatch):
+    def test_cuda_prefers_bfloat16(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
         assert self._resolver()() == (0, "bfloat16")
 
-    def test_mps_uses_bfloat16_not_float16(self, monkeypatch):
+    def test_mps_uses_bfloat16_not_float16(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """bf16, not fp16.
 
         Measured equal in speed on torch 2.8 / Metal, so fp16 buys nothing
@@ -155,12 +177,12 @@ class TestResolveLocalRuntime:
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
         assert self._resolver()() == ("mps", "bfloat16")
 
-    def test_cpu_stays_float32(self, monkeypatch):
+    def test_cpu_stays_float32(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
         assert self._resolver()() == (-1, "float32")
 
-    def test_returns_dtype_as_string_not_torch_dtype(self, monkeypatch):
+    def test_returns_dtype_as_string_not_torch_dtype(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Must be the string ASRConfig.model_dtype wants, not a torch.dtype.
 
         getattr(torch, config.model_dtype) in ASRModel.__init__ would raise on a
@@ -185,14 +207,14 @@ class TestModelDtypeIsTheWorkingOverride:
     assertion here flips and this comment stops being true.
     """
 
-    def test_dtype_kwarg_does_not_change_model_dtype(self, tmp_path):
-        ASRConfig(model_dtype="float32").save_pretrained(tmp_path)
-        cfg = ASRConfig.from_pretrained(tmp_path, dtype=torch.bfloat16)
+    def test_dtype_kwarg_does_not_change_model_dtype(self, tmp_path: Path) -> None:
+        _save_config(ASRConfig(model_dtype="float32"), tmp_path)
+        cfg = _load_config(tmp_path, dtype=torch.bfloat16)
         assert cfg.model_dtype == "float32"
 
-    def test_model_dtype_kwarg_does_change_it(self, tmp_path):
-        ASRConfig(model_dtype="float32").save_pretrained(tmp_path)
-        cfg = ASRConfig.from_pretrained(tmp_path, model_dtype="bfloat16")
+    def test_model_dtype_kwarg_does_change_it(self, tmp_path: Path) -> None:
+        _save_config(ASRConfig(model_dtype="float32"), tmp_path)
+        cfg = _load_config(tmp_path, model_dtype="bfloat16")
         assert cfg.model_dtype == "bfloat16"
 
 
@@ -207,10 +229,11 @@ class TestInferenceDtypeFieldsAllLand:
     fp32, and every eval held the projector there.
     """
 
-    def test_all_three_fields_are_overridden_together(self, tmp_path):
-        ASRConfig(
-            model_dtype="bfloat16", projector_dtype="float32", encoder_dtype="float32"
-        ).save_pretrained(tmp_path)
+    def test_all_three_fields_are_overridden_together(self, tmp_path: Path) -> None:
+        _save_config(
+            ASRConfig(model_dtype="bfloat16", projector_dtype="float32", encoder_dtype="float32"),
+            tmp_path,
+        )
 
         overrides: _DtypeOverrides = {
             "model_dtype": "bfloat16",
@@ -218,17 +241,18 @@ class TestInferenceDtypeFieldsAllLand:
             "encoder_dtype": "bfloat16",
         }
         assert set(overrides) == set(DTYPE_CONFIG_FIELDS)
-        cfg = ASRConfig.from_pretrained(tmp_path, **overrides)
+        cfg = _load_config(tmp_path, **overrides)
 
         assert [getattr(cfg, f) for f in DTYPE_CONFIG_FIELDS] == ["bfloat16"] * 3
 
-    def test_model_dtype_alone_leaves_the_encoder_in_float32(self, tmp_path):
+    def test_model_dtype_alone_leaves_the_encoder_in_float32(self, tmp_path: Path) -> None:
         """The regression itself, so the constant cannot be quietly narrowed back."""
-        ASRConfig(
-            model_dtype="bfloat16", projector_dtype="float32", encoder_dtype="float32"
-        ).save_pretrained(tmp_path)
+        _save_config(
+            ASRConfig(model_dtype="bfloat16", projector_dtype="float32", encoder_dtype="float32"),
+            tmp_path,
+        )
 
-        cfg = ASRConfig.from_pretrained(tmp_path, model_dtype="bfloat16")
+        cfg = _load_config(tmp_path, model_dtype="bfloat16")
 
         assert cfg.encoder_dtype == "float32"
         assert cfg.projector_dtype == "float32"
@@ -243,27 +267,29 @@ class TestMergeLoraAdapters:
     """
 
     @staticmethod
-    def _peft_holder():
-        class Tiny(PreTrainedModel):
+    def _peft_holder() -> types.SimpleNamespace:
+        class Tiny(PreTrainedModel):  # type: ignore[no-untyped-call]  # untyped __init_subclass__
             config_class = PretrainedConfig
 
-            def __init__(self):
-                super().__init__(PretrainedConfig())
+            def __init__(self) -> None:
+                super().__init__(  # pyright: ignore[reportUnknownMemberType]  # untyped *inputs
+                    PretrainedConfig()
+                )
                 self.lin = nn.Linear(4, 4)
 
         peft_model = get_peft_model(Tiny(), LoraConfig(target_modules=["lin"], r=2))
         return types.SimpleNamespace(language_model=peft_model)
 
-    def test_merges_and_unwraps_a_peft_decoder(self):
+    def test_merges_and_unwraps_a_peft_decoder(self) -> None:
         holder = self._peft_holder()
-        assert _merge_lora_adapters(holder) is True
+        assert _merge_lora_adapters(cast(ASRModel, holder)) is True
         assert not isinstance(holder.language_model, PeftModel)
 
-    def test_is_a_noop_without_lora(self):
+    def test_is_a_noop_without_lora(self) -> None:
         holder = types.SimpleNamespace(language_model=nn.Linear(4, 4))
         original = holder.language_model
 
-        assert _merge_lora_adapters(holder) is False
+        assert _merge_lora_adapters(cast(ASRModel, holder)) is False
         assert holder.language_model is original
 
 
@@ -279,7 +305,9 @@ class TestUseSdpaWhereSafe:
     """
 
     @staticmethod
-    def _holder(loaded_impl: str, requested: str = "sdpa"):
+    def _holder(
+        loaded_impl: str, requested: str = "sdpa"
+    ) -> tuple[types.SimpleNamespace, list[str]]:
         calls: list[str] = []
         language_model = types.SimpleNamespace(
             config=types.SimpleNamespace(_attn_implementation=loaded_impl),
@@ -294,49 +322,65 @@ class TestUseSdpaWhereSafe:
         return holder, calls
 
     @pytest.fixture
-    def on_mps(self, monkeypatch):
+    def on_mps(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
 
     @staticmethod
-    def _set_sliding_window(monkeypatch, value: bool):
+    def _set_sliding_window(monkeypatch: pytest.MonkeyPatch, value: bool) -> None:
+        def has_sliding_window(_model_id: str) -> bool:
+            return value
+
         monkeypatch.setattr(
-            "tiny_audio.asr_modeling._has_sliding_window_attention", lambda _model_id: value
+            "tiny_audio.asr_modeling._has_sliding_window_attention", has_sliding_window
         )
 
-    def test_corrects_a_stale_eager_decoder_to_sdpa(self, monkeypatch, on_mps):
+    def test_corrects_a_stale_eager_decoder_to_sdpa(
+        self, monkeypatch: pytest.MonkeyPatch, on_mps: None
+    ) -> None:
         self._set_sliding_window(monkeypatch, False)
         holder, calls = self._holder("eager")
 
-        _use_sdpa_where_safe(holder)
+        _use_sdpa_where_safe(cast(ASRModel, holder))
 
         assert calls == ["sdpa"]
 
-    def test_leaves_a_sliding_window_model_on_eager(self, monkeypatch, on_mps):
+    def test_leaves_a_sliding_window_model_on_eager(
+        self, monkeypatch: pytest.MonkeyPatch, on_mps: None
+    ) -> None:
         """Metal's sdpa returns wrong results for cached decode against that mask."""
         self._set_sliding_window(monkeypatch, True)
         holder, calls = self._holder("eager")
 
-        _use_sdpa_where_safe(holder)
+        _use_sdpa_where_safe(cast(ASRModel, holder))
 
         assert calls == []
 
-    def test_is_a_noop_when_load_already_resolved_correctly(self, monkeypatch, on_mps):
+    def test_is_a_noop_when_load_already_resolved_correctly(
+        self, monkeypatch: pytest.MonkeyPatch, on_mps: None
+    ) -> None:
         """--local-code already gets this right; re-applying must not churn the model."""
         self._set_sliding_window(monkeypatch, False)
         holder, calls = self._holder("sdpa")
 
-        _use_sdpa_where_safe(holder)
+        _use_sdpa_where_safe(cast(ASRModel, holder))
 
         assert calls == []
+
+
+def _no_pcm(_a: object) -> bytes:
+    return b""
 
 
 class TestStreamingRetry:
     """AssemblyAIStreamingEvaluator retries only on transient stream close codes."""
 
     @pytest.fixture
-    def evaluator(self, monkeypatch):
+    def evaluator(self, monkeypatch: pytest.MonkeyPatch) -> AssemblyAIStreamingEvaluator:
         # tenacity sleeps through time.sleep; skip the backoff in tests.
-        monkeypatch.setattr("tenacity.nap.time.sleep", lambda _s: None)
+        def no_sleep(_s: float) -> None:
+            return None
+
+        monkeypatch.setattr("tenacity.nap.time.sleep", no_sleep)
         return AssemblyAIStreamingEvaluator(api_key="test")
 
     @staticmethod
@@ -346,43 +390,49 @@ class TestStreamingRetry:
             exc.streaming_code = code
         return exc
 
-    def test_transient_close_code_is_retried(self, evaluator, monkeypatch):
-        calls = []
+    def test_transient_close_code_is_retried(
+        self, evaluator: AssemblyAIStreamingEvaluator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[int] = []
 
-        def run_session(_pcm):
+        def run_session(_pcm: bytes) -> tuple[str, float]:
             calls.append(1)
             if len(calls) < 3:
                 raise self._stream_error(1013)
             return "hello", 0.5
 
-        monkeypatch.setattr(evaluator, "_prepare_pcm", lambda _a: b"")
+        monkeypatch.setattr(evaluator, "_prepare_pcm", _no_pcm)
         monkeypatch.setattr(evaluator, "_run_session", run_session)
 
         assert evaluator.transcribe(object()) == ("hello", 0.5, None)
         assert len(calls) == 3
 
-    def test_non_retryable_error_is_raised_immediately(self, evaluator, monkeypatch):
-        calls = []
+    def test_non_retryable_error_is_raised_immediately(
+        self, evaluator: AssemblyAIStreamingEvaluator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[int] = []
 
-        def run_session(_pcm):
+        def run_session(_pcm: bytes) -> tuple[str, float]:
             calls.append(1)
             raise self._stream_error(None)
 
-        monkeypatch.setattr(evaluator, "_prepare_pcm", lambda _a: b"")
+        monkeypatch.setattr(evaluator, "_prepare_pcm", _no_pcm)
         monkeypatch.setattr(evaluator, "_run_session", run_session)
 
         with pytest.raises(RuntimeError, match="closed with None"):
             evaluator.transcribe(object())
         assert len(calls) == 1
 
-    def test_gives_up_after_max_retries(self, evaluator, monkeypatch):
-        calls = []
+    def test_gives_up_after_max_retries(
+        self, evaluator: AssemblyAIStreamingEvaluator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[int] = []
 
-        def run_session(_pcm):
+        def run_session(_pcm: bytes) -> tuple[str, float]:
             calls.append(1)
             raise self._stream_error(4029)
 
-        monkeypatch.setattr(evaluator, "_prepare_pcm", lambda _a: b"")
+        monkeypatch.setattr(evaluator, "_prepare_pcm", _no_pcm)
         monkeypatch.setattr(evaluator, "_run_session", run_session)
 
         with pytest.raises(RuntimeError, match="closed with 4029"):

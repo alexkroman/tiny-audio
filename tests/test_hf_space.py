@@ -15,10 +15,10 @@ from scripts.deploy.hf_space import extract_repo_id
         ("https://huggingface.co/spaces/user/space/tree/main", "user/space"),
     ],
 )
-def test_extract_repo_id(given, expected):
+def test_extract_repo_id(given: str, expected: str) -> None:
     assert extract_repo_id(given) == expected
 
 
-def test_extract_repo_id_rejects_non_space_urls():
+def test_extract_repo_id_rejects_non_space_urls() -> None:
     with pytest.raises(typer.BadParameter, match="Not a Space"):
         extract_repo_id("https://huggingface.co/user/model")
