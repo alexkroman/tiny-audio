@@ -3,7 +3,6 @@
 from typing import cast
 from unittest.mock import MagicMock
 
-import numpy as np
 import pytest
 import torch
 
@@ -38,14 +37,14 @@ class TestStackPromptRows:
     def test_uniform_rows_are_stacked(self) -> None:
         proc = make_processor()
         ids, mask = proc._stack_prompt_rows([torch.tensor([1, 2]), torch.tensor([3, 4])])
-        assert np.asarray(ids).tolist() == [[1, 2], [3, 4]]
-        assert np.asarray(mask).tolist() == [[1, 1], [1, 1]]
+        assert ids.tolist() == [[1, 2], [3, 4]]
+        assert mask.tolist() == [[1, 1], [1, 1]]
 
     def test_ragged_rows_use_pad_token(self) -> None:
         proc = make_processor(pad_token_id=9)
         ids, mask = proc._stack_prompt_rows([torch.tensor([1]), torch.tensor([3, 4, 5])])
-        assert np.asarray(ids).tolist() == [[9, 9, 1], [3, 4, 5]]
-        assert np.asarray(mask).tolist() == [[0, 0, 1], [1, 1, 1]]
+        assert ids.tolist() == [[9, 9, 1], [3, 4, 5]]
+        assert mask.tolist() == [[0, 0, 1], [1, 1, 1]]
         assert ids.dtype == torch.long
 
     def test_missing_pad_token_falls_back_to_eos(self) -> None:
@@ -92,13 +91,13 @@ class TestRenderPrompt:
     def test_batch_encoding_return_is_unwrapped(self) -> None:
         proc = make_processor(template_return={"input_ids": torch.tensor([[4, 5, 6]])})
         row = proc._render_prompt(1, None)
-        assert np.asarray(row).tolist() == [4, 5, 6]
+        assert row.tolist() == [4, 5, 6]
         assert row.dtype == torch.long
 
     def test_one_dimensional_return_is_kept(self) -> None:
         proc = make_processor(template_return=torch.tensor([7, 8], dtype=torch.int32))
         row = proc._render_prompt(1, None)
-        assert np.asarray(row).tolist() == [7, 8]
+        assert row.tolist() == [7, 8]
         assert row.dtype == torch.long
 
 

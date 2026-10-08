@@ -13,7 +13,7 @@ from typing import Any, cast
 import pytest
 import torch
 from torch import nn
-from transformers import PreTrainedModel, TrainingArguments
+from transformers import TrainingArguments
 
 from scripts.train import ASRTrainer
 from tiny_audio.asr_config import ASRConfig
@@ -73,15 +73,6 @@ def _group_of(optimizer: torch.optim.Optimizer, tensor: torch.Tensor) -> dict[st
     raise AssertionError(msg)
 
 
-def _input_embedding(lm: PreTrainedModel) -> torch.Tensor:
-    return cast(nn.Embedding, lm.get_input_embeddings()).weight
-
-
-def _output_embedding(lm: PreTrainedModel) -> torch.Tensor:
-    head = lm.get_output_embeddings()
-    return cast(nn.Linear, head).weight
-
-
 def _named_param(
     model: torch.nn.Module, predicate: Callable[[str], bool]
 ) -> tuple[str, torch.nn.Parameter]:
@@ -105,20 +96,22 @@ class TestEmbeddingWeightDecay:
     def test_embedding_is_tied_in_this_fixture(self, joint_asr_model: ASRModel) -> None:
         """Guard: if tying ever breaks, the test below stops being meaningful."""
         lm = joint_asr_model.language_model
-        assert _input_embedding(lm) is _output_embedding(lm)
+        embed = cast(nn.Embedding, lm.get_input_embeddings())
+        head = cast(nn.Linear, lm.get_output_embeddings())
+        assert embed.weight is head.weight
 
     def test_embed_tokens_is_not_decayed(
         self, joint_asr_model: ASRModel, optimizer: torch.optim.Optimizer
     ) -> None:
-        embed = _input_embedding(joint_asr_model.language_model)
-        assert _group_of(optimizer, embed)["weight_decay"] == 0.0
+        embed = cast(nn.Embedding, joint_asr_model.language_model.get_input_embeddings())
+        assert _group_of(optimizer, embed.weight)["weight_decay"] == 0.0
 
     def test_embed_tokens_still_gets_the_decoder_lr(
         self, joint_asr_model: ASRModel, optimizer: torch.optim.Optimizer
     ) -> None:
         """No-decay must not cost the embedding its component LR routing."""
-        embed = _input_embedding(joint_asr_model.language_model)
-        assert _group_of(optimizer, embed)["lr"] == pytest.approx(2e-5)
+        embed = cast(nn.Embedding, joint_asr_model.language_model.get_input_embeddings())
+        assert _group_of(optimizer, embed.weight)["lr"] == pytest.approx(2e-5)
 
     def test_exclusion_survives_output_head_traversal_order(
         self, joint_asr_model: ASRModel, optimizer: torch.optim.Optimizer
@@ -133,7 +126,9 @@ class TestEmbeddingWeightDecay:
         first; identity matching is order-invariant.
         """
         lm = joint_asr_model.language_model
-        for tensor in (_input_embedding(lm), _output_embedding(lm)):
+        embed = cast(nn.Embedding, lm.get_input_embeddings())
+        head = cast(nn.Linear, lm.get_output_embeddings())
+        for tensor in (embed.weight, head.weight):
             assert _group_of(optimizer, tensor)["weight_decay"] == 0.0
 
 

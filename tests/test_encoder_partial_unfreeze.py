@@ -31,7 +31,7 @@ class FakeBlock(nn.Module):
         self.lin = nn.Linear(dim, dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return cast(torch.Tensor, self.lin(x))
+        return self.lin(x)
 
 
 class FakeGraniteEncoder(nn.Module):
@@ -48,7 +48,7 @@ class FakeGraniteEncoder(nn.Module):
         x = self.input_linear(x)
         for layer in self.layers:
             x = layer(x)
-        return cast(torch.Tensor, self.out(self.out_mid(x)))
+        return self.out(self.out_mid(x))
 
 
 @pytest.fixture

@@ -1,7 +1,7 @@
 """Pytest configuration and fixtures."""
 
 import os
-from typing import Any, Protocol, TypedDict, cast
+from typing import Any, TypedDict
 from unittest.mock import MagicMock, NonCallableMock
 
 import pytest
@@ -168,27 +168,8 @@ def lora_asr_model(lora_asr_config: ASRConfig) -> ASRModel:
 
 
 # =============================================================================
-# ASRModel Test Utilities - typed accessors and stubs for test_asr_modeling.py
+# ASRModel Test Utilities - stubs for test_asr_modeling.py
 # =============================================================================
-
-
-class GenerationSettings(Protocol):
-    """The GenerationConfig fields the ASR tests read, typed for strict mode."""
-
-    eos_token_id: list[int] | None
-    no_repeat_ngram_size: int
-
-
-def generation_settings(model: ASRModel) -> GenerationSettings:
-    return model.generation_config
-
-
-def eos_ids(model: ASRModel) -> list[int]:
-    return cast(list[int], generation_settings(model).eos_token_id)
-
-
-def input_embedding_rows(model: ASRModel) -> int:
-    return cast(torch.nn.Embedding, model.language_model.get_input_embeddings()).weight.shape[0]
 
 
 def gemma_decode_loop_stub() -> Any:

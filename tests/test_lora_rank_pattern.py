@@ -14,13 +14,13 @@ silent: the config looks conservative, the checkpoint loads, and the scale is
 wrong. So the scale assertion here matters more than the shape one.
 """
 
-from collections.abc import Iterator
-from typing import Any, Protocol, cast
+from typing import Any
 
 import pytest
 import torch
 from conftest import stub
 from peft import LoraConfig, get_peft_model
+from peft.tuners.lora import LoraLayer
 from torch import nn
 from transformers import PretrainedConfig, PreTrainedModel
 
@@ -57,14 +57,6 @@ class FakeDecoder(PreTrainedModel):
 TARGETS = ["in_proj_a", "in_proj_b", "in_proj_qkv", "out_proj"]
 
 
-class _LoraAdapter(Protocol):
-    """The per-adapter dicts a PEFT LoRA layer carries (unannotated in peft)."""
-
-    r: dict[str, int]
-    lora_alpha: dict[str, float]
-    scaling: dict[str, float]
-
-
 def _identity_peft(model: nn.Module, _config: object) -> nn.Module:
     return model
 
@@ -72,11 +64,10 @@ def _identity_peft(model: nn.Module, _config: object) -> nn.Module:
 def _adapters(model: nn.Module) -> dict[str, tuple[int, float, float]]:
     """Map leaf module name -> (r, alpha, scaling) for layer 0's adapters."""
     out: dict[str, tuple[int, float, float]] = {}
-    for name, mod in cast(Iterator[tuple[str, nn.Module]], model.named_modules()):
-        if hasattr(mod, "lora_A") and ".layers.0." in f".{name}.":
+    for name, mod in model.named_modules():
+        if isinstance(mod, LoraLayer) and ".layers.0." in f".{name}.":
             leaf = name.split(".")[-1]
-            lora = cast(_LoraAdapter, mod)
-            out[leaf] = (lora.r["default"], lora.lora_alpha["default"], lora.scaling["default"])
+            out[leaf] = (mod.r["default"], mod.lora_alpha["default"], mod.scaling["default"])
     return out
 
 

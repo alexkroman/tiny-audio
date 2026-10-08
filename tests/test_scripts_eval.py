@@ -7,7 +7,7 @@ are in test_eval_audio.py to avoid duplication.
 import types
 from collections.abc import Callable
 from pathlib import Path
-from typing import TypedDict, Unpack, cast
+from typing import TypedDict, cast
 
 import pytest
 import torch
@@ -42,27 +42,10 @@ class _DtypeOverrides(TypedDict):
     encoder_dtype: str
 
 
-class _ConfigOverrides(TypedDict, total=False):
-    """`ASRConfig.from_pretrained` overrides these tests pass."""
-
-    dtype: torch.dtype
-    model_dtype: str
-    projector_dtype: str
-    encoder_dtype: str
-
-
 class _StreamClosedError(RuntimeError):
     """A stream-close error carrying the close code the SDK attaches."""
 
     streaming_code: int
-
-
-def _save_config(config: ASRConfig, path: Path) -> None:
-    config.save_pretrained(path)
-
-
-def _load_config(path: Path, **kwargs: Unpack[_ConfigOverrides]) -> ASRConfig:
-    return ASRConfig.from_pretrained(path, **kwargs)
 
 
 class TestDatasetConfig:
@@ -206,13 +189,13 @@ class TestModelDtypeIsTheWorkingOverride:
     """
 
     def test_dtype_kwarg_does_not_change_model_dtype(self, tmp_path: Path) -> None:
-        _save_config(ASRConfig(model_dtype="float32"), tmp_path)
-        cfg = _load_config(tmp_path, dtype=torch.bfloat16)
+        ASRConfig(model_dtype="float32").save_pretrained(tmp_path)
+        cfg = ASRConfig.from_pretrained(tmp_path, dtype=torch.bfloat16)
         assert cfg.model_dtype == "float32"
 
     def test_model_dtype_kwarg_does_change_it(self, tmp_path: Path) -> None:
-        _save_config(ASRConfig(model_dtype="float32"), tmp_path)
-        cfg = _load_config(tmp_path, model_dtype="bfloat16")
+        ASRConfig(model_dtype="float32").save_pretrained(tmp_path)
+        cfg = ASRConfig.from_pretrained(tmp_path, model_dtype="bfloat16")
         assert cfg.model_dtype == "bfloat16"
 
 
@@ -228,10 +211,9 @@ class TestInferenceDtypeFieldsAllLand:
     """
 
     def test_all_three_fields_are_overridden_together(self, tmp_path: Path) -> None:
-        _save_config(
-            ASRConfig(model_dtype="bfloat16", projector_dtype="float32", encoder_dtype="float32"),
-            tmp_path,
-        )
+        ASRConfig(
+            model_dtype="bfloat16", projector_dtype="float32", encoder_dtype="float32"
+        ).save_pretrained(tmp_path)
 
         overrides: _DtypeOverrides = {
             "model_dtype": "bfloat16",
@@ -239,18 +221,17 @@ class TestInferenceDtypeFieldsAllLand:
             "encoder_dtype": "bfloat16",
         }
         assert set(overrides) == set(DTYPE_CONFIG_FIELDS)
-        cfg = _load_config(tmp_path, **overrides)
+        cfg = ASRConfig.from_pretrained(tmp_path, **overrides)
 
         assert [getattr(cfg, f) for f in DTYPE_CONFIG_FIELDS] == ["bfloat16"] * 3
 
     def test_model_dtype_alone_leaves_the_encoder_in_float32(self, tmp_path: Path) -> None:
         """The regression itself, so the constant cannot be quietly narrowed back."""
-        _save_config(
-            ASRConfig(model_dtype="bfloat16", projector_dtype="float32", encoder_dtype="float32"),
-            tmp_path,
-        )
+        ASRConfig(
+            model_dtype="bfloat16", projector_dtype="float32", encoder_dtype="float32"
+        ).save_pretrained(tmp_path)
 
-        cfg = _load_config(tmp_path, model_dtype="bfloat16")
+        cfg = ASRConfig.from_pretrained(tmp_path, model_dtype="bfloat16")
 
         assert cfg.encoder_dtype == "float32"
         assert cfg.projector_dtype == "float32"

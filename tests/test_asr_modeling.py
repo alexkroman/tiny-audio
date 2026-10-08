@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
-from conftest import eos_ids, gemma_decode_loop_stub, generation_settings, input_embedding_rows
+from conftest import gemma_decode_loop_stub
 from peft.tuners.lora import LoraLayer
 from torch.nn.modules.module import _IncompatibleKeys
 from transformers.modeling_utils import PreTrainedModel
@@ -35,7 +35,6 @@ from tiny_audio.asr_modeling import (
     _patch_gemma_decode_loop,
 )
 from tiny_audio.asr_processing import ASRProcessor
-from tiny_audio.asr_types import LoadStateDictResult
 from tiny_audio.projectors import MLPAudioProjector
 
 if TYPE_CHECKING:
@@ -85,14 +84,14 @@ class TestTokenizerInit:
         assert embed.num_embeddings >= len(base_asr_model.tokenizer)
 
     def test_generation_config_eos_synced(self, base_asr_model: ASRModel) -> None:
-        eos_ids = generation_settings(base_asr_model).eos_token_id
+        eos_ids = base_asr_model.generation_config.eos_token_id
         assert eos_ids is None or all(e is not None for e in eos_ids)
 
     def test_generation_config_carries_no_repeat_ngram_size(self, base_asr_model: ASRModel) -> None:
         # `generate()` consults the GenerationConfig only; a value that lives
         # on ASRConfig alone is inert, which is how the loop guard shipped
         # disabled to the Hub.
-        no_repeat_ngram_size = generation_settings(base_asr_model).no_repeat_ngram_size
+        no_repeat_ngram_size = base_asr_model.generation_config.no_repeat_ngram_size
         assert no_repeat_ngram_size == base_asr_model.config.no_repeat_ngram_size
         assert no_repeat_ngram_size == 12
 
@@ -591,7 +590,7 @@ class TestEosTokenResolution:
         # unk rather than returning None, which is how Gemma ended up with
         # eos_token_id=[unk, unk] and never stopped generating.
         tok = base_asr_model.tokenizer
-        for token_id in eos_ids(base_asr_model):
+        for token_id in base_asr_model.generation_config.eos_token_id:
             assert tok.convert_ids_to_tokens(token_id) != "<end_of_turn>"
 
     def test_keeps_endoftext_even_though_it_is_also_unk(self, base_asr_model: ASRModel) -> None:
@@ -599,13 +598,15 @@ class TestEosTokenResolution:
         # `id == unk_token_id` would drop a legitimate stop token.
         tok = base_asr_model.tokenizer
         endoftext = tok.convert_tokens_to_ids("<|endoftext|>")
-        assert endoftext in eos_ids(base_asr_model)
+        assert endoftext in base_asr_model.generation_config.eos_token_id
 
     def test_includes_tokenizer_eos(self, base_asr_model: ASRModel) -> None:
-        assert base_asr_model.tokenizer.eos_token_id in eos_ids(base_asr_model)
+        assert (
+            base_asr_model.tokenizer.eos_token_id in base_asr_model.generation_config.eos_token_id
+        )
 
     def test_is_non_empty(self, base_asr_model: ASRModel) -> None:
-        assert eos_ids(base_asr_model)
+        assert base_asr_model.generation_config.eos_token_id
 
     def test_includes_the_templates_own_turn_terminator(self, base_asr_model: ASRModel) -> None:
         """The token the chat template appends after assistant content must stop generation.
@@ -631,7 +632,7 @@ class TestEosTokenResolution:
         )
         tail_ids = tok(rendered.split(sentinel)[-1], add_special_tokens=False)["input_ids"]
         assert tail_ids, "template appends nothing after assistant content"
-        assert tail_ids[0] in eos_ids(base_asr_model)
+        assert tail_ids[0] in base_asr_model.generation_config.eos_token_id
 
     def test_derives_a_terminator_the_name_probes_do_not_know(
         self, base_asr_model: ASRModel, monkeypatch: pytest.MonkeyPatch
@@ -690,7 +691,7 @@ class TestStateDictTrainableModules:
 
         # The saved keys must be the ones load_state_dict expects, or the
         # round-trip silently drops them under strict=False.
-        result = cast(LoadStateDictResult, model.load_state_dict(keys, strict=False))
+        result = model.load_state_dict(keys, strict=False)
         assert result.unexpected_keys == []
 
     def test_encoder_keys_cover_trainable_encoder_params(self) -> None:
@@ -901,12 +902,14 @@ class TestVocabPadding:
     """
 
     def test_embedding_rows_are_aligned(self, base_asr_model: ASRModel) -> None:
-        rows = input_embedding_rows(base_asr_model)
+        embed = cast(torch.nn.Embedding, base_asr_model.language_model.get_input_embeddings())
+        rows = embed.weight.shape[0]
         assert rows % VOCAB_PAD_MULTIPLE == 0
 
     def test_table_still_covers_every_token(self, base_asr_model: ASRModel) -> None:
         """Padding must grow the table, never truncate below the tokenizer."""
-        rows = input_embedding_rows(base_asr_model)
+        embed = cast(torch.nn.Embedding, base_asr_model.language_model.get_input_embeddings())
+        rows = embed.weight.shape[0]
         assert rows >= len(base_asr_model.tokenizer)
         assert base_asr_model.audio_token_id < rows
 
@@ -916,7 +919,8 @@ class TestVocabPadding:
         They are read independently at generate time and by save_pretrained, so
         a mismatch surfaces as a shape error at checkpoint save rather than here.
         """
-        rows = input_embedding_rows(base_asr_model)
+        embed = cast(torch.nn.Embedding, base_asr_model.language_model.get_input_embeddings())
+        rows = embed.weight.shape[0]
         output_embeddings = cast(
             torch.nn.Linear,
             base_asr_model.language_model.get_output_embeddings(),
