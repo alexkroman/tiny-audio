@@ -158,10 +158,7 @@ def _safetensors_params(repo_id: str, exclude_prefixes: tuple[str, ...] = ()) ->
             for name, info in f.tensors.items():
                 if any(name.startswith(p) or f".{p}" in name for p in exclude_prefixes):
                     continue
-                numel = 1
-                for dim in info.shape:
-                    numel *= dim
-                counts[info.dtype] = counts.get(info.dtype, 0) + numel
+                counts[info.dtype] = counts.get(info.dtype, 0) + info.parameter_count
     # Ignore integer buffers (rotary caches, position ids); they aren't params.
     total = sum(n for dtype, n in counts.items() if not dtype.startswith("I"))
     dominant = max(counts.items(), key=lambda kv: kv[1])[0] if counts else "?"

@@ -29,6 +29,7 @@ from typing import Annotated, cast
 import torch
 import typer
 from omegaconf import OmegaConf
+from torch.nn.utils.rnn import pad_sequence
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm
 from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
@@ -254,15 +255,14 @@ def synthetic_batch(
         samples_input_ids.append(list(full_ids))
         samples_labels.append(sample_labels)
 
-    max_len = max(len(x) for x in samples_input_ids)
-    pad_id = tok.pad_token_id
-    input_ids = torch.full((batch_size, max_len), pad_id, dtype=torch.long)
-    attention_mask = torch.zeros((batch_size, max_len), dtype=torch.long)
-    labels = torch.full((batch_size, max_len), -100, dtype=torch.long)
-    for i, (ids, lab) in enumerate(zip(samples_input_ids, samples_labels, strict=True)):
-        input_ids[i, : len(ids)] = torch.tensor(ids)
-        attention_mask[i, : len(ids)] = 1
-        labels[i, : len(lab)] = torch.tensor(lab)
+    ids_t = [torch.tensor(ids, dtype=torch.long) for ids in samples_input_ids]
+    input_ids = pad_sequence(ids_t, batch_first=True, padding_value=tok.pad_token_id)
+    attention_mask = pad_sequence([torch.ones_like(t) for t in ids_t], batch_first=True)
+    labels = pad_sequence(
+        [torch.tensor(lab, dtype=torch.long) for lab in samples_labels],
+        batch_first=True,
+        padding_value=-100,
+    )
 
     return {
         "input_ids": input_ids,
