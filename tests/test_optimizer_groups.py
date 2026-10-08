@@ -8,6 +8,11 @@ prediction over tens of thousands of steps.
 """
 
 import pytest
+from transformers import TrainingArguments
+
+from scripts.train import ASRTrainer
+from tiny_audio.asr_config import ASRConfig
+from tiny_audio.asr_modeling import ASRModel
 
 
 @pytest.fixture(scope="module")
@@ -19,9 +24,6 @@ def joint_asr_model():
     the optimizer entirely — there would be nothing to assert about decoder
     weight-decay routing.
     """
-    from tiny_audio.asr_config import ASRConfig
-    from tiny_audio.asr_modeling import ASRModel
-
     config = ASRConfig(
         audio_model_id="openai/whisper-tiny",
         text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
@@ -35,10 +37,6 @@ def joint_asr_model():
 
 @pytest.fixture(scope="module")
 def optimizer(joint_asr_model, tmp_path_factory):
-    from transformers import TrainingArguments
-
-    from scripts.train import ASRTrainer
-
     args = TrainingArguments(
         output_dir=str(tmp_path_factory.mktemp("optimizer_groups")),
         learning_rate=1e-3,
@@ -64,14 +62,16 @@ def _group_of(optimizer, tensor):
     for group in optimizer.param_groups:
         if any(p is tensor for p in group["params"]):
             return group
-    raise AssertionError("parameter is not in any optimizer group")
+    msg = "parameter is not in any optimizer group"
+    raise AssertionError(msg)
 
 
 def _named_param(model, predicate):
     for name, param in model.named_parameters():
         if param.requires_grad and predicate(name):
             return name, param
-    raise AssertionError("no trainable parameter matched the predicate")
+    msg = "no trainable parameter matched the predicate"
+    raise AssertionError(msg)
 
 
 class TestEmbeddingWeightDecay:

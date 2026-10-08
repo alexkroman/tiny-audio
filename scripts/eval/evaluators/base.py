@@ -1,7 +1,9 @@
 """Base evaluator classes and shared utilities."""
 
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import assemblyai as aai
 import attrs
 import jiwer
 from rich.console import Console
@@ -9,6 +11,7 @@ from rich.console import Console
 from scripts.eval.audio import TextNormalizer
 from scripts.eval.constants import ASSEMBLYAI_MODELS
 from scripts.eval.formatting import compute_formatting_metrics
+from scripts.eval.speaker_metrics import has_speakers, plain_text, speaker_metrics
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 console = Console()
@@ -18,13 +21,12 @@ def setup_assemblyai(
     api_key: str, model: str, speaker_labels: bool = False, base_url: str | None = None
 ):
     """Initialize AssemblyAI transcriber with given model."""
-    import assemblyai as aai
-
     aai.settings.api_key = api_key
     if base_url:
         aai.settings.base_url = base_url
     if model not in ASSEMBLYAI_MODELS:
-        raise ValueError(f"Invalid model '{model}'. Choose from: {ASSEMBLYAI_MODELS}")
+        msg = f"Invalid model '{model}'. Choose from: {ASSEMBLYAI_MODELS}"
+        raise ValueError(msg)
     config = aai.TranscriptionConfig(
         speech_models=[model],
         speaker_labels=speaker_labels,
@@ -68,8 +70,6 @@ def _scoring_text(text: str) -> str:
     for attribution by cpWER in `compute_metrics`; a system that emits no
     speaker tokens is scored on the same words.
     """
-    from scripts.eval.speaker_metrics import has_speakers, plain_text
-
     return plain_text(text) if has_speakers(text) else text
 
 
@@ -247,8 +247,6 @@ class Evaluator:
 
     def _evaluate_parallel(self, samples: list[dict]) -> None:
         """Run parallel evaluation using thread pool."""
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
         console.print(f"[bold]Running parallel evaluation with {self.num_workers} workers[/bold]")
 
         results_map: dict[int, EvalResult] = {}
@@ -329,8 +327,6 @@ class Evaluator:
         cpWER - WER, what speaker mistakes cost on top of recognition. Rates
         in percent, like `wer`.
         """
-        from scripts.eval.speaker_metrics import has_speakers, speaker_metrics
-
         if not any(has_speakers(r.reference) for r in self.results):
             return {}
         scores = speaker_metrics(

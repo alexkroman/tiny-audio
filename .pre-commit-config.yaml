@@ -1,3 +1,4 @@
+---
 repos:
   - repo: local
     hooks:
@@ -5,12 +6,5 @@ repos:
         name: precommit quality gate
         entry: poetry run ta dev precommit
         language: system
-        pass_filenames: false
-        stages: [pre-commit]
-      - id: swift-format
-        name: swift-format lint
-        entry: xcrun swift-format lint --strict --recursive swift/Sources swift/Tests
-        language: system
-        types: [swift]
         pass_filenames: false
         stages: [pre-commit]

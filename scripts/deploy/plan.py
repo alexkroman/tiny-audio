@@ -18,11 +18,27 @@ number can be argued with rather than trusted blindly.
 
 from __future__ import annotations
 
-import functools
+import importlib
 import json
+import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Annotated
 
 import typer
+from huggingface_hub import dataset_info, get_safetensors_metadata, model_info
+from hydra import compose, initialize_config_dir
+from tenacity import RetryError, retry, retry_if_result, stop_after_delay, wait_fixed
+
+from scripts.deploy import gpu_catalog
+from scripts.train_config import register_configs
+from scripts.utils import get_project_root
+
+if TYPE_CHECKING:
+    from transformers import AutoConfig
+
+    from tiny_audio.asr_config import ASRConfig
+    from tiny_audio.projectors import MLPAudioProjector
 
 GIB = 1024**3
 DTYPE_BYTES = {"float32": 4, "float16": 2, "bfloat16": 2}
@@ -130,15 +146,14 @@ def _safetensors_params(repo_id: str, exclude_prefixes: tuple[str, ...] = ()) ->
     prefixes, and for a checkpoint that IS the audio tower that would zero out
     the thing being measured.
     """
-    from huggingface_hub import get_safetensors_metadata
-
     meta = get_safetensors_metadata(repo_id)
+    counts: dict[str, int]
     if not exclude_prefixes:
-        counts = meta.parameter_count
+        counts = dict(meta.parameter_count.items())
     else:
         # parameter_count is pre-aggregated by dtype, so filtering by name
         # means re-deriving it from the per-tensor headers.
-        counts: dict[str, int] = {}
+        counts = {}
         for f in meta.files_metadata.values():
             for name, info in f.tensors.items():
                 if any(name.startswith(p) or f".{p}" in name for p in exclude_prefixes):
@@ -180,8 +195,6 @@ def _lora_trainable_params(repo_id: str, rank: int, target_modules) -> int:
     Validated against peft 0.20.0 on the real checkpoint: r=64 / "all-linear"
     on Qwen3.5-2B gives 67.28M over 186 matrices here and 67.28M there.
     """
-    from huggingface_hub import get_safetensors_metadata
-
     meta = get_safetensors_metadata(repo_id)
     shapes = {
         name: info.shape for f in meta.files_metadata.values() for name, info in f.tensors.items()
@@ -237,10 +250,8 @@ def _repo_weight_bytes(repo_id: str, repo_type: str = "model", name: str | None 
     we keep only files whose path mentions it. Falls back to the full repo when
     nothing matches, since a silent zero would be worse than an overestimate.
     """
-    from huggingface_hub import dataset_info, model_info
-
     info = (model_info if repo_type == "model" else dataset_info)(repo_id, files_metadata=True)
-    siblings = [s for s in info.siblings if (s.size or 0) > 0]
+    siblings = [s for s in (info.siblings or []) if (s.size or 0) > 0]
     if name:
         scoped = [s for s in siblings if name.lower() in s.rfilename.lower()]
         if scoped:
@@ -249,11 +260,9 @@ def _repo_weight_bytes(repo_id: str, repo_type: str = "model", name: str | None 
 
 
 def _load_cfg(experiment: str, overrides: list[str]):
-    from hydra import compose, initialize_config_dir
-
-    from scripts import train_config  # noqa: F401  (registers the `base_config` schema)
-    from scripts.utils import get_project_root
-
+    # Registers the `base_config` structured-config schema the experiment
+    # configs compose against (idempotent; train_config also does it on import).
+    register_configs()
     configs = get_project_root() / "configs"
     with initialize_config_dir(config_dir=str(configs), version_base=None):
         return compose(config_name="config", overrides=[f"+experiments={experiment}", *overrides])
@@ -278,10 +287,14 @@ def _hidden(cfg_obj) -> int | None:
 
 
 def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
-    from transformers import AutoConfig
-
-    from tiny_audio.asr_config import ASRConfig
-    from tiny_audio.projectors import PROJECTOR_CLASSES
+    # Imported lazily: transformers + tiny_audio cost several seconds, which
+    # every `ta runpod` command would otherwise pay because runpod.py imports
+    # this module.
+    auto_config: type[AutoConfig] = importlib.import_module("transformers").AutoConfig
+    asr_config_cls: type[ASRConfig] = importlib.import_module("tiny_audio.asr_config").ASRConfig
+    projector_classes: dict[str, type[MLPAudioProjector]] = importlib.import_module(
+        "tiny_audio.projectors"
+    ).PROJECTOR_CLASSES
 
     cfg = _load_cfg(experiment, overrides)
     plan = Plan()
@@ -295,7 +308,7 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
 
     # ---- encoder -----------------------------------------------------------
     enc_params, enc_dtype = _safetensors_params(audio_id)
-    enc_cfg_probe = AutoConfig.from_pretrained(audio_id)
+    enc_cfg_probe = auto_config.from_pretrained(audio_id)
     enc_probe_inner = getattr(enc_cfg_probe, "encoder_config", None) or enc_cfg_probe
     enc_depth = int(getattr(enc_probe_inner, "num_hidden_layers", 0) or 0)
     enc_top_n = int(_get(train, "encoder_trainable_top_layers", 0) or 0)
@@ -335,7 +348,7 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
     # ---- decoder -----------------------------------------------------------
     dec_params, dec_dtype = _safetensors_params(text_id, _NON_LM_TOWER_PREFIXES)
     dec_trainable = not _get(train, "freeze_language_model", True)
-    dec_cfg = AutoConfig.from_pretrained(text_id)
+    dec_cfg = auto_config.from_pretrained(text_id)
     text_cfg = dec_cfg.get_text_config() if hasattr(dec_cfg, "get_text_config") else dec_cfg
     # Split the frozen vocabulary table out of the trainable decoder. The
     # freeze flag acts on an individual tensor inside the language model, so a
@@ -393,13 +406,13 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
         )
 
     # ---- projector ---------------------------------------------------------
-    enc_cfg = AutoConfig.from_pretrained(audio_id)
+    enc_cfg = auto_config.from_pretrained(audio_id)
     enc_inner = getattr(enc_cfg, "encoder_config", None) or enc_cfg
     encoder_dim = _hidden(enc_inner)
     llm_dim = _hidden(text_cfg)
     proj_params = 0
     if encoder_dim and llm_dim:
-        shim = ASRConfig(
+        shim = asr_config_cls(
             audio_model_id=audio_id,
             text_model_id=text_id,
             encoder_dim=encoder_dim,
@@ -408,7 +421,7 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
             projector_pool_stride=int(_get(cfg.model, "projector_pool_stride", 4)),
             projector_hidden_dim=cfg.model.get("projector_hidden_dim"),
         )
-        cls = PROJECTOR_CLASSES[shim.projector_type]
+        cls = projector_classes[shim.projector_type]
         proj_params = sum(p.numel() for p in cls(shim).parameters())
     else:
         plan.warnings.append("Could not resolve encoder/llm dims; projector excluded.")
@@ -506,7 +519,7 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
         top_n = int(_get(train, "encoder_trainable_top_layers", 0) or 0)
         trainable_blocks = min(top_n, enc_layers)
 
-    enc_acts = 0
+    enc_acts = 0.0
     if trainable_blocks and encoder_dim:
         enc_layers = trainable_blocks
         # The encoder's sequence is its own, NOT the decoder's `seq_len`: it is
@@ -636,7 +649,11 @@ def plan_command(
     seq_len: int = typer.Option(
         320,
         "--seq-len",
-        help="Assumed tokens per sample. Default 320 is the measured granite_qwen sequence: 237 audio tokens at the 19s collator ceiling, plus prompt and transcript. Raise it for recipes with a longer window -- the activation term is linear in this.",
+        help=(
+            "Assumed tokens per sample. Default 320 is the measured granite_qwen sequence: "
+            "237 audio tokens at the 19s collator ceiling, plus prompt and transcript. "
+            "Raise it for recipes with a longer window -- the activation term is linear in this."
+        ),
     ),
     gpu: str | None = typer.Option(
         None,
@@ -645,7 +662,7 @@ def plan_command(
     ),
     image: str = typer.Option("runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404", "--image"),
     as_json: bool = typer.Option(False, "--json", help="Machine-readable output"),
-    overrides: list[str] = typer.Argument(None, help="Extra Hydra overrides"),
+    overrides: Annotated[list[str] | None, typer.Argument(help="Extra Hydra overrides")] = None,
 ):
     """Estimate GPU memory and disk for a training config, and emit a pod command."""
     plan = build_plan(experiment, list(overrides or []), seq_len)
@@ -701,7 +718,7 @@ def plan_command(
 
     # Pick the GPU from the VRAM estimate rather than defaulting to an H100.
     # This recipe needs ~36 GiB; an 80 GB H100 is roughly 2x the card and
-    # several times the price of the smallest part that fits. `_available_gpus`
+    # several times the price of the smallest part that fits. `gpu_catalog.available_gpus`
     # returns fitting types smallest-first, which approximates cheapest-first
     # (the catalog exposes no price field).
     #
@@ -711,11 +728,12 @@ def plan_command(
     # support, and then there is nowhere to put 1.5 TiB.
     needs_volume = disk_gb > NETWORK_VOLUME_THRESHOLD_GB
     if gpu is None:
-        fitting = _available_gpus(plan.vram["recommended (x1.25)"])
+        fitting = gpu_catalog.available_gpus(plan.vram["recommended (x1.25)"])
         placeable = [
             (vram_gib, gpu_id)
             for vram_gib, gpu_id in fitting
-            if not needs_volume or _datacenters_for_gpu(gpu_id, require_network_volume=True)
+            if not needs_volume
+            or gpu_catalog.datacenters_for_gpu(gpu_id, require_network_volume=True)
         ]
         if placeable:
             vram_gib, gpu = placeable[0]
@@ -758,9 +776,11 @@ def plan_command(
         vol_name = f"tiny-audio-{experiment}"
         capped = vol_gb >= NETWORK_VOLUME_MAX_GB
 
-        dcs = _datacenters_for_gpu(gpu, require_network_volume=True)
+        dcs = gpu_catalog.datacenters_for_gpu(gpu, require_network_volume=True)
         excluded = [
-            d for d, _, _ in _datacenters_for_gpu(gpu) if d not in NETWORK_VOLUME_DATACENTERS
+            d
+            for d, _, _ in gpu_catalog.datacenters_for_gpu(gpu)
+            if d not in gpu_catalog.NETWORK_VOLUME_DATACENTERS
         ]
         if dcs:
             print(f"  Datacenters with {gpu} AND network-volume support:")
@@ -775,7 +795,7 @@ def plan_command(
                 "\n  A network volume is pinned to one datacenter and a pod can only\n"
                 "  mount a volume in its own, so both commands below use the same id.\n"
                 "  If creation is refused, the error lists the currently supported\n"
-                "  datacenters -- refresh NETWORK_VOLUME_DATACENTERS in this file.\n"
+                "  datacenters -- refresh NETWORK_VOLUME_DATACENTERS in gpu_catalog.py.\n"
             )
             dc_id = dcs[0][0]
         else:
@@ -799,9 +819,9 @@ def plan_command(
         )
         if capped:
             print(
-                f"  ! {plan.disk['recommended'] / 1024:.2f} TiB needed but a RunPod network volume\n"
-                f"    caps at {NETWORK_VOLUME_MAX_GB} GB. Cut the dataset mix, or stage sources\n"
-                f"    across runs -- this will not fit on one volume.\n"
+                f"  ! {plan.disk['recommended'] / 1024:.2f} TiB needed but a RunPod network "
+                f"volume\n    caps at {NETWORK_VOLUME_MAX_GB} GB. Cut the dataset mix, or stage "
+                "sources\n    across runs -- this will not fit on one volume.\n"
             )
         print(
             f"  Container disk stays at {CONTAINER_DISK_WITH_VOLUME_GB} GB on purpose: with the\n"
@@ -827,130 +847,6 @@ def plan_command(
     return 0
 
 
-def _available_gpus(min_vram_gib: float) -> list[tuple[int, str]]:
-    """GPUs the catalog claims are available with enough VRAM, smallest first.
-
-    Smallest-first approximates cheapest-first; `runpodctl gpu list` exposes no
-    price field. The returned order is a candidate list rather than a choice,
-    because `available` is not a promise -- see `provision`.
-    """
-    import subprocess
-
-    out = subprocess.run(
-        ["runpodctl", "gpu", "list", "-o", "json"],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    ).stdout
-    catalog = json.loads(out[out.index("[") :])
-    fitting = [
-        (g["memoryInGb"], g["gpuId"])
-        for g in catalog
-        if g.get("available") and g.get("memoryInGb", 0) >= min_vram_gib
-    ]
-    return sorted(set(fitting))
-
-
-# `runpodctl datacenter list` reports stock per GPU per datacenter. Observed
-# values are High / Medium / Low / "".
-#
-# "Low" outranks "": a reported status of any kind means the datacenter is
-# actually offering that GPU, whereas an empty string carries no stock signal
-# at all and is the weaker bet. (An earlier revision of this file had these
-# two the other way round on the theory that "Low" was an explicit scarcity
-# warning. It is not -- it is stock information, and stock information beats
-# none.) `pod create` failing with "no longer any instances" is still normal
-# on any of them; this only orders which to try first.
-_STOCK_RANK = {"High": 0, "Medium": 1, "Low": 2, "": 3}
-
-# Datacenters that actually support network volumes. This is a SEPARATE and
-# much smaller set than "datacenters that have the GPU", and nothing in
-# `runpodctl datacenter list` exposes it -- suggesting a datacenter that has
-# an H100 but no volume support gets you:
-#   create network volume: Data center "AP-IN-1" not found or does not
-#   support network volumes. Available data centers: ...
-# which is how this list was obtained (2026-09-18). The error enumerates the
-# supported set, so the cheap way to refresh it is to run
-# `runpodctl network-volume create --name x --size 1 --data-center-id NOPE`
-# and read the message; it fails without creating anything.
-#
-# Concretely, 6 of the 13 datacenters offering an H100 80GB HBM3 do NOT
-# support network volumes: AP-IN-1, CA-MTL-1, US-GA-2, US-KS-2, US-MO-1,
-# US-NE-1. Filtering matters.
-NETWORK_VOLUME_DATACENTERS = frozenset(
-    [
-        "AP-IN-2",
-        "AP-JP-1",
-        "CA-MTL-3",
-        "CA-MTL-4",
-        "EU-FR-1",
-        "EU-NL-1",
-        "EU-RO-1",
-        "EUR-IS-1",
-        "EUR-IS-3",
-        "EUR-NO-1",
-        "EUR-NO-2",
-        "US-CA-2",
-        "US-CO-1",
-        "US-IL-1",
-        "US-MO-2",
-        "US-NC-2",
-        "US-TX-3",
-    ]
-)
-
-
-@functools.cache
-def _datacenter_catalog() -> tuple:
-    """`runpodctl datacenter list`, fetched once per process.
-
-    Cached because GPU selection probes this for every candidate GPU type, and
-    shelling out ~30 times would dominate the runtime of a command that
-    otherwise only reads HTTP headers. Returns a tuple so the cache key is
-    hashable; an empty tuple means the CLI was unavailable.
-    """
-    import subprocess
-
-    try:
-        out = subprocess.run(
-            ["runpodctl", "datacenter", "list", "-o", "json"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        ).stdout
-        return tuple(json.loads(out[out.index("[") :]))
-    except Exception:
-        return ()
-
-
-def _datacenters_for_gpu(
-    gpu_id: str, require_network_volume: bool = False
-) -> list[tuple[str, str, str]]:
-    """Datacenters offering `gpu_id`, most likely to fill first.
-
-    Returns (datacenter_id, location, stock_status). A network volume is bound
-    to one datacenter and a pod can only mount a volume in its own, so the
-    volume has to be created where the GPU actually is -- picking the wrong
-    one means creating the volume, failing to place the pod, and deleting it
-    again.
-
-    With `require_network_volume`, the result is additionally filtered to
-    datacenters that support network volumes at all. That is a strictly
-    smaller set which no API field exposes; see NETWORK_VOLUME_DATACENTERS.
-    """
-    catalog = _datacenter_catalog()
-    hits = [
-        (dc["id"], dc.get("location", "?"), gpu.get("stockStatus", ""))
-        for dc in catalog
-        for gpu in dc.get("gpuAvailability", [])
-        if gpu.get("gpuId") == gpu_id
-        and (not require_network_volume or dc["id"] in NETWORK_VOLUME_DATACENTERS)
-    ]
-    return sorted(hits, key=lambda h: (_STOCK_RANK.get(h[2], 9), h[0]))
-
-
 def provision_command(
     experiment: str = typer.Option("granite_qwen_frozen", "--experiment", "-e"),
     seq_len: int = typer.Option(320, "--seq-len"),
@@ -962,7 +858,7 @@ def provision_command(
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Print the plan and candidates, create nothing"
     ),
-    overrides: list[str] = typer.Argument(None),
+    overrides: Annotated[list[str] | None, typer.Argument()] = None,
 ):
     """Size a config, then create a pod on the first GPU type that has capacity.
 
@@ -972,13 +868,10 @@ def provision_command(
     datacenter and racy, so a single hardcoded --gpu-id fails intermittently.
     This walks the fitting GPU types smallest-first until one actually comes up.
     """
-    import subprocess
-    from pathlib import Path
-
     plan = build_plan(experiment, list(overrides or []), seq_len)
     vram = plan.vram["recommended (x1.25)"]
     disk = int(plan.disk["recommended"] * 1.15) + 5
-    candidates = _available_gpus(vram)
+    candidates = gpu_catalog.available_gpus(vram)
 
     print(f"\n{experiment}: needs >= {vram:.1f} GiB VRAM, {disk} GB disk")
     # Surface the same warnings `plan` prints -- the network-volume one in
@@ -1061,9 +954,6 @@ def wait_command(
     `runtime` stays null the whole time on these images, so watching it makes a
     perfectly healthy pod look hung for the 5-10 minutes the image pull takes.
     """
-    import subprocess
-
-    from tenacity import RetryError, retry, retry_if_result, stop_after_delay, wait_fixed
 
     @retry(
         retry=retry_if_result(lambda ep: ep is None),
@@ -1071,13 +961,7 @@ def wait_command(
         wait=wait_fixed(15),
     )
     def poll() -> tuple[str, int] | None:
-        out = subprocess.run(
-            ["runpodctl", "pod", "get", pod_id, "-o", "json"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        ).stdout
+        out = gpu_catalog.runpodctl_json("pod", "get", pod_id)
         try:
             ssh = json.loads(out[out.index("{") :]).get("ssh") or {}
         except (ValueError, AttributeError):
@@ -1088,8 +972,12 @@ def wait_command(
         return None
 
     try:
-        ip, port = poll()
+        endpoint = poll()
     except RetryError:
         print(f"Pod {pod_id} exposed no SSH endpoint within {timeout_s}s.")
         raise typer.Exit(1) from None
+    # retry_if_result keeps polling while the result is None, so a return
+    # without RetryError always carries an endpoint.
+    assert endpoint is not None
+    ip, port = endpoint
     print(f"{ip} {port}")

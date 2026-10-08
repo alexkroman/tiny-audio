@@ -1,0 +1,3 @@
+# mdformat reads only this file (not pyproject.toml).
+wrap = 100
+number = false

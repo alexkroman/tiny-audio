@@ -14,7 +14,12 @@ runner = CliRunner()
 @pytest.fixture
 def calls(monkeypatch):
     seen = []
-    monkeypatch.setattr(train_cli.subprocess, "call", lambda cmd: seen.append(cmd) or 0)
+
+    def fake_call(cmd: list[str]) -> int:
+        seen.append(cmd)
+        return 0
+
+    monkeypatch.setattr(train_cli.subprocess, "call", fake_call)
     return seen
 
 

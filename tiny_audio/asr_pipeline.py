@@ -2,23 +2,29 @@
 
 import re
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
 import transformers
 from transformers.pipelines.audio_utils import ffmpeg_read
 
-try:
+if TYPE_CHECKING:
     from .alignment import QwenForcedAligner
     from .asr_modeling import ASRModel
     from .asr_processing import prepend_lead_in
     from .diarization import NemotronDiarizer
-except ImportError:
-    from alignment import QwenForcedAligner  # type: ignore[no-redef]
-    from asr_modeling import ASRModel  # type: ignore[no-redef]
-    from asr_processing import prepend_lead_in  # type: ignore[no-redef]
-    from diarization import NemotronDiarizer  # type: ignore[no-redef]
+else:
+    try:
+        from .alignment import QwenForcedAligner
+        from .asr_modeling import ASRModel
+        from .asr_processing import prepend_lead_in
+        from .diarization import NemotronDiarizer
+    except ImportError:  # flat layout on the Hub: sibling modules, no package
+        from alignment import QwenForcedAligner
+        from asr_modeling import ASRModel
+        from asr_processing import prepend_lead_in
+        from diarization import NemotronDiarizer
 
 # Re-export for backwards compatibility
 __all__ = [
@@ -93,10 +99,21 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             model=model, feature_extractor=feature_extractor, tokenizer=tokenizer, **kwargs
         )
 
-    def _sanitize_parameters(self, **kwargs):
+    def _sanitize_parameters(
+        self,
+        chunk_length_s=None,
+        stride_length_s=None,
+        ignore_warning=None,
+        decoder_kwargs=None,
+        return_timestamps=None,
+        return_language=None,
+        **kwargs,
+    ):
         """Intercept our custom parameters before parent class validates them."""
-        # Remove our custom parameters so parent doesn't see them
-        kwargs.pop("return_timestamps", None)
+        # Remove our custom parameters so parent doesn't see them.
+        # `return_timestamps` means word timestamps here (handled in __call__),
+        # not the parent's CTC/Whisper timestamps, so it is dropped too.
+        del return_timestamps
         kwargs.pop("return_speakers", None)
         kwargs.pop("num_speakers", None)
         kwargs.pop("min_speakers", None)
@@ -104,13 +121,25 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         kwargs.pop("hf_token", None)
         kwargs.pop("user_prompt", None)
 
-        return super()._sanitize_parameters(**kwargs)
+        return super()._sanitize_parameters(
+            chunk_length_s=chunk_length_s,
+            stride_length_s=stride_length_s,
+            ignore_warning=ignore_warning,
+            decoder_kwargs=decoder_kwargs,
+            return_language=return_language,
+            **kwargs,
+        )
 
+    # The parent annotates `list[dict]`, but one input yields one dict (here and
+    # in the parent); a batch the parent handles yields a list. Hence `Any`.
     def __call__(
         self,
         inputs,
+        *args,
+        num_workers=None,
+        batch_size=None,
         **kwargs,
-    ):
+    ) -> Any:
         """Transcribe audio with optional word-level timestamps and speaker diarization.
 
         Args:
@@ -126,15 +155,24 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             Dict with 'text' key, 'words' key if return_timestamps=True,
             and speaker labels on words plus 'speaker_segments' if return_speakers=True
         """
+        if args:
+            msg = f"ASRPipeline.__call__ takes 1 positional input, got {1 + len(args)}"
+            raise TypeError(msg)
+        # Not ours: handed back to the parent pipeline's __call__ untouched.
+        if num_workers is not None:
+            kwargs["num_workers"] = num_workers
+        if batch_size is not None:
+            kwargs["batch_size"] = batch_size
         # Extract our params before super().__call__ (which will also call _sanitize_parameters)
         return_timestamps = kwargs.pop("return_timestamps", False)
         return_speakers = kwargs.pop("return_speakers", False)
         user_prompt = kwargs.pop("user_prompt", None)
         if kwargs.pop("min_speakers", None) is not None:
-            raise ValueError(
+            msg = (
                 "min_speakers is not supported: Nemotron-3-Diarization decides how many "
                 "speakers it hears. Pass num_speakers (exact) or max_speakers instead."
             )
+            raise ValueError(msg)
         diarization_params = {
             "num_speakers": kwargs.pop("num_speakers", None),
             "max_speakers": kwargs.pop("max_speakers", None),
@@ -224,7 +262,8 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         """
         audio = self._extract_audio(inputs)
         if audio is None:
-            raise ValueError(f"Cannot read audio from {type(inputs).__name__} for timestamps")
+            msg = f"Cannot read audio from {type(inputs).__name__} for timestamps"
+            raise ValueError(msg)
         array = np.asarray(audio["array"], dtype=np.float32)
         sr = audio.get("sampling_rate", 16000)
 
@@ -234,11 +273,12 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
 
         try:
             aligned = QwenForcedAligner.align_chunks(
-                [(array[s:e], text) for (s, e), text in zip(bounds, texts)], sample_rate=sr
+                [(array[s:e], text) for (s, e), text in zip(bounds, texts, strict=True)],
+                sample_rate=sr,
             )
             result["words"] = [
                 {**w, "start": w["start"] + s / sr, "end": w["end"] + s / sr}
-                for (s, _), chunk_words in zip(bounds, aligned)
+                for (s, _), chunk_words in zip(bounds, aligned, strict=True)
                 for w in chunk_words
             ]
         except Exception as e:
@@ -285,18 +325,21 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
 
         return None
 
-    def preprocess(self, inputs, **preprocess_params):
+    def preprocess(self, *args, **preprocess_params):
         """Preprocess audio inputs for the model.
 
         Args:
-            inputs: Audio input (dict with array, file path, etc.)
+            inputs: Audio input (dict with array, file path, etc.), the one
+                positional argument (see `_single_input`)
             **preprocess_params: Additional preprocessing parameters
 
         Yields:
             Model input dicts with input_features and attention_mask
         """
+        inputs = _single_input(args, preprocess_params, "inputs")
         # Handle dict with "array" key (from datasets)
         if isinstance(inputs, dict) and "array" in inputs:
+            assert self.feature_extractor is not None  # always set by __init__
             inputs = {
                 "raw": inputs["array"],
                 "sampling_rate": inputs.get("sampling_rate", self.feature_extractor.sampling_rate),
@@ -317,6 +360,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             else 0.0
         )
         if lead_in > 0 and isinstance(inputs, dict) and "raw" in inputs:
+            assert self.feature_extractor is not None  # always set by __init__
             inputs = dict(inputs)
             inputs["raw"] = prepend_lead_in(
                 inputs["raw"],
@@ -329,11 +373,12 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                 item["is_last"] = True
             yield item
 
-    def _forward(self, model_inputs, **generate_kwargs) -> dict[str, Any]:
+    def _forward(self, *args, **generate_kwargs):
         """Run model forward pass to generate transcription.
 
         Args:
-            model_inputs: Dict with input_features and attention_mask
+            model_inputs: Dict with input_features and attention_mask, the one
+                positional argument (see `_single_input`)
             **generate_kwargs: Generation parameters. Pass ``output_scores=True``
                 (and ``return_dict_in_generate=True``, which is then implied) to
                 also return per-step top-1 and top-2 log-probabilities — used by
@@ -345,6 +390,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             ``top1_logprob`` / ``top2_logprob`` tensors when scores were
             requested.
         """
+        model_inputs = _single_input(args, generate_kwargs, "model_inputs")
         # Extract audio features and is_last flag
         is_last = model_inputs.pop("is_last", True) if isinstance(model_inputs, dict) else True
 
@@ -381,11 +427,12 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         # annotated with sample 0's confidence and nothing downstream could
         # tell. Fail loudly instead of returning a plausible wrong number.
         if sequences.shape[0] > 1:
-            raise ValueError(
+            msg = (
                 f"ASRPipeline received a batch of {sequences.shape[0]} but only "
                 "returns one transcript; per-item confidence would be wrong. "
                 "Call it with one clip per invocation."
             )
+            raise ValueError(msg)
         top1_logprobs: list[float] = []
         top2_logprobs: list[float] = []
         if scores:
@@ -405,7 +452,14 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             "is_last": is_last,
         }
 
-    def postprocess(self, model_outputs, **kwargs) -> dict[str, str]:
+    def postprocess(
+        self,
+        model_outputs,
+        decoder_kwargs=None,
+        return_timestamps=None,
+        return_language=None,
+        **kwargs,
+    ) -> dict[str, Any]:
         """Convert model output tokens to text.
 
         Args:
@@ -421,7 +475,13 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
 
         tokens = model_outputs.get("tokens")
         if tokens is None:
-            return super().postprocess(model_outputs, **kwargs)
+            return super().postprocess(
+                model_outputs,
+                decoder_kwargs=decoder_kwargs,
+                return_timestamps=return_timestamps,
+                return_language=return_language,
+                **kwargs,
+            )
 
         if torch.is_tensor(tokens):
             tokens = tokens.cpu()
@@ -435,7 +495,10 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             eos_set = set(eos_ids) if isinstance(eos_ids, list) else {eos_ids}
             tokens = [t for t in tokens.tolist() if t not in eos_set]
 
-        text = self.tokenizer.decode(tokens, skip_special_tokens=True).strip()
+        assert self.tokenizer is not None  # always set by __init__
+        decoded = self.tokenizer.decode(tokens, skip_special_tokens=True)
+        assert isinstance(decoded, str)  # one sequence in, one string out
+        text = decoded.strip()
         # Strip <think>...</think> tags (Qwen3 doesn't respect /no_think prompt)
         if "<think>" in text:
             text = _THINK_TAG_RE.sub("", text).strip()
@@ -449,6 +512,22 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         if "top2_logprob" in model_outputs:
             out["top2_logprob"] = model_outputs["top2_logprob"]
         return out
+
+
+def _single_input(args: tuple[Any, ...], kwargs: dict[str, Any], name: str) -> Any:
+    """The one input of a pipeline stage, given positionally or as `name=`.
+
+    `preprocess` and `_forward` take `*args` because their two transformers bases
+    name that input differently (`inputs`/`model_inputs` in the ASR pipeline,
+    `input_`/`input_tensors` in `Pipeline`), and no single name overrides both.
+    `Pipeline` always passes it positionally.
+    """
+    if len(args) == 1 and name not in kwargs:
+        return args[0]
+    if not args and name in kwargs:
+        return kwargs.pop(name)
+    msg = f"expected exactly one {name!r} argument, got {len(args)} positional"
+    raise TypeError(msg)
 
 
 def _truncate_repetitions(text: str) -> str:

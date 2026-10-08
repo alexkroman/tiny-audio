@@ -12,10 +12,12 @@ from typing import Annotated
 
 import typer
 from fabric import Connection
-from invoke import UnexpectedExit
+from invoke.exceptions import UnexpectedExit
 from rich.prompt import Prompt
 from tenacity import RetryError, retry, stop_after_attempt, wait_fixed
 
+from scripts.deploy import plan as deploy_plan
+from scripts.deploy import remote_scripts
 from scripts.eval.constants import AssemblyAIModel
 from scripts.utils import get_project_root
 
@@ -257,7 +259,8 @@ def sync_project(conn: Connection, project_root: Path) -> None:
 
     file_list = _gitignore_aware_file_list(project_root)
     if not file_list.strip():
-        raise RuntimeError(f"git ls-files returned no files under {project_root}")
+        msg = f"git ls-files returned no files under {project_root}"
+        raise RuntimeError(msg)
 
     # argv form: nothing here needs a shell. rsync splits the `-e` command on
     # whitespace itself, so it stays one argument.
@@ -291,7 +294,8 @@ def install_dependencies(conn: Connection) -> None:
     """
     print("\nInstalling Python dependencies...")
 
-    setup_script = """\
+    setup_script = (
+        """\
 #!/bin/bash
 # `pipefail` ensures `pip ... | grep ...` fails when pip fails — without it,
 # pip errors are masked by grep's exit code.
@@ -299,23 +303,9 @@ set -eo pipefail
 
 export PATH="/root/.local/bin:$PATH"
 
-# RunPod images ship torch in system dist-packages alongside its nvidia-*
-# CUDA wheels. When the project pins a different torch version it installs
-# into --user and shadows the image copy, but the nvidia libs stay in the
-# system tree -- so the loader cannot find e.g. libcusparseLt.so.0 and every
-# `import torch` dies with ImportError. Observed on
-# runpod/pytorch:...-torch291 against this repo's torch ~2.8.0 pin; it also
-# broke the flash-attn build, whose metadata hook imports torch.
-NVLIBS="$(python3 -c 'import glob;print(":".join(sorted(glob.glob("/usr/local/lib/python*/dist-packages/nvidia/*/lib"))))')"
-# Spelled out with if/else on purpose: these scripts are built with Python
-# f-strings, so shell brace-expansion syntax would be parsed as an f-string
-# replacement field and raise NameError at build time.
-if [ -n "$LD_LIBRARY_PATH" ]; then
-  export LD_LIBRARY_PATH="$NVLIBS:$LD_LIBRARY_PATH"
-else
-  export LD_LIBRARY_PATH="$NVLIBS"
-fi
-export PIP_ROOT_USER_ACTION=ignore
+"""
+        + remote_scripts.NVIDIA_LD_PATH_FIX
+        + """export PIP_ROOT_USER_ACTION=ignore
 export POETRY_VIRTUALENVS_CREATE=false
 export PIP_BREAK_SYSTEM_PACKAGES=1
 
@@ -398,7 +388,8 @@ pip install --user causal-conv1d --no-build-isolation --quiet \
 # correct and it actually runs. Verifying here means a bad combination fails at
 # deploy time instead of twenty minutes into training.
 pip install --user tilelang --quiet || echo "WARN: tilelang install failed"
-pip install --user flash-linear-attention --quiet || echo "WARN: flash-linear-attention install failed"
+pip install --user flash-linear-attention --quiet \
+|| echo "WARN: flash-linear-attention install failed"
 python - <<'FLA_CHECK' || pip uninstall -y flash-linear-attention fla-core >/dev/null 2>&1
 import sys
 try:
@@ -427,7 +418,7 @@ FLA_CHECK
 # project install ordering above left it behind.
 pip install --user --upgrade liger-kernel --quiet
 
-# Pre-fetch the NLTK punkt tokenizer used by truecase in scripts/train.py's
+# Pre-fetch the NLTK punkt tokenizer used by truecase in scripts/labels.py's
 # label normalizer. NLTK 3.9+ uses `punkt_tab` (new data package format);
 # older NLTKs use `punkt`. Download both so the code works regardless of
 # which NLTK version the base image ships. Doing the download here (during
@@ -444,7 +435,8 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 # runs under (e.g., python3.10 vs python3.11 in the base image), and
 # every subsequent `ta dev <cmd>` will fail with `ModuleNotFoundError`.
 TA_PYTHON=$(head -1 /root/.local/bin/ta | sed 's|^#!||')
-if ! "$TA_PYTHON" -c "import typer, hydra, omegaconf, datasets, transformers, truecase, ftfy" 2>/tmp/tiny_audio_import_check.err; then
+if ! "$TA_PYTHON" -c "import typer, hydra, omegaconf, datasets, transformers, truecase, ftfy" \
+2>/tmp/tiny_audio_import_check.err; then
     echo "ERROR: deps did not install into the python that /root/.local/bin/ta uses." >&2
     echo "  ta interpreter: $TA_PYTHON" >&2
     echo "  pip used:        $(which pip) ($(pip --version))" >&2
@@ -455,6 +447,7 @@ if ! "$TA_PYTHON" -c "import typer, hydra, omegaconf, datasets, transformers, tr
 fi
 echo "Dependencies verified for $TA_PYTHON"
 """
+    )
 
     # Upload over SFTP so apostrophes, dollar signs, and other shell metachars
     # in the body are preserved verbatim without any quoting.
@@ -499,9 +492,7 @@ def plan(
     overrides: Annotated[list[str] | None, typer.Argument(help=OVERRIDES_HELP)] = None,
 ):
     """Estimate GPU memory + disk for a config and emit a pod create command."""
-    from scripts.deploy.plan import plan_command
-
-    plan_command(
+    deploy_plan.plan_command(
         experiment=experiment,
         seq_len=seq_len,
         gpu=gpu,
@@ -530,9 +521,7 @@ def up(
     overrides: Annotated[list[str] | None, typer.Argument(help=OVERRIDES_HELP)] = None,
 ):
     """Size a config, then create a pod on the first GPU type with capacity."""
-    from scripts.deploy.plan import provision_command
-
-    provision_command(
+    deploy_plan.provision_command(
         experiment=experiment,
         seq_len=seq_len,
         name=name,
@@ -551,9 +540,7 @@ def wait(
     ] = 900,
 ):
     """Block until a pod exposes SSH, then print `<ip> <port>`."""
-    from scripts.deploy.plan import wait_command
-
-    wait_command(pod_id=pod_id, timeout_s=timeout)
+    deploy_plan.wait_command(pod_id=pod_id, timeout_s=timeout)
 
 
 @app.command()
@@ -586,133 +573,6 @@ def deploy(
     print(f"To connect: ssh -i ~/.ssh/id_ed25519 -p {port} root@{host}")
 
 
-# Every remote script shares this header: the fd limit, the nvidia-lib
-# LD_LIBRARY_PATH repair, and the HF cache/token exports. It lived inline in all
-# three builders below and had already drifted between them.
-_SCRIPT_PREAMBLE = """#!/bin/bash
-# NOTE: "set -e" intentionally removed so session stays active on crash for debugging
-
-ulimit -n 65536
-{pip_install}export PATH="/root/.local/bin:$PATH"
-
-# RunPod images ship torch in system dist-packages alongside its nvidia-*
-# CUDA wheels. When the project pins a different torch version it installs
-# into --user and shadows the image copy, but the nvidia libs stay in the
-# system tree -- so the loader cannot find e.g. libcusparseLt.so.0 and every
-# `import torch` dies with ImportError. Observed on
-# runpod/pytorch:...-torch291 against this repo's torch ~2.8.0 pin; it also
-# broke the flash-attn build, whose metadata hook imports torch.
-NVLIBS="$(python3 -c 'import glob;print(":".join(sorted(glob.glob("/usr/local/lib/python*/dist-packages/nvidia/*/lib"))))')"
-# Spelled out with if/else on purpose: these scripts are built with Python
-# f-strings, so shell brace-expansion syntax would be parsed as an f-string
-# replacement field and raise NameError at build time.
-if [ -n "$LD_LIBRARY_PATH" ]; then
-  export LD_LIBRARY_PATH="$NVLIBS:$LD_LIBRARY_PATH"
-else
-  export LD_LIBRARY_PATH="$NVLIBS"
-fi
-export HF_HOME=/workspace/.cache/huggingface
-export HF_DATASETS_CACHE=/workspace/datasets
-export HF_XET_HIGH_PERFORMANCE=1
-export HF_TOKEN="{hf_token}"
-# TileLang JIT-compiles fla's gated delta-rule kernels on first use (~8s each,
-# a handful of them -- sequence length is marked dynamic in the kernel, so this
-# is bounded warmup rather than per-step recompilation). Its cache defaults to
-# ~/.tilelang/cache, i.e. /root, which is ephemeral container storage: every
-# fresh pod would recompile from scratch. Point it at the persistent volume for
-# the same reason HF_HOME is redirected above.
-export TILELANG_CACHE_DIR=/workspace/.cache/tilelang
-"""
-
-
-def _script_preamble(hf_token: str, *, pip_packages: str = "", extras: str = "") -> str:
-    """Shared shell header for the remote train/eval scripts.
-
-    Args:
-        hf_token: Value exported as HF_TOKEN.
-        pip_packages: Extra packages to install before the run; the pip line is
-            omitted entirely when empty. Only the eval script needs one
-            (modelscope) now that Xet has replaced hf_transfer.
-        extras: Extra `export` lines appended to the header.
-    """
-    pip_install = (
-        f"pip install {pip_packages} --quiet --root-user-action=ignore\n" if pip_packages else ""
-    )
-    preamble = _SCRIPT_PREAMBLE.format(pip_install=pip_install, hf_token=hf_token)
-    return preamble + extras
-
-
-def _script_epilogue(label: str, finished: str) -> str:
-    """Shared tail: report the exit code, then idle so tmux stays inspectable.
-
-    Args:
-        label: Name used in the success/failure banners.
-        finished: Name used in the closing message.
-    """
-    return f"""
-EXIT_CODE=$?
-
-if [ $EXIT_CODE -eq 0 ]; then
-    echo "===== {label} Completed Successfully ====="
-else
-    echo "===== {label} Failed with exit code: $EXIT_CODE ====="
-fi
-
-echo "{finished} finished. Session will remain active for inspection."
-sleep infinity
-"""
-
-
-def _training_exports(wandb_run_id: str | None, wandb_resume: str | None) -> str:
-    """The `export` block every remote training script runs under."""
-    wandb_exports = ""
-    if wandb_run_id:
-        wandb_exports += f'export WANDB_RUN_ID="{wandb_run_id}"\n'
-    if wandb_resume:
-        wandb_exports += f'export WANDB_RESUME="{wandb_resume}"\n'
-
-    return (
-        "export TOKENIZERS_PARALLELISM=false\n"
-        'export HF_DATASETS_AUDIO_DECODER="soundfile"\n'
-        f"{wandb_exports}"
-        "export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True\n"
-        "export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1\n"
-        "export TORCH_CUDNN_BENCHMARK=1\n"
-        # Keep the inductor + triton caches on local NVMe (/root/.cache/...), not
-        # on the NFS-backed /workspace volume. /workspace previously caused ESTALE
-        # (Errno 116, "Stale file handle") crashes inside Inductor's compile-worker
-        # pool when the underlying NFS handle expired mid-write -- typical for any
-        # parallel-write workload on a networked FS. The cost of putting these on
-        # local NVMe is one cold-cache compile per pod boot (seconds-minutes);
-        # the cost of ESTALE is a dead training job.
-        "export TORCHINDUCTOR_CACHE_DIR=/root/.cache/torch_inductor\n"
-        "export TRITON_CACHE_DIR=/root/.cache/triton\n"
-        "export TORCHINDUCTOR_FX_GRAPH_CACHE=1\n"
-        "export TORCH_DYNAMO_ALLOW_UNSPEC_INT_ON_NN_MODULE=1\n"
-        "export TORCH_CUDA_GRAPHS_ENABLED=0\n"
-    )
-
-
-def build_training_script(
-    experiment: str,
-    hf_token: str,
-    wandb_run_id: str | None,
-    wandb_resume: str | None,
-    extra_args: list[str],
-) -> str:
-    """Generate the training script content."""
-    extra_args_str = " ".join(extra_args) if extra_args else ""
-    extra_exports = _training_exports(wandb_run_id, wandb_resume)
-    body = f"""
-cd /workspace
-python -m scripts.train +experiments={experiment} {extra_args_str}"""
-    return (
-        _script_preamble(hf_token, extras=extra_exports)
-        + body
-        + _script_epilogue("Training", "Training script")
-    )
-
-
 def _remote_free_gib(conn: Connection, path: str = "/workspace") -> float | None:
     """Free space on the filesystem backing `path`, in GiB (None if unreadable)."""
     result = conn.run(f"df -Pk {path} | tail -1", hide=True, warn=True)
@@ -728,7 +588,7 @@ def _remote_free_gib(conn: Connection, path: str = "/workspace") -> float | None
 
 # Where a run materializes its bulk: the dataset cache (parquet + generated
 # arrow) and the Hub cache (model weights). Both are exported by
-# _script_preamble, so they are the same paths the training script will use.
+# remote_scripts.script_preamble, so they are the same paths the training script will use.
 _REMOTE_CACHE_DIRS = ("/workspace/datasets", "/workspace/.cache/huggingface")
 
 
@@ -764,14 +624,12 @@ def _check_remote_disk(conn: Connection, experiment: str, overrides: list[str]) 
     `up` and `train` share a default, but either can be pointed elsewhere
     with -e.
     """
-    from scripts.deploy.plan import build_plan
-
     free = _remote_free_gib(conn)
     if free is None:
         print("Could not read `df /workspace`; skipping the disk preflight.")
         return
     try:
-        need = build_plan(experiment, overrides, 512).disk["recommended"]
+        need = deploy_plan.build_plan(experiment, overrides, 512).disk["recommended"]
     except Exception as exc:  # unresolvable config, gated repo, Hub outage
         print(f"Disk preflight skipped ({type(exc).__name__}: {exc}).")
         return
@@ -849,7 +707,9 @@ def train(
         host,
         port,
         session_name,
-        build_training_script(experiment, hf_token, wandb_run_id, wandb_resume, overrides),
+        remote_scripts.build_training_script(
+            experiment, hf_token, wandb_run_id, wandb_resume, overrides
+        ),
         f"/tmp/train_{session_name}.sh",
         no_attach,
     )
@@ -906,55 +766,6 @@ def attach(
             print(f"Session '{session_name}' not found or an error occurred.")
     else:
         attach_tmux_session(host, port, session_name)
-
-
-def build_eval_script(
-    hf_token: str,
-    model: str,
-    datasets: list[str],
-    max_samples: int | None,
-    assemblyai_api_key: str | None,
-    assemblyai_model: str,
-    num_workers: int,
-    streaming: bool,
-    extra_args: list[str] | None,
-) -> str:
-    """Generate the eval script content."""
-    max_samples_arg = f"--max-samples {max_samples}" if max_samples else ""
-    datasets_arg = f"--datasets {' '.join(datasets)}" if datasets else ""
-    streaming_arg = "--streaming" if streaming else ""
-    workers_arg = f"--num-workers {num_workers}" if num_workers > 1 else ""
-    assemblyai_model_arg = f"--assemblyai-model {assemblyai_model}"
-    extra_args_str = " ".join(extra_args) if extra_args else ""
-
-    assemblyai_export = ""
-    if assemblyai_api_key:
-        assemblyai_export = f'export ASSEMBLYAI_API_KEY="{assemblyai_api_key}"'
-
-    extra_exports = (
-        f"{assemblyai_export}\n"
-        "\n# GPU optimizations\n"
-        "export CUDA_VISIBLE_DEVICES=0\n"
-        "export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True\n"
-    )
-    body = f"""
-cd /workspace
-
-python -m scripts.eval.cli \\
-    --model {model} \\
-    {datasets_arg} \\
-    {max_samples_arg} \\
-    {assemblyai_model_arg} \\
-    {workers_arg} \\
-    {streaming_arg} \\
-    --output-dir /workspace/outputs \\
-    {extra_args_str}
-"""
-    return (
-        _script_preamble(hf_token, pip_packages="modelscope", extras=extra_exports)
-        + body
-        + _script_epilogue("Evaluation", "Eval script")
-    )
 
 
 @app.command("eval")
@@ -1017,10 +828,8 @@ def eval_model(
         conn, session_name or _auto_session_name(f"eval_{model_short}"), force, hf_token
     )
     if model == "assemblyai" and not assemblyai_api_key:
-        raise typer.BadParameter(
-            "set ASSEMBLYAI_API_KEY or pass --assemblyai-api-key when --model is assemblyai",
-            param_hint="--assemblyai-api-key",
-        )
+        msg = "set ASSEMBLYAI_API_KEY or pass --assemblyai-api-key when --model is assemblyai"
+        raise typer.BadParameter(msg, param_hint="--assemblyai-api-key")
 
     if datasets is None:
         datasets = ["loquacious"]
@@ -1040,7 +849,7 @@ def eval_model(
         host,
         port,
         session_name,
-        build_eval_script(
+        remote_scripts.build_eval_script(
             hf_token,
             model,
             datasets,

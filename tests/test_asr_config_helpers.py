@@ -33,14 +33,11 @@ TEXT_CFG = {
 
 def make_config(**overrides) -> ASRConfig:
     """ASRConfig that never calls the Hub."""
-    kwargs = {
-        "audio_model_id": "openai/whisper-tiny",
-        "text_model_id": "Qwen/Qwen3-0.6B",
-        "audio_config": dict(AUDIO_CFG),
-        "text_config": dict(TEXT_CFG),
-    }
-    kwargs.update(overrides)
-    return ASRConfig(**kwargs)
+    overrides.setdefault("audio_model_id", "openai/whisper-tiny")
+    overrides.setdefault("text_model_id", "Qwen/Qwen3-0.6B")
+    overrides.setdefault("audio_config", dict(AUDIO_CFG))
+    overrides.setdefault("text_config", dict(TEXT_CFG))
+    return ASRConfig(**overrides)
 
 
 class TestNativeAudioToken:

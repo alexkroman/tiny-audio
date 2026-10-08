@@ -9,6 +9,7 @@ import typer
 from rich.console import Console
 
 from scripts import quality
+from scripts.deploy import handler_local
 
 app = typer.Typer(
     name="dev",
@@ -19,8 +20,11 @@ app = typer.Typer(
 app.add_typer(quality.app)
 console = Console()
 
-CODE_PATHS = ["tiny_audio", "scripts", "tests"]
+# Every Python tree in the repo: the package, its CLI, the tests, the Space
+# demo and the course examples. Linters and type checkers all run over this.
+CODE_PATHS = ["tiny_audio", "scripts", "tests", "demo", "docs", "typings"]
 LIB_PATH = "tiny_audio"
+TOML_FILES = ["pyproject.toml", ".mdformat.toml"]
 
 # Every threshold below is a ratchet: raise it when the codebase clears the
 # next rung, never lower it to get a red build green. Coverage's floor lives in
@@ -39,8 +43,11 @@ LINT_COMMANDS = [
     # otherwise formatting drift only shows up as noise in the next PR.
     ["ruff", "format", "--check", *CODE_PATHS],
     ["black", "--check", *CODE_PATHS],
-    ["yamllint", "configs/", ".github/"],
-    ["taplo", "check", "pyproject.toml"],
+    # Every YAML file; `.yamllint` skips what .gitignore ignores.
+    ["yamllint", "--strict", "."],
+    # TOML syntax, then layout (`ta dev format` runs `taplo fmt`).
+    ["taplo", "check", *TOML_FILES],
+    ["taplo", "fmt", "--check", *TOML_FILES],
     # Workflow syntax/expressions, then security shapes (template injection,
     # unpinned actions, persisted checkout credentials). `--offline` keeps
     # zizmor off the GitHub API so a local token can't change the verdict.
@@ -48,8 +55,9 @@ LINT_COMMANDS = [
     ["zizmor", "--offline", ".github/workflows"],
 ]
 TYPE_CHECK_COMMANDS = [
-    ["mypy", LIB_PATH],
-    ["pyright", LIB_PATH],
+    ["mypy", *CODE_PATHS],
+    # Paths come from `[tool.pyright] include`.
+    ["pyright"],
 ]
 SECURITY_COMMAND = ["bandit", "-c", "pyproject.toml", "-r", "tiny_audio", "scripts", "-ll"]
 # Unused, missing, transitive-only and misplaced dependencies; configured in
@@ -80,9 +88,23 @@ DEAD_CODE_COMMAND = [
     "--min-confidence",
     DEAD_CODE_MIN_CONFIDENCE,
 ]
+# `@overload` stubs are type signatures for the documented implementation
+# below them, not separate functions, so they are not counted.
 DOCSTRINGS_COMMANDS = [
-    ["interrogate", LIB_PATH, "--fail-under", DOCSTRING_MIN_LIB],
-    ["interrogate", "scripts", "--fail-under", DOCSTRING_MIN_SCRIPTS],
+    [
+        "interrogate",
+        LIB_PATH,
+        "--ignore-overloaded-functions",
+        "--fail-under",
+        DOCSTRING_MIN_LIB,
+    ],
+    [
+        "interrogate",
+        "scripts",
+        "--ignore-overloaded-functions",
+        "--fail-under",
+        DOCSTRING_MIN_SCRIPTS,
+    ],
 ]
 # Everything `ta dev check` runs after the linters; see `check_commands()`.
 ANALYSIS_COMMANDS = [
@@ -143,25 +165,42 @@ def build_and_check() -> int:
     return run(*BUILD_COMMAND) or run_all(*dist_check_commands())
 
 
-# YAML front matter, which mdformat mangles (also excluded in [tool.mdformat]).
-MARKDOWN_SKIP = {"MODEL_CARD.md", "demo/README.md"}
-
-
-def markdown_files() -> list[str]:
-    """Tracked Markdown that `ta dev format` rewrites and `ta dev lint` checks.
+def tracked_files(pattern: str) -> list[str]:
+    """Tracked files matching `pattern`.
 
     git ls-files rather than a glob: it skips worktrees, build/cache dirs and
     anything else gitignore already excludes.
     """
     tracked = subprocess.run(
-        ["git", "ls-files", "*.md"], capture_output=True, text=True, check=True
+        ["git", "ls-files", pattern], capture_output=True, text=True, check=True
     )
-    return [f for f in tracked.stdout.splitlines() if f and f not in MARKDOWN_SKIP]
+    return [f for f in tracked.stdout.splitlines() if f]
+
+
+def markdown_files() -> list[str]:
+    """Tracked Markdown that `ta dev format` rewrites and `ta dev lint` checks."""
+    return tracked_files("*.md")
+
+
+def json_files() -> list[str]:
+    """Tracked JSON (the quality/ baselines) that `ta dev lint` checks."""
+    return tracked_files("*.json")
 
 
 def lint_commands() -> list[list[str]]:
-    """`LINT_COMMANDS` plus the Markdown check, whose file list comes from git."""
-    return [*LINT_COMMANDS, ["mdformat", "--check", *markdown_files()]]
+    """`LINT_COMMANDS` plus the Markdown and JSON checks, whose file lists come from git.
+
+    pretty-format-json without `--autofix` fails on invalid JSON and on any
+    file that is not sorted, 2-space-indented JSON (the layout
+    scripts/quality.py writes).
+    """
+    markdown = markdown_files()
+    return [
+        *LINT_COMMANDS,
+        ["mdformat", "--check", *markdown],
+        ["pymarkdown", "scan", *markdown],
+        ["pretty-format-json", *json_files()],
+    ]
 
 
 def check_commands() -> list[list[str]]:
@@ -186,20 +225,24 @@ def run_all(*commands: list[str]) -> int:
 
 @app.command()
 def lint():
-    """Run linters (Poetry + Python + YAML + TOML + GitHub Actions + Markdown)."""
+    """Run linters (Poetry + Python + YAML + TOML + GitHub Actions + Markdown + JSON)."""
     raise typer.Exit(run_all(*lint_commands()))
 
 
 @app.command("format")
 def format_code():
-    """Format code with black, ruff, and mdformat."""
+    """Format code with black, ruff, mdformat, taplo and pretty-format-json."""
     run("black", *CODE_PATHS)
     run("ruff", "format", *CODE_PATHS)
     run("ruff", "check", "--fix", *CODE_PATHS)
+    run("taplo", "fmt", *TOML_FILES)
 
     md_files = markdown_files()
     if md_files:
         run("mdformat", *md_files)
+    json = json_files()
+    if json:
+        run("pretty-format-json", "--autofix", *json)
 
 
 @app.command("type-check")
@@ -277,13 +320,7 @@ def docstrings():
     raise typer.Exit(run_all(*[[*cmd, "-v"] for cmd in DOCSTRINGS_COMMANDS]))
 
 
-def _register_handler():
-    from scripts.deploy.handler_local import test as handler_test
-
-    app.command(name="handler")(handler_test)
-
-
-_register_handler()
+app.command(name="handler")(handler_local.run_handler)
 
 if __name__ == "__main__":
     app()

@@ -4,15 +4,18 @@ The ratchet tests pin the *minimum* each threshold may take. Raising a floor
 is a one-line edit here too; lowering one fails CI, which is the point.
 """
 
+import importlib
 import sys
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 import typer
 from typer.testing import CliRunner
 
+from scripts import cli as cli_module
 from scripts import dev
 from scripts.utils import get_project_root
 
@@ -122,7 +125,12 @@ class TestCommandWiring:
 
     def test_failed_build_skips_the_artifact_checks(self, monkeypatch):
         calls = []
-        monkeypatch.setattr(dev, "run", lambda *args: calls.append(args) or 1)
+
+        def failing_run(*args: str) -> int:
+            calls.append(args)
+            return 1
+
+        monkeypatch.setattr(dev, "run", failing_run)
         assert runner.invoke(dev.app, ["build"]).exit_code == 1
         assert calls == [tuple(dev.BUILD_COMMAND)]
 
@@ -149,22 +157,28 @@ class TestCommandWiring:
 
 
 class TestFormatCode:
-    """Markdown formatting touches tracked files except the front-matter ones."""
+    """`ta dev format` rewrites every tracked Markdown and JSON file."""
 
-    def test_only_tracked_unexcluded_markdown_is_formatted(self, recorded_runs, monkeypatch):
-        listing = (
-            "README.md\ndocs/course/01.md\nMODEL_CARD.md\ndemo/README.md\ndocs/QUICKSTART.md\n"
-        )
-        monkeypatch.setattr(dev.subprocess, "run", lambda *a, **kw: SimpleNamespace(stdout=listing))
+    LISTINGS: ClassVar[dict[str, str]] = {
+        "*.md": "README.md\nMODEL_CARD.md\ndemo/README.md\n",
+        "*.json": "quality/file_length.json\n",
+    }
+
+    def _fake_ls_files(self, cmd: list[str], **_kw: object) -> SimpleNamespace:
+        return SimpleNamespace(stdout=self.LISTINGS[cmd[-1]])
+
+    def test_every_tracked_markdown_and_json_file_is_formatted(self, recorded_runs, monkeypatch):
+        monkeypatch.setattr(dev.subprocess, "run", self._fake_ls_files)
         dev.format_code()
-        md_calls = [c for c in recorded_runs if c[0] == "mdformat"]
-        assert md_calls == [("mdformat", "README.md", "docs/course/01.md", "docs/QUICKSTART.md")]
+        assert ("mdformat", "README.md", "MODEL_CARD.md", "demo/README.md") in recorded_runs
+        assert ("pretty-format-json", "--autofix", "quality/file_length.json") in recorded_runs
+        assert ("taplo", "fmt", *dev.TOML_FILES) in recorded_runs
         assert [c[0] for c in recorded_runs[:3]] == ["black", "ruff", "ruff"]
 
     def test_no_markdown_means_no_mdformat_call(self, recorded_runs, monkeypatch):
         monkeypatch.setattr(dev.subprocess, "run", lambda *a, **kw: SimpleNamespace(stdout=""))
         dev.format_code()
-        assert all(c[0] != "mdformat" for c in recorded_runs)
+        assert all(c[0] not in {"mdformat", "pretty-format-json"} for c in recorded_runs)
 
 
 class TestQualityGateContents:
@@ -174,11 +188,18 @@ class TestQualityGateContents:
         assert ["ruff", "format", "--check", *dev.CODE_PATHS] in dev.LINT_COMMANDS
         assert ["black", "--check", *dev.CODE_PATHS] in dev.LINT_COMMANDS
 
-    def test_lint_checks_tracked_markdown_except_front_matter_files(self):
-        *_, markdown = dev.lint_commands()
-        assert markdown[:2] == ["mdformat", "--check"]
-        assert "README.md" in markdown
-        assert not set(markdown) & dev.MARKDOWN_SKIP
+    def test_lint_checks_all_tracked_markdown(self):
+        commands = {cmd[0]: cmd for cmd in dev.lint_commands()}
+        assert commands["mdformat"][:2] == ["mdformat", "--check"]
+        assert {"README.md", "MODEL_CARD.md", "demo/README.md"} <= set(commands["mdformat"])
+        assert commands["pymarkdown"][2:] == commands["mdformat"][2:]
+
+    def test_lint_checks_json_and_toml_layout(self):
+        commands = dev.lint_commands()
+        json_check = next(cmd for cmd in commands if cmd[0] == "pretty-format-json")
+        assert "--autofix" not in json_check
+        assert "quality/file_length.json" in json_check
+        assert ["taplo", "fmt", "--check", *dev.TOML_FILES] in commands
 
     def test_lint_verifies_the_lock_file(self):
         assert ["poetry", "check", "--lock"] in dev.LINT_COMMANDS
@@ -247,17 +268,15 @@ class TestLazyRegistration:
     @staticmethod
     def _fresh_cli():
         """Reload scripts.cli so its LazyGroup starts with an empty cache."""
-        import importlib
-
-        from scripts import cli
-
-        return importlib.reload(cli)
+        importlib.reload(cli_module)  # re-executes the module in place
+        return cli_module
 
     def test_root_lists_every_subcommand_without_importing(self, monkeypatch):
         cli = self._fresh_cli()
         for module in cli.SUBCOMMANDS.values():
             monkeypatch.delitem(sys.modules, module, raising=False)
         group = typer.main.get_command(cli.app)
+        assert isinstance(group, cli.LazyGroup)
         ctx = typer.Context(group)
         assert group.list_commands(ctx) == list(cli.SUBCOMMANDS)
         assert not any(m in sys.modules for m in cli.SUBCOMMANDS.values())
@@ -267,6 +286,7 @@ class TestLazyRegistration:
         for module in cli.SUBCOMMANDS.values():
             monkeypatch.delitem(sys.modules, module, raising=False)
         group = typer.main.get_command(cli.app)
+        assert isinstance(group, cli.LazyGroup)
         ctx = typer.Context(group)
         command = group.get_command(ctx, "dev")
         assert command is not None
@@ -278,12 +298,14 @@ class TestLazyRegistration:
     def test_resolved_commands_are_cached(self):
         cli = self._fresh_cli()
         group = typer.main.get_command(cli.app)
+        assert isinstance(group, cli.LazyGroup)
         ctx = typer.Context(group)
         assert group.get_command(ctx, "dev") is group.get_command(ctx, "dev")
 
     def test_unknown_command_resolves_to_none(self):
         cli = self._fresh_cli()
         group = typer.main.get_command(cli.app)
+        assert isinstance(group, cli.LazyGroup)
         ctx = typer.Context(group)
         assert group.get_command(ctx, "nonsense") is None
 

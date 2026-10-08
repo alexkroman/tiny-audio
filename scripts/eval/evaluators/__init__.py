@@ -3,8 +3,8 @@
 from scripts.eval.audio import TextNormalizer
 from scripts.eval.constants import AssemblyAIModel
 
+from .apple_speech import AppleSpeechEvaluator
 from .asr import (
-    AppleSpeechEvaluator,
     AssemblyAIEvaluator,
     AssemblyAIStreamingEvaluator,
     DeepgramEvaluator,

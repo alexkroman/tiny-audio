@@ -8,7 +8,9 @@ import torch
 from tiny_audio.asr_processing import ASRProcessor
 
 
-def make_processor(pad_token_id=0, eos_token_id=2, template_return=None) -> ASRProcessor:
+def make_processor(
+    pad_token_id: int | None = 0, eos_token_id: int | None = 2, template_return: object = None
+) -> ASRProcessor:
     """Processor over mocks; `template_return` controls apply_chat_template."""
     tok = MagicMock()
     tok.pad_token_id = pad_token_id

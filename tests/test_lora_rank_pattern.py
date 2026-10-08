@@ -14,11 +14,13 @@ silent: the config looks conservative, the checkpoint loads, and the scale is
 wrong. So the scale assertion here matters more than the shape one.
 """
 
-from types import SimpleNamespace
-
+from conftest import stub
+from peft import LoraConfig, get_peft_model
 from torch import nn
+from transformers import PretrainedConfig, PreTrainedModel
 
 from tiny_audio.asr_config import ASRConfig
+from tiny_audio.asr_modeling import ASRModel
 
 
 class GateBlock(nn.Module):
@@ -32,9 +34,15 @@ class GateBlock(nn.Module):
         self.out_proj = nn.Linear(dim, dim, bias=False)
 
 
-class FakeDecoder(nn.Module):
+class FakeDecoderConfig(PretrainedConfig):
+    model_type = "fake_decoder"
+
+
+class FakeDecoder(PreTrainedModel):
+    config_class = FakeDecoderConfig
+
     def __init__(self, depth=2):
-        super().__init__()
+        super().__init__(FakeDecoderConfig())
         self.layers = nn.ModuleList(GateBlock() for _ in range(depth))
 
     def forward(self, x):
@@ -74,8 +82,6 @@ class TestASRConfigFields:
 
 class TestPatternApplication:
     def test_rank_override_applies_only_to_named_modules(self):
-        from peft import LoraConfig, get_peft_model
-
         model = get_peft_model(
             FakeDecoder(),
             LoraConfig(
@@ -96,8 +102,6 @@ class TestPatternApplication:
 
     def test_scale_is_preserved_across_the_override(self):
         """The whole reason `alpha_pattern` is set alongside `rank_pattern`."""
-        from peft import LoraConfig, get_peft_model
-
         model = get_peft_model(
             FakeDecoder(),
             LoraConfig(
@@ -119,8 +123,6 @@ class TestPatternApplication:
         recorded so a future edit that drops `alpha_pattern` fails here loudly
         instead of shipping a 4x-hot adapter.
         """
-        from peft import LoraConfig, get_peft_model
-
         model = get_peft_model(
             FakeDecoder(),
             LoraConfig(
@@ -136,8 +138,6 @@ class TestPatternApplication:
         assert got["out_proj"][2] == 2.0
 
     def test_override_shrinks_the_parameter_budget(self):
-        from peft import LoraConfig, get_peft_model
-
         def lora_params(**kwargs):
             model = get_peft_model(
                 FakeDecoder(),
@@ -157,21 +157,19 @@ class TestPatternApplication:
 class TestSetupLoraPassthrough:
     def test_setup_lora_forwards_both_patterns(self, monkeypatch):
         """ASRModel._setup_lora must hand the config's patterns to PEFT."""
-        import tiny_audio.asr_modeling as mod
-
         captured = {}
 
         class FakeLoraConfig:
             def __init__(self, **kwargs):
                 captured.update(kwargs)
 
-        monkeypatch.setattr("peft.LoraConfig", FakeLoraConfig)
-        monkeypatch.setattr("peft.get_peft_model", lambda m, c: m)
+        monkeypatch.setattr("tiny_audio.asr_modeling.LoraConfig", FakeLoraConfig)
+        monkeypatch.setattr("tiny_audio.asr_modeling.get_peft_model", lambda m, c: m)
 
         # `_setup_lora` only reads `config` and rebinds `self.language_model`,
         # so a namespace stands in for the half-built model without dragging in
         # nn.Module's attribute machinery.
-        holder = SimpleNamespace(language_model=nn.Linear(2, 2))
+        holder = stub(language_model=nn.Linear(2, 2))
         config = ASRConfig(
             use_lora=True,
             lora_rank=64,
@@ -180,30 +178,28 @@ class TestSetupLoraPassthrough:
             lora_rank_pattern={"in_proj_a": 16},
             lora_alpha_pattern={"in_proj_a": 32},
         )
-        mod.ASRModel._setup_lora(holder, config)
+        ASRModel._setup_lora(holder, config)
 
         assert captured["rank_pattern"] == {"in_proj_a": 16}
         assert captured["alpha_pattern"] == {"in_proj_a": 32}
 
     def test_setup_lora_tolerates_a_config_predating_the_fields(self, monkeypatch):
         """Checkpoint configs written before these fields must still load."""
-        import tiny_audio.asr_modeling as mod
-
         captured = {}
 
         class FakeLoraConfig:
             def __init__(self, **kwargs):
                 captured.update(kwargs)
 
-        monkeypatch.setattr("peft.LoraConfig", FakeLoraConfig)
-        monkeypatch.setattr("peft.get_peft_model", lambda m, c: m)
+        monkeypatch.setattr("tiny_audio.asr_modeling.LoraConfig", FakeLoraConfig)
+        monkeypatch.setattr("tiny_audio.asr_modeling.get_peft_model", lambda m, c: m)
 
         config = ASRConfig(use_lora=True, lora_rank=64, lora_alpha=128)
         del config.lora_rank_pattern
         del config.lora_alpha_pattern
 
-        holder = SimpleNamespace(language_model=nn.Linear(2, 2))
-        mod.ASRModel._setup_lora(holder, config)
+        holder = stub(language_model=nn.Linear(2, 2))
+        ASRModel._setup_lora(holder, config)
 
         assert captured["rank_pattern"] == {}
         assert captured["alpha_pattern"] == {}

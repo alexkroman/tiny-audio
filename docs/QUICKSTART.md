@@ -5,7 +5,9 @@
 ```python
 from transformers import pipeline
 
-pipe = pipeline("automatic-speech-recognition", model="mazesmazes/tiny-audio", trust_remote_code=True)
+pipe = pipeline(
+    "automatic-speech-recognition", model="mazesmazes/tiny-audio", trust_remote_code=True
+)
 print(pipe("audio.wav")["text"])
 ```
 
@@ -25,8 +27,8 @@ poetry run ta runpod plan -e stage_1
 poetry run python scripts/train.py +experiments=stage_1
 ```
 
-The `stage_1` recipe trains on the `multiasr` mix (about 3M utterances across ten corpora,
-over a terabyte on disk) at batch size 100, which needs an 80 GB GPU. See
+The `stage_1` recipe trains on the `multiasr` mix (about 3M utterances across ten corpora, over a
+terabyte on disk) at batch size 100, which needs an 80 GB GPU. See
 [Training on RunPod](../README.md#training-on-runpod) for the remote workflow.
 
 ## Evaluate

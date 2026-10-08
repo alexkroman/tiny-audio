@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 import torch
+from transformers.models.whisper.english_normalizer import EnglishTextNormalizer
 
 from scripts.eval.audio import TextNormalizer, as_16k_array, audio_to_wav_bytes, prepare_wav_bytes
 
@@ -93,10 +94,20 @@ class TestAs16kArray:
         assert np.allclose(out, tone, atol=1e-3)
 
 
+class _LowercaseNormalizer(EnglishTextNormalizer):
+    """Stand-in for Whisper's normalizer: lowercases, loads no spelling table."""
+
+    def __init__(self) -> None:
+        pass
+
+    def __call__(self, s: str) -> str:
+        return s.lower()
+
+
 class TestTextNormalizerFixes:
     """Project-level spelling fixes run after Whisper's normalizer."""
 
     def test_spelling_fixes_apply_after_base_normalizer(self):
         normalizer = object.__new__(TextNormalizer)
-        normalizer._normalizer = str.lower  # stand-in for Whisper's normalizer
+        normalizer._normalizer = _LowercaseNormalizer()
         assert normalizer.normalize("Okay, ALL RIGHT kinda") == "ok, alright kind of"

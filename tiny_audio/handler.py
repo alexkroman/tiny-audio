@@ -1,17 +1,36 @@
 """Custom inference handler for HuggingFace Inference Endpoints."""
 
-from typing import Any
+import os
+from typing import TYPE_CHECKING, Any
 
-try:
-    # For remote execution, imports are relative
+import nltk
+import torch
+
+if TYPE_CHECKING:
     from .asr_modeling import ASRModel
     from .asr_pipeline import ASRPipeline
     from .diarization import _get_device as _best_device
-except ImportError:
-    # For local execution, imports are not relative
-    from asr_modeling import ASRModel  # type: ignore[no-redef]
-    from asr_pipeline import ASRPipeline  # type: ignore[no-redef]
-    from diarization import _get_device as _best_device  # type: ignore[no-redef]
+else:
+    try:
+        # For remote execution, imports are relative
+        from .asr_modeling import ASRModel
+        from .asr_pipeline import ASRPipeline
+        from .diarization import _get_device as _best_device
+    except ImportError:
+        # For local execution, imports are not relative
+        from asr_modeling import ASRModel
+        from asr_pipeline import ASRPipeline
+        from diarization import _get_device as _best_device
+
+
+def _module_to(module: torch.nn.Module, device: torch.device) -> None:
+    """`module.to(device)`, in place.
+
+    `PreTrainedModel.to` is wrapped with `functools.wraps`, which type checkers
+    can't bind as a method; typed as `nn.Module` the call resolves. Same method
+    at runtime: it moves the module in place and returns it.
+    """
+    module.to(device)
 
 
 class EndpointHandler:
@@ -27,10 +46,6 @@ class EndpointHandler:
         Args:
             path: Path to model directory or HuggingFace model ID
         """
-        import os
-
-        import nltk
-
         nltk.download("punkt_tab", quiet=True)
 
         os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
@@ -47,7 +62,7 @@ class EndpointHandler:
         # flash_attn is missing.
         self.model = ASRModel.from_pretrained(path)
         self.device = _best_device()
-        self.model.to(self.device)
+        _module_to(self.model, self.device)
         self.model.eval()
 
         self.pipe = ASRPipeline(
@@ -68,7 +83,8 @@ class EndpointHandler:
         """
         inputs = data.get("inputs")
         if inputs is None:
-            raise ValueError("Missing 'inputs' in request data")
+            msg = "Missing 'inputs' in request data"
+            raise ValueError(msg)
 
         # Pass through any parameters from request, let model config provide defaults
         params = data.get("parameters", {})

@@ -10,6 +10,8 @@ from __future__ import annotations
 import re
 
 import numpy as np
+from rapidfuzz.distance import Levenshtein
+from scipy.optimize import linear_sum_assignment
 
 SPEAKER_TOKEN = "<SPK_{}>"
 _SPEAKER_RE = re.compile(r"<SPK_(\d+)>")
@@ -71,8 +73,6 @@ def word_errors(ref: list[str], hyp: list[str]) -> int:
     rapidfuzz (C++, already a jiwer dependency): a whole meeting is ~1-2k
     words per speaker, and cpWER compares every speaker pair.
     """
-    from rapidfuzz.distance import Levenshtein
-
     return Levenshtein.distance(ref, hyp)
 
 
@@ -91,8 +91,6 @@ def cp_errors(ref: str, hyp: str, normalize=lambda s: s) -> tuple[int, int]:
     speakers count against empty), so speaker labels are permutation-free and
     a word given to the wrong voice costs a deletion plus an insertion.
     """
-    from scipy.optimize import linear_sum_assignment
-
     r = list(_speaker_words(ref, normalize).values())
     h = list(_speaker_words(hyp, normalize).values())
     n = max(len(r), len(h), 1)

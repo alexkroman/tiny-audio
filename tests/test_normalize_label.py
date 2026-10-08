@@ -1,4 +1,4 @@
-"""Tests for scripts.train._normalize_label and _needs_truecase.
+"""Tests for scripts.labels._normalize_label and _needs_truecase.
 
 Covers the Ultravox-style training-label normalizer:
 - Gigaspeech punct-tag restoration (<COMMA> -> ',', etc.)
@@ -15,7 +15,7 @@ from typing import ClassVar
 
 import pytest
 
-from scripts.train import (
+from scripts.labels import (
     TEXT_CASE_CASED,
     TEXT_CASE_MONO,
     _needs_truecase,
@@ -171,13 +171,13 @@ class TestUnicodeCleanup:
         assert '"' in result
 
     def test_curly_apostrophe_normalized(self):
-        result = _normalize_label("I don’t think so.")
-        assert "’" not in result
+        result = _normalize_label("I don\u2019t think so.")
+        assert "\u2019" not in result
         assert "'" in result
 
     def test_full_width_latin_normalized(self):
         # NFKC folds full-width to half-width.
-        result = _normalize_label("ＨＥＬＬＯ ＷＯＲＬＤ")
+        result = _normalize_label("\uff28\uff25\uff2c\uff2c\uff2f \uff37\uff2f\uff32\uff2c\uff24")
         assert "HELLO" in result.upper() or "Hello" in result
 
     def test_html_entity_decoded(self):
@@ -194,7 +194,7 @@ class TestUnicodeCleanup:
 class TestEdgeCases:
     def test_empty_input(self):
         assert _normalize_label("") == ""
-        assert _normalize_label(None) == ""  # type: ignore[arg-type]
+        assert _normalize_label(None) == ""
         assert _normalize_label("   ") == ""
 
     def test_only_markers_becomes_empty(self):

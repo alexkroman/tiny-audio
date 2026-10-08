@@ -44,10 +44,8 @@ def main(
     # HfApi resolves the `hf auth login` cache itself when no token is passed;
     # fail early with a clear message rather than on the first authenticated call.
     if hf_token is None and get_token() is None:
-        raise typer.BadParameter(
-            "not logged in: set HF_TOKEN, pass --hf-token, or run `hf auth login`",
-            param_hint="--hf-token",
-        )
+        msg = "not logged in: set HF_TOKEN, pass --hf-token, or run `hf auth login`"
+        raise typer.BadParameter(msg, param_hint="--hf-token")
 
     # One atomic commit built from CommitOperationAdd entries. `path_in_repo`
     # is independent of the local path, so MODEL_CARD.md publishes as
@@ -78,6 +76,8 @@ def main(
     for filename in (
         "asr_config.py",
         "asr_modeling.py",
+        "asr_layers.py",
+        "asr_types.py",
         "asr_processing.py",
         "asr_pipeline.py",
         "projectors.py",

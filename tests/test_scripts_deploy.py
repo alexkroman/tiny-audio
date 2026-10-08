@@ -3,9 +3,27 @@
 Focuses on behavior testing rather than existence checks.
 """
 
+import importlib
+import subprocess
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
+import typer
+
+from scripts.deploy import runpod
+from scripts.deploy.handler_local import find_latest_model
+from scripts.deploy.plan import DATASET_DISK_FACTOR, build_plan, wait_command
+from scripts.deploy.remote_scripts import build_training_script
+from scripts.deploy.runpod import (
+    SSH_CONNECT_ATTEMPTS,
+    SSH_KEY_PATH,
+    _gitignore_aware_file_list,
+    _remote_free_gib,
+    get_connection,
+)
+from scripts.utils import get_project_root
 
 
 class TestRunpodCLI:
@@ -15,9 +33,6 @@ class TestRunpodCLI:
         """File list piped into rsync should honor .gitignore (no __pycache__,
         no .git/, no datasets_cache) and drop the suffix blocklist (no
         .safetensors — Swift bundled weights aren't needed on RunPod)."""
-        from scripts.deploy.runpod import _gitignore_aware_file_list
-        from scripts.utils import get_project_root
-
         files = _gitignore_aware_file_list(get_project_root()).splitlines()
 
         assert files, "expected at least one file from git ls-files"
@@ -30,8 +45,6 @@ class TestRunpodCLI:
 
     def test_ssh_key_path_is_valid(self):
         """Test that SSH_KEY_PATH points to expected location."""
-        from scripts.deploy.runpod import SSH_KEY_PATH
-
         assert SSH_KEY_PATH is not None
         assert "ssh" in SSH_KEY_PATH.lower()
 
@@ -41,8 +54,6 @@ class TestRunpodConnectionUtils:
 
     def test_get_connection_configures_correctly(self):
         """Test that get_connection returns properly configured Connection."""
-        from scripts.deploy.runpod import get_connection
-
         conn = get_connection("example.com", 22)
 
         assert conn.host == "example.com"
@@ -50,6 +61,7 @@ class TestRunpodConnectionUtils:
         assert conn.user == "root"
 
         # Verify SSH key is configured
+        assert conn.connect_kwargs is not None
         key_path = conn.connect_kwargs.get("key_filename", "")
         if isinstance(key_path, list):
             key_path = key_path[0] if key_path else ""
@@ -65,15 +77,11 @@ class TestRemoteDiskPreflight:
 
     @staticmethod
     def _conn(stdout: str, ok: bool = True):
-        from unittest.mock import MagicMock
-
         conn = MagicMock()
         conn.run.return_value = MagicMock(ok=ok, stdout=stdout)
         return conn
 
     def test_parses_available_column_from_df(self):
-        from scripts.deploy.runpod import _remote_free_gib
-
         # `df -Pk` columns: Filesystem 1K-blocks Used Available Capacity Mounted
         conn = self._conn("overlay 2113650000 1000000 2097152000 1% /workspace\n")
         free = _remote_free_gib(conn)
@@ -81,20 +89,12 @@ class TestRemoteDiskPreflight:
         assert free == pytest.approx(2097152000 / 1024**2, rel=1e-6)  # 2000 GiB
 
     def test_returns_none_when_df_fails(self):
-        from scripts.deploy.runpod import _remote_free_gib
-
         assert _remote_free_gib(self._conn("", ok=False)) is None
 
     def test_returns_none_on_unparseable_output(self):
-        from scripts.deploy.runpod import _remote_free_gib
-
         assert _remote_free_gib(self._conn("df: /workspace: No such file\n")) is None
 
     def test_exits_when_pod_is_too_small(self, monkeypatch):
-        import typer
-
-        from scripts.deploy import runpod
-
         monkeypatch.setattr(runpod, "_remote_free_gib", lambda conn, *a, **k: 100.0)
         monkeypatch.setattr(
             "scripts.deploy.plan.build_plan",
@@ -105,8 +105,6 @@ class TestRemoteDiskPreflight:
             runpod._check_remote_disk(self._conn(""), "stage_1", [])
 
     def test_proceeds_when_pod_is_big_enough(self, monkeypatch):
-        from scripts.deploy import runpod
-
         monkeypatch.setattr(runpod, "_remote_free_gib", lambda conn, *a, **k: 3000.0)
         monkeypatch.setattr(
             "scripts.deploy.plan.build_plan",
@@ -117,8 +115,6 @@ class TestRemoteDiskPreflight:
         runpod._check_remote_disk(self._conn(""), "stage_1", [])
 
     def test_unreadable_df_does_not_block_training(self, monkeypatch):
-        from scripts.deploy import runpod
-
         monkeypatch.setattr(runpod, "_remote_free_gib", lambda conn, *a, **k: None)
 
         # A df we cannot read is not evidence the pod is too small; the
@@ -126,12 +122,11 @@ class TestRemoteDiskPreflight:
         runpod._check_remote_disk(self._conn(""), "stage_1", [])
 
     def test_plan_failure_does_not_block_training(self, monkeypatch):
-        from scripts.deploy import runpod
-
         monkeypatch.setattr(runpod, "_remote_free_gib", lambda conn, *a, **k: 100.0)
 
         def boom(*a, **k):
-            raise RuntimeError("Hub is down")
+            msg = "Hub is down"
+            raise RuntimeError(msg)
 
         monkeypatch.setattr("scripts.deploy.plan.build_plan", boom)
 
@@ -142,8 +137,6 @@ class TestDiskPlan:
     """plan.py's disk model must count what actually lands on /workspace."""
 
     def test_datasets_charged_for_parquet_and_arrow(self):
-        from scripts.deploy.plan import DATASET_DISK_FACTOR
-
         # datasets keeps the Hub parquet download AND the arrow tables it
         # generates from it; measured at 2.05x on librispeech_asr_dummy.
         assert DATASET_DISK_FACTOR > 2.0
@@ -151,8 +144,6 @@ class TestDiskPlan:
     def test_checkpoints_scale_with_trainable_stack_and_retention(self):
         """A joint fine-tune's checkpoints are the decoder + AdamW, times
         save_total_limit -- not one projector-sized file."""
-        from scripts.deploy.plan import build_plan
-
         plan = build_plan(
             "stage_1",
             ["training.save_total_limit=1", "data=librispeech_dummy"],
@@ -178,8 +169,6 @@ class TestBuildTrainingScript:
     @pytest.fixture
     def build_script(self):
         """Get the build_training_script function."""
-        from scripts.deploy.runpod import build_training_script
-
         return build_training_script
 
     def test_basic_script_structure(self, build_script):
@@ -243,15 +232,11 @@ class TestHandlerLocal:
 
     def test_find_latest_model_returns_none_for_nonexistent_dir(self, tmp_path: Path):
         """Test find_latest_model returns None when outputs dir doesn't exist."""
-        from scripts.deploy.handler_local import find_latest_model
-
         result = find_latest_model(str(tmp_path / "nonexistent"))
         assert result is None
 
     def test_find_latest_model_returns_none_for_empty_dir(self, tmp_path: Path):
         """Test find_latest_model returns None when outputs dir is empty."""
-        from scripts.deploy.handler_local import find_latest_model
-
         outputs_dir = tmp_path / "outputs"
         outputs_dir.mkdir()
 
@@ -277,15 +262,11 @@ class TestPackageImports:
     )
     def test_module_importable(self, module_path):
         """Test that module can be imported without errors."""
-        import importlib
-
         module = importlib.import_module(module_path)
         assert module is not None
 
 
 def test_generic_training_script_runs_scripts_train():
-    from scripts.deploy.runpod import build_training_script
-
     script = build_training_script("granite_qwen", "token", None, None, [])
     assert "python -m scripts.train +experiments=granite_qwen" in script
 
@@ -299,11 +280,6 @@ class TestDeployRetries:
         monkeypatch.setattr("tenacity.nap.time.sleep", lambda _s: None)
 
     def test_wait_polls_until_ssh_endpoint_appears(self, monkeypatch, capsys):
-        import subprocess
-        from types import SimpleNamespace
-
-        from scripts.deploy.plan import wait_command
-
         outputs = iter(["", '{"ssh": null}', '{"ssh": {"ip": "1.2.3.4", "port": 22022}}'])
         monkeypatch.setattr(
             subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=next(outputs))
@@ -312,34 +288,19 @@ class TestDeployRetries:
         assert capsys.readouterr().out.strip() == "1.2.3.4 22022"
 
     def test_wait_gives_up_after_timeout(self, monkeypatch, capsys):
-        import subprocess
-        from types import SimpleNamespace
-
-        import typer
-
-        from scripts.deploy.plan import wait_command
-
         monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="{}"))
         with pytest.raises(typer.Exit):
             wait_command(pod_id="pod", timeout_s=0)
         assert "no SSH endpoint within 0s" in capsys.readouterr().out
 
     def test_ssh_probe_retries_then_succeeds(self):
-        from unittest.mock import MagicMock
-
-        from scripts.deploy.runpod import test_connection
-
         conn = MagicMock()
         conn.run.side_effect = [OSError("refused"), None]
-        assert test_connection(conn) is True
+        assert runpod.test_connection(conn) is True
         assert conn.run.call_count == 2
 
     def test_ssh_probe_gives_up(self):
-        from unittest.mock import MagicMock
-
-        from scripts.deploy.runpod import SSH_CONNECT_ATTEMPTS, test_connection
-
         conn = MagicMock()
         conn.run.side_effect = OSError("refused")
-        assert test_connection(conn) is False
+        assert runpod.test_connection(conn) is False
         assert conn.run.call_count == SSH_CONNECT_ATTEMPTS

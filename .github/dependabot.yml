@@ -1,5 +1,6 @@
 # Workflow actions are pinned to commit SHAs (zizmor's unpinned-uses audit);
 # Dependabot keeps those pins, and the version comments beside them, current.
+---
 version: 2
 updates:
   - package-ecosystem: github-actions

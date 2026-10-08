@@ -24,11 +24,15 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from enum import StrEnum
-from typing import Annotated
+from typing import Annotated, cast
 
 import torch
 import typer
 from omegaconf import OmegaConf
+from transformers.models.llama.modeling_llama import LlamaRMSNorm
+from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm
+from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
+from transformers.trainer_pt_utils import get_parameter_names
 
 from scripts.utils import get_project_root
 from tiny_audio.asr_config import ASRConfig
@@ -52,8 +56,8 @@ def load_embedded_training_knobs() -> dict[str, float | None]:
             "weight_decay": None,
             "projector_weight_decay": None,
         }
-    cfg = OmegaConf.to_container(OmegaConf.load(yaml_path)) or {}
-    training = cfg.get("training") or {}
+    cfg = OmegaConf.to_container(OmegaConf.load(yaml_path))
+    training = (cfg.get("training") if isinstance(cfg, dict) else None) or {}
 
     def _to_float(v):
         return float(v) if v is not None else None
@@ -79,11 +83,6 @@ def build_param_groups(
     routing audit and the configured `lr` / `wd` that ASRTrainer would
     apply under embedded.yaml's knobs.
     """
-    from transformers.models.llama.modeling_llama import LlamaRMSNorm
-    from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm
-    from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
-    from transformers.trainer_pt_utils import get_parameter_names
-
     forbidden = [*list(ALL_LAYERNORM_LAYERS), Qwen3RMSNorm, LlamaRMSNorm]
     decay_set = set(get_parameter_names(model, forbidden))
     decay_set = {n for n in decay_set if "bias" not in n}
@@ -132,7 +131,7 @@ def build_param_groups(
 
 
 def effective_update_norms(groups: list[dict]) -> dict[str, float]:
-    """SGD-style lr × ||grad|| approximation aggregated to projector/decoder.
+    """SGD-style lr x ||grad|| approximation aggregated to projector/decoder.
 
     NOT Adam's true update: Adam normalizes per-parameter by sqrt(v) + eps,
     which we don't have at step 0. This is a back-of-envelope sanity check
@@ -190,7 +189,10 @@ def build_model(dtype: torch.dtype, device: str, model_id: str | None = None) ->
         # saved config; force it off so the LM gets gradient as in training.
         for p in model.language_model.parameters():
             p.requires_grad_(True)
-    model.to(device=device, dtype=dtype)
+    # PreTrainedModel.to is decorated with functools.wraps(nn.Module.to), which
+    # type checkers read as the unbound function (missing `self`). Calling it
+    # through the nn.Module type still dispatches to the same override.
+    cast(torch.nn.Module, model).to(device=device, dtype=dtype)
     return model
 
 
@@ -247,17 +249,17 @@ def synthetic_batch(
         )
         full_ids = tok(full_text, add_special_tokens=False)["input_ids"]
         prompt_ids = tok(prompt_text, add_special_tokens=False)["input_ids"]
-        labels = [-100] * len(prompt_ids) + list(full_ids[len(prompt_ids) :])
-        labels = labels[: len(full_ids)]
+        sample_labels = [-100] * len(prompt_ids) + list(full_ids[len(prompt_ids) :])
+        sample_labels = sample_labels[: len(full_ids)]
         samples_input_ids.append(list(full_ids))
-        samples_labels.append(labels)
+        samples_labels.append(sample_labels)
 
     max_len = max(len(x) for x in samples_input_ids)
     pad_id = tok.pad_token_id
     input_ids = torch.full((batch_size, max_len), pad_id, dtype=torch.long)
     attention_mask = torch.zeros((batch_size, max_len), dtype=torch.long)
     labels = torch.full((batch_size, max_len), -100, dtype=torch.long)
-    for i, (ids, lab) in enumerate(zip(samples_input_ids, samples_labels)):
+    for i, (ids, lab) in enumerate(zip(samples_input_ids, samples_labels, strict=True)):
         input_ids[i, : len(ids)] = torch.tensor(ids)
         attention_mask[i, : len(ids)] = 1
         labels[i, : len(lab)] = torch.tensor(lab)
@@ -322,9 +324,10 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
     # the logits are where a bad projector output shows up first. The kwarg
     # only exists on liger's patched forward, so it is gated on the same flag
     # ASRModel uses.
+    forward_kwargs: dict[str, bool] = {}
     if model._lm_accepts_skip_logits:
-        batch["skip_logits"] = False
-    outputs = model(**batch)
+        forward_kwargs["skip_logits"] = False
+    outputs = model(**batch, **forward_kwargs)
     loss = outputs.loss
     print(f"    loss = {loss.item():.4f}  finite={torch.isfinite(loss).item()}")
     if outputs.logits is None:
@@ -407,25 +410,23 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
 
     print("[6] <audio>-token row gradient (sanity check):")
     audio_id = model.audio_token_id
-    embed = model.language_model.get_input_embeddings()
-    if embed.weight.grad is not None:
-        row_grad = embed.weight.grad[audio_id].detach().float()
+    # The input embedding is an nn.Embedding and the output head an nn.Linear;
+    # both hold their weight as a Parameter (a Tensor), never a submodule.
+    embed_weight = model.language_model.get_input_embeddings().weight
+    assert isinstance(embed_weight, torch.Tensor)
+    if embed_weight.grad is not None:
+        row_grad = embed_weight.grad[audio_id].detach().float()
         print(f"    embed_tokens[<audio>] ||grad|| = {row_grad.norm().item():.6e}")
         print("    (should be zero if labels mask user prompt and no assistant token is <audio>)")
     out_emb = model.language_model.get_output_embeddings()
-    if (
-        out_emb is not None
-        and out_emb.weight.grad is not None
-        and not torch.equal(
-            out_emb.weight.data_ptr() == embed.weight.data_ptr() and embed.weight,
-            embed.weight,  # silence linter; we just want pointer equality below
-        )
-    ):
+    out_weight = out_emb.weight if out_emb is not None else None
+    assert out_weight is None or isinstance(out_weight, torch.Tensor)
+    tied = out_weight is not None and out_weight.data_ptr() == embed_weight.data_ptr()
+    if out_weight is not None and out_weight.grad is not None and not tied:
         # Untied head — separate gradient meaningful.
-        row_grad = out_emb.weight.grad[audio_id].detach().float()
+        row_grad = out_weight.grad[audio_id].detach().float()
         print(f"    lm_head[<audio>]      ||grad|| = {row_grad.norm().item():.6e}")
     else:
-        tied = out_emb is not None and out_emb.weight.data_ptr() == embed.weight.data_ptr()
         print(f"    lm_head tied to embed_tokens: {tied}")
     print()
 
@@ -445,7 +446,8 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
     knobs = load_embedded_training_knobs()
     groups = build_param_groups(model, knobs)
     print(
-        f"    {'group':22s} {'params':>6s} {'numel':>14s}  {'||grad||':>12s}  {'lr':>8s}  {'wd':>6s}"
+        f"    {'group':22s} {'params':>6s} {'numel':>14s}  "
+        f"{'||grad||':>12s}  {'lr':>8s}  {'wd':>6s}"
     )
     total_routed = 0
     for g in groups:
@@ -475,16 +477,8 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
         print(f"    !! encoder params in optimizer groups: {encoder_in_groups} (should be 0)")
     print()
 
-    # Stash for the verdict in [11] to consult without re-running build_param_groups.
-    report._last_routing_audit = {
-        "total_routed": total_routed,
-        "expected_trainable": expected_trainable,
-        "encoder_in_groups": encoder_in_groups,
-        "knobs": knobs,
-    }
-
     eff = effective_update_norms(groups)
-    print("[10] Effective per-step update estimate (lr × ||grad||, SGD-style approximation):")
+    print("[10] Effective per-step update estimate (lr \u00d7 ||grad||, SGD-style approximation):")
     print(f"    projector contribution: {eff['projector']:.2e}")
     print(f"    decoder   contribution: {eff['decoder']:.2e}")
     ratio_str = "inf (decoder=0)" if math.isinf(eff["ratio"]) else f"{eff['ratio']:.3f}"
@@ -516,31 +510,28 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
                 "claim at projectors.py:30 may be wrong; verify before relying on it"
             )
 
-    # New: optimizer-routing audit (relies on [9])
-    audit = getattr(report, "_last_routing_audit", None)
-    if audit is not None:
-        if audit["total_routed"] != audit["expected_trainable"]:
-            issues.append(
-                f"optimizer group routing: {audit['total_routed']} routed "
-                f"vs {audit['expected_trainable']} trainable (orphans)"
-            )
-        if audit["encoder_in_groups"]:
-            issues.append(
-                f"optimizer group routing: {audit['encoder_in_groups']} frozen "
-                "encoder param(s) ended up in an optimizer group"
-            )
-        # LR/WD mismatch vs embedded.yaml. Only check when knobs were readable.
-        knobs = audit["knobs"]
-        if knobs["learning_rate"] is not None and knobs["learning_rate"] != 1e-3:
-            warnings.append(
-                f"embedded.yaml learning_rate={knobs['learning_rate']} "
-                "differs from the 1e-3 this probe was designed against"
-            )
-        if knobs["decoder_learning_rate"] is not None and knobs["decoder_learning_rate"] != 1e-4:
-            warnings.append(
-                f"embedded.yaml decoder_learning_rate={knobs['decoder_learning_rate']} "
-                "differs from the 1e-4 this probe was designed against"
-            )
+    # New: optimizer-routing audit (relies on the counts and knobs from [9])
+    if total_routed != expected_trainable:
+        issues.append(
+            f"optimizer group routing: {total_routed} routed "
+            f"vs {expected_trainable} trainable (orphans)"
+        )
+    if encoder_in_groups:
+        issues.append(
+            f"optimizer group routing: {encoder_in_groups} frozen "
+            "encoder param(s) ended up in an optimizer group"
+        )
+    # LR/WD mismatch vs embedded.yaml. Only check when knobs were readable.
+    if knobs["learning_rate"] is not None and knobs["learning_rate"] != 1e-3:
+        warnings.append(
+            f"embedded.yaml learning_rate={knobs['learning_rate']} "
+            "differs from the 1e-3 this probe was designed against"
+        )
+    if knobs["decoder_learning_rate"] is not None and knobs["decoder_learning_rate"] != 1e-4:
+        warnings.append(
+            f"embedded.yaml decoder_learning_rate={knobs['decoder_learning_rate']} "
+            "differs from the 1e-4 this probe was designed against"
+        )
 
     if issues:
         for s in issues:

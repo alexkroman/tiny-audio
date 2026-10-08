@@ -76,7 +76,7 @@ class TestLabelMasking:
         pad_id = tokenizer.pad_token_id
         unmasked_positions = [
             i
-            for i, (label, inp) in enumerate(zip(labels, input_ids))
+            for i, (label, inp) in enumerate(zip(labels, input_ids, strict=True))
             if label != -100 and inp != pad_id
         ]
 
@@ -105,7 +105,7 @@ class TestLabelMasking:
         # Find <|im_end|> tokens that are unmasked
         unmasked_im_end = [
             i
-            for i, (label, inp) in enumerate(zip(labels, input_ids))
+            for i, (label, inp) in enumerate(zip(labels, input_ids, strict=True))
             if inp == im_end_id and label == im_end_id
         ]
 
@@ -147,7 +147,7 @@ class TestLabelMasking:
         input_ids = batch["input_ids"][0].tolist()
 
         # For every unmasked position, label should equal input_id
-        for i, (label, input_id) in enumerate(zip(labels, input_ids)):
+        for i, (label, input_id) in enumerate(zip(labels, input_ids, strict=True)):
             if label != -100:
                 err = f"Label mismatch at position {i}: label={label}, input_id={input_id}"
                 assert label == input_id, err
@@ -168,7 +168,7 @@ class TestAudioTokens:
         # Count audio tokens in input_ids
         num_audio_tokens = (batch["input_ids"] == audio_token_id).sum().item()
 
-        # Expected: real_mel_len // 4 (Whisper stride-2 × projector stride-2)
+        # Expected: real_mel_len // 4 (Whisper stride-2 x projector stride-2)
         # Use attention mask to get actual audio length (not padded)
         real_mel_len = batch["audio_attention_mask"].sum().item()
         expected_audio_tokens = real_mel_len // 4

@@ -4,10 +4,17 @@ Measured on 500 Peoples clips, paired bootstrap: 20.51% -> 19.28% WER
 (delta -1.22, CI [-1.83, -0.64]); CommonVoice +0.30, CI [-0.43, +1.17] (ns).
 """
 
+import json
+import types
+from unittest.mock import MagicMock
+
 import numpy as np
 import pytest
+import transformers
+from conftest import stub
 
 from tiny_audio.asr_config import ASRConfig
+from tiny_audio.asr_pipeline import ASRPipeline
 from tiny_audio.asr_processing import prepend_lead_in
 
 
@@ -37,6 +44,7 @@ class TestPrependLeadIn:
     def test_dtype_is_preserved(self):
         for dt in (np.float32, np.float64):
             out = prepend_lead_in(np.ones(10, dtype=dt), 16000, 0.1)
+            assert isinstance(out, np.ndarray)
             assert out.dtype == dt
 
 
@@ -48,8 +56,6 @@ class TestConfigField:
         assert ASRConfig(inference_lead_in_seconds=0.0).inference_lead_in_seconds == 0.0
 
     def test_survives_json_round_trip(self):
-        import json
-
         cfg = ASRConfig(inference_lead_in_seconds=0.4)
         restored = ASRConfig.from_dict(json.loads(cfg.to_json_string()))
         assert restored.inference_lead_in_seconds == 0.4
@@ -59,20 +65,12 @@ class TestPipelineIntegration:
     """The pipeline must apply a real config value and ignore a stubbed one."""
 
     def _fake_pipeline(self, lead_in):
-        import types
-
-        from tiny_audio.asr_pipeline import ASRPipeline
-
         pipe = ASRPipeline.__new__(ASRPipeline)
-        pipe.model = types.SimpleNamespace(
-            config=types.SimpleNamespace(inference_lead_in_seconds=lead_in)
-        )
-        pipe.feature_extractor = types.SimpleNamespace(sampling_rate=16000)
+        pipe.model = stub(config=types.SimpleNamespace(inference_lead_in_seconds=lead_in))
+        pipe.feature_extractor = stub(sampling_rate=16000)
         return pipe
 
     def _captured(self, pipe, audio, monkeypatch):
-        import transformers
-
         seen = {}
 
         def fake_preprocess(self, inputs, **params):
@@ -97,8 +95,6 @@ class TestPipelineIntegration:
 
     def test_non_numeric_config_is_ignored(self, monkeypatch):
         """A MagicMock coerces to 1.0 under `float()` -- a full second of silence."""
-        from unittest.mock import MagicMock
-
         audio = np.ones(160, dtype=np.float32)
         got = self._captured(self._fake_pipeline(MagicMock()), audio, monkeypatch)
         assert got["raw"] is audio

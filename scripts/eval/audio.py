@@ -5,6 +5,7 @@ import io
 import re
 from typing import ClassVar
 
+import librosa
 import numpy as np
 import soundfile as sf
 import torch
@@ -49,14 +50,15 @@ def prepare_wav_bytes(wav_data) -> bytes:
             return wav_data["bytes"]
         if wav_data.get("path"):
             return _read_path_to_wav(wav_data["path"])
+    else:
+        if hasattr(wav_data, "array") and hasattr(wav_data, "sampling_rate"):
+            return audio_to_wav_bytes(wav_data.array, wav_data.sampling_rate)
 
-    if hasattr(wav_data, "array") and hasattr(wav_data, "sampling_rate"):
-        return audio_to_wav_bytes(wav_data.array, wav_data.sampling_rate)
+        if hasattr(wav_data, "path") and wav_data.path:
+            return _read_path_to_wav(wav_data.path)
 
-    if hasattr(wav_data, "path") and wav_data.path:
-        return _read_path_to_wav(wav_data.path)
-
-    raise ValueError(f"Unsupported audio format: {type(wav_data)}")
+    msg = f"Unsupported audio format: {type(wav_data)}"
+    raise ValueError(msg)
 
 
 def as_16k_array(audio) -> np.ndarray:
@@ -68,8 +70,6 @@ def as_16k_array(audio) -> np.ndarray:
         array, sample_rate = sf.read(io.BytesIO(prepare_wav_bytes(audio)))
 
     if sample_rate != 16000:
-        import librosa
-
         array = librosa.resample(array, orig_sr=sample_rate, target_sr=16000)
     return array
 

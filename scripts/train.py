@@ -1,28 +1,16 @@
 #!/usr/bin/env python3
 """Training script for ASR models using Hydra configuration."""
 
-# ruff: noqa: E402
-# The trl env-var must be set, and the noisy-logger silencer must run,
-# *before* their respective modules are imported below — so non-import
-# statements precede some imports here. Suppress E402 file-wide rather
-# than per-line.
-
 import contextlib
-import functools
 import logging
 import os
-import re
 import subprocess
+import warnings
+from collections.abc import Callable
 from dataclasses import fields
 from pathlib import Path
-from typing import Any
-
-os.environ["TRL_EXPERIMENTAL_SILENCE"] = "1"
-
-for _noisy in ("httpx", "httpcore", "urllib3", "huggingface_hub.file_download"):
-    logging.getLogger(_noisy).setLevel(logging.WARNING)
-
-logger = logging.getLogger(__name__)
+from types import ModuleType
+from typing import Any, cast
 
 import hydra
 import numpy as np
@@ -38,19 +26,57 @@ from datasets import (
 from omegaconf import DictConfig, OmegaConf
 from tqdm.auto import tqdm
 from transformers import (
+    PreTrainedModel,
     Trainer,
     TrainerCallback,
+    TrainerControl,
+    TrainerState,
     TrainingArguments,
 )
-from trl.experimental.utils import DataCollatorForChatML  # pyright: ignore[reportMissingImports]
+from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
+from transformers.trainer_pt_utils import get_parameter_names
+from trl.import_utils import TRLExperimentalWarning
 
-from scripts import train_config  # noqa: F401  (registers the `base_config` schema)
+from scripts.labels import (
+    TEXT_CASE_CASED,
+    TEXT_CASE_MONO,
+    _has_edge_content_tag,
+    _normalize_label,
+)
+from scripts.train_config import register_configs
 from tiny_audio.asr_config import (
     DEFAULT_ENCODER_CONV_LAYERS,
     ASRConfig,
     compute_encoder_output_length,
 )
 from tiny_audio.asr_modeling import ASRModel
+
+# trl.experimental warns (TRLExperimentalWarning) the first time it is
+# imported; DataCollatorForChatML is the only thing used from it.
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", TRLExperimentalWarning)
+    from trl.experimental.utils import DataCollatorForChatML
+
+# liger is a linux-only optional dependency (see pyproject.toml); without it
+# training falls back to stock kernels and unfused cross-entropy.
+try:
+    from liger_kernel import transformers as liger_transformers
+except ImportError as exc:
+    LIGER_TRANSFORMERS: ModuleType | None = None
+    _LIGER_IMPORT_ERROR: ImportError | None = exc
+else:
+    LIGER_TRANSFORMERS = liger_transformers
+    _LIGER_IMPORT_ERROR = None
+
+for _noisy in ("httpx", "httpcore", "urllib3", "huggingface_hub.file_download"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
+logger = logging.getLogger(__name__)
+
+# Register the `base_config` structured-config schema that configs/config.yaml
+# lists first in its defaults (scripts/train_config.py). Must happen before
+# @hydra.main composes the config.
+register_configs()
 
 TRANSCRIBE_PROMPT = "Transcribe the speech to text"
 # Used for sources whose transcripts natively carry punctuation, selected per
@@ -80,289 +106,6 @@ TRANSCRIBE_PROMPT = "Transcribe the speech to text"
 # Measure before acting.
 TRANSCRIBE_PROMPT_PUNCT = "Transcribe the speech with proper punctuation and capitalization"
 
-# Gigaspeech ships inline punctuation as angle-bracket tags so we restore
-# them to real punctuation before any other normalization. Pattern follows
-# the Ultravox text_proc.format_asr_text recipe.
-_GIGASPEECH_PUNCT_MAP = {
-    "COMMA": ",",
-    "PERIOD": ".",
-    "QUESTIONMARK": "?",
-    "EXCLAMATIONPOINT": "!",
-}
-_GIGASPEECH_PUNCT_RE = re.compile(
-    r"\s*<(COMMA|PERIOD|QUESTIONMARK|EXCLAMATIONPOINT)>",
-    re.IGNORECASE,
-)
-# Non-punct annotation markers worth stripping (but keep the rest of the
-# label). Gigaspeech ships <SIL>/<NOISE>/<MUSIC>/<OTHER> for non-speech
-# segments; TEDLIUM ships <unk> in ~92% of train rows; Switchboard ships
-# <laugh>; EdAcc ships <overlap>/<dtmf>/<foreign>/<no-speech>/<lipsmack>;
-# Earnings22 ships <clear_throat>/<inaudible>/<crosstalk>. These mark
-# intra-utterance events that the eval refs do NOT include, so stripping
-# is safe.
-#
-# Strip-don't-drop is deliberate: a previous revision tried Ultravox's
-# whole-sample-drop pattern for the four Gigaspeech non-speech tags and
-# broke eval — small eval batches that happened to draw samples with
-# those tags came back fully empty and crashed the collator. Stripping
-# preserves partial speech transcripts (audio may have speech around the
-# tagged non-speech moment) and the empty-label filter at the collator
-# still catches the edge case where the entire label was just a tag.
-# After the Gigaspeech punct map converts <COMMA>/<PERIOD>/etc. to real
-# punctuation, any remaining `<...>` token is a non-speech annotation
-# marker (Gigaspeech <MUSIC>/<NOISE>/<SIL>/<OTHER>, TEDLIUM <unk>,
-# Switchboard <LAUGH>, EdAcc <overlap>/<dtmf>/<foreign>/<no-speech>/
-# <lipsmack>, Earnings22 <clear_throat>/<inaudible>/<crosstalk>, plus the
-# long tail of bodily-noise tags like <inhale>/<sigh>/<cough> that vary
-# across corpora). ASR transcripts never legitimately contain `<word>`
-# tokens, so a generic strip is safer than a whitelist (whitelists
-# silently leak whichever marker variant a new corpus happens to use,
-# training the decoder to emit it as a literal token). Substitution
-# uses a single space so adjacent-no-whitespace forms (`word<sigh>word`)
-# don't collapse to a concatenated string before the whitespace pass.
-_RESIDUAL_ANGLE_TAG_RE = re.compile(r"<[^>]+>")
-# TEDLIUM occasionally inlines editorial commentary in square brackets
-# ([ medicine ], [ multi-word stage direction ]) — ~0.25% of train rows;
-# zero in dev/test. Same single-space substitution rationale as above.
-_TEDLIUM_BRACKET_RE = re.compile(r"\[[^\]]*\]")
-# TEDLIUM writes audience events as bare words at segment edges ("laughter so
-# i had to add handcuffs", "... united hatzalah applause"): 53 edge vs 2
-# mid-segment hits in 15,000 train rows, the mid ones split between an event
-# and real speech ("i felt applause on the vest"), so only edges are
-# stripped. The TEDLIUM eval refs carry none. ~0.4% of rows, but frozen-2's
-# plain prompt amplified it into a leading "Laughter" on 15% of CommonVoice.
-# Applied only to all-lowercase mono labels (TEDLIUM's raw form), so cased
-# sources and ALL-CAPS Gigaspeech/AMI keep a real edge "laughter".
-_EDGE_EVENT_RE = re.compile(r"^(?:(?:laughter|applause)\b\s*)+|(?:\s*\b(?:laughter|applause))+$")
-# Word-bounded `per cent` → `percent` to avoid false positives on
-# `per centage` / `per centimeter` / etc.; the prior `text.replace("per cent", "percent")`
-# silently mangled those. `\bper ?cent\b` also harmlessly matches an
-# already-collapsed `percent` (the replacement is identical, so it's a no-op).
-_PER_CENT_RE = re.compile(r"\bper ?cent\b")
-# TEDLIUM occasionally tokenizes negation contractions with the apostrophe-t
-# split off the verb stem — `didn 't` instead of `didn't` or `did n't`. Probe
-# of 500 TEDLIUM train rows showed this in ~10%, dominated by
-# `don 't` / `didn 't` / `wouldn 't` / `can 't` / `wasn 't`. Truecase
-# tokenizes the orphan `'t` as a standalone token and uppercases it, so
-# labels arrive as `didn 'T embrace` and train the decoder to emit broken
-# contractions. Pre-collapse the orphan before truecase runs. The `\w+n`
-# anchor means we only target the negation-contraction shape, so we never
-# touch space-before-apostrophe forms like `she 'd` / `it 's` / `friends '`
-# that truecase already handles correctly via its contraction vocabulary.
-_ORPHAN_NT_RE = re.compile(r"\b(\w+n)\s+'t\b")
-_WHITESPACE_RE = re.compile(r"\s+")
-
-# Annotation tags that stand in for SPOKEN LEXICAL CONTENT the audio still
-# contains, as opposed to non-speech events. `_RESIDUAL_ANGLE_TAG_RE` deletes
-# every tag, which is correct for <noise>/<music>/<sil>/<laugh>/<breath> (no
-# word was uttered) but wrong for these three:
-#   <unk>     TEDLIUM — a word the transcriber could not identify. The word
-#             IS in the audio; only the transcription is missing.
-#   <foreign> EdAcc  — speech in another language, present in the audio.
-#   <overlap> EdAcc  — overlapping speech, present in the audio.
-# When such a tag sits at the START or END of a label, stripping it produces a
-# target that omits the first or last spoken word while the audio keeps it —
-# i.e. it directly supervises onset/offset truncation.
-#
-# Measured on 800 streamed `sanchit-gandhi/tedlium-data` train rows
-# (2026-09-18): 60.8% of rows contain <unk>, 30.4% START with one, 21.9% END
-# with one. TEDLIUM is 8.7% of the multiasr mix, so ~2.6% of ALL training rows
-# were teaching leading-word deletion and ~1.9% trailing-word deletion.
-#
-# This compounds a second, independent source of the same prior: Peoples
-# Speech `clean_sa` ships fixed ~15s windows (95.7% of rows in [14.0, 15.1]s)
-# whose labels lose words at the chunk seams. Eval symptom: the model dropped
-# >=1 leading reference word on 52/100 Peoples samples (92 words = 5.59 WER
-# points) versus 22/45 for a commercial baseline, and removing leading and
-# trailing deletion runs made the two systems tie. A frozen-encoder CTC
-# control — which never saw this training data — beat the full stack by 3.52
-# WER on Peoples, confirming the prior is decoder-learned rather than acoustic.
-#
-# We drop EDGE occurrences only, not medial ones. Medial <unk> is also a
-# lexically-incomplete target, but dropping every <unk> row would remove 60.8%
-# of TEDLIUM, and TEDLIUM is the single dataset where the decoder measurably
-# earns its keep over the frozen encoder (+6.18 WER). Edge position is also
-# what the eval evidence actually implicates: a positional prior is learnable,
-# a scattered mid-sentence omission is closer to label noise.
-# LEADING ONLY as of 2026-09-20. The trailing alternation was dropped after
-# measuring what the two halves actually cost: on the 25,550-row TEDLIUM index,
-# 27.3% of rows start with a stripped tag and 20.3% end with one, union 41.2%
-# (the prior "roughly half" estimate summed the two and double-counted the
-# 1,652 rows that do both). Leading-only drops 27.3%, recovering ~13.9% of
-# TEDLIUM, about +37,300 rows.
-#
-# The evidence base only ever supported the leading half. It came from the
-# Peoples eval -- a *leading*-word deletion prior, measured as >=1 dropped
-# leading reference word on 52/100 samples. Trailing truncation was never
-# measured separately, and Peoples has since left the training mix, so the
-# trailing half rested on argument-by-analogy to a corpus that is no longer
-# there. Meanwhile TEDLIUM is the one dataset where the decoder measurably
-# beats the frozen encoder (+6.18 WER), and this filter was cutting it 41%.
-#
-# To re-justify the trailing half, measure leading/trailing deletion runs
-# on the TEDLIUM eval's results.txt; if trailing runs
-# are elevated over baseline, restore the `|<(?:unk|foreign|overlap)>\s*$`
-# alternation.
-_EDGE_CONTENT_TAG_RE = re.compile(r"^\s*<(?:unk|foreign|overlap)>", re.IGNORECASE)
-
-
-def _has_edge_content_tag(raw_text: str) -> bool:
-    """True when a label starts or ends with a content-bearing annotation tag.
-
-    Such rows supervise onset/offset truncation once the tag is stripped, so
-    the collator drops them rather than training on a label that is known to
-    be missing its first or last spoken word.
-    """
-    return bool(_EDGE_CONTENT_TAG_RE.search(raw_text or ""))
-
-
-# Post-truecase cleanup. Truecase's NLTK-backed tokenizer reformats text
-# in three ways that survive into training labels:
-#   1. Sentence-final periods get split off as standalone tokens, then
-#      re-joined with a leading space (`rate . But` instead of `rate. But`).
-#      Found in ~25% of Gigaspeech rows (the multi-sentence ones).
-#   2. Truecase fails to capitalize the next sentence after a mid-sentence
-#      period (`E T. the Video game.` instead of `E T. The Video game.`).
-#   3. Em-dash spaces get eaten (`for -- we` → `for--we`); seen in SPGI.
-#   4. Informal `gonna`/`wanna` get mangled to `gonNA`/`wanNA` regardless
-#      of input casing; seen across AMI / Switchboard / Gigaspeech.
-# These post-fixes run only when truecase actually fired (already-cased
-# sources skip truecase and don't need this cleanup).
-_SPACE_BEFORE_SENT_PUNCT_RE = re.compile(r"\s+([.,!?])")
-_SENT_START_LOWERCASE_RE = re.compile(r"([.!?])\s+([a-z])")
-# A period that closes a run of spelled-out letters is not a sentence boundary.
-# AMI writes acronyms inline as "S. S. H." / "X. M. L.", and AMI has no real
-# sentence punctuation at all, so capitalizing after one is always wrong there
-# (measured: 13 of 300 rows contain a period, and all 13 are spelled letters).
-# Matched against the text preceding the period, so it fires on the SECOND and
-# later members of a run — the discriminator against Gigaspeech's tag-derived
-# boundaries, which look like "e t. the video game." where the letter before
-# the period carries no period of its own.
-_SPELLED_LETTER_RUN_RE = re.compile(r"\b[A-Za-z]\.\s+[A-Za-z]$")
-_EM_DASH_RE = re.compile(r"\s*--\s*")
-_GONNA_ARTIFACT_RE = re.compile(r"\bgonNA\b")
-_WANNA_ARTIFACT_RE = re.compile(r"\bwanNA\b")
-_GOTTA_ARTIFACT_RE = re.compile(r"\bgotTA\b")
-
-
-def _capitalize_sentence_starts(text: str) -> str:
-    """Uppercase the first letter after sentence-final punctuation.
-
-    Truecase fails to capitalize the next sentence after a mid-string period
-    ("E T. the Video game." instead of "E T. The Video game."), so this fixes
-    it up — except after a spelled-letter run, where the period is part of an
-    acronym rather than a boundary.
-    """
-
-    def repl(match: re.Match) -> str:
-        if _SPELLED_LETTER_RUN_RE.search(text[: match.start()]):
-            return match.group(0)
-        return f"{match.group(1)} {match.group(2).upper()}"
-
-    return _SENT_START_LOWERCASE_RE.sub(repl, text)
-
-
-def _post_truecase_cleanup(text: str) -> str:
-    text = _SPACE_BEFORE_SENT_PUNCT_RE.sub(r"\1", text)
-    text = _capitalize_sentence_starts(text)
-    text = _EM_DASH_RE.sub(" -- ", text)
-    text = _GONNA_ARTIFACT_RE.sub("gonna", text)
-    text = _WANNA_ARTIFACT_RE.sub("wanna", text)
-    return _GOTTA_ARTIFACT_RE.sub("gotta", text)
-
-
-# Unicode cleanup: ftfy fixes mojibake (â€™ → '), unescapes HTML entities
-# (&amp; → &), and folds smart quotes (' " → ' "); NFKC further normalizes
-# composed/decomposed forms (café vs cafe + ◌́) and width variants
-# (full-width Latin → half-width). Applied first in _normalize_label so
-# downstream regexes see canonical ASCII-leaning text.
-import ftfy
-
-# Truecase: NLTK-backed statistical recasing for transcripts that arrive
-# in mono-case form (all-upper or zero-caps). LOCAL_RANK=0 guard mirrors
-# Ultravox — avoids multiple workers racing on the punkt download.
-import truecase
-
-if int(os.environ.get("LOCAL_RANK", "0")) == 0:
-    try:
-        truecase.get_true_case("test")
-    except LookupError:
-        import nltk
-
-        # NLTK 3.9+ requires `punkt_tab`; older NLTKs use `punkt`. Download
-        # both so this works on either base image. Quiet=True suppresses
-        # progress bars; the fetch is ~13 MB and usually completes in
-        # seconds.
-        nltk.download("punkt_tab", quiet=True)
-        nltk.download("punkt", quiet=True)
-
-
-# Per-source casing policy, set via a dataset config's `text_case` field and
-# carried to the collator on the `_text_case` column. Declaring it beats the
-# per-row heuristic below because the answer is a property of the SOURCE, not
-# of the row — see _needs_truecase's own docstring, which names the sources it
-# is trying to re-derive from characters.
-TEXT_CASE_MONO = "mono"  # ALL-CAPS or zero-cap source; recase it
-TEXT_CASE_CASED = "cased"  # ships case + proper nouns; never touch
-# Below this many letters the statistical truecaser has too little context to
-# be reliable — it promotes backchannels to proper nouns. Short mono-case text
-# gets a deterministic recase instead.
-_MIN_TRUECASE_LETTERS = 5
-
-
-def _needs_truecase(text: str) -> bool:
-    """Heuristic fallback for sources with no declared `text_case`.
-
-    Apply truecase only to mono-case text. Already-cased sources (LibriHeavy
-    text_original, CV, VoxPopuli raw_text, SPGISpeech) carry proper-noun
-    casing that the statistical truecaser would damage (e.g. "McClarnon" ->
-    "Mcclarnon"). Heuristic: text with any internal capitalization beyond what
-    truecase would produce is already cased.
-
-    Prefer declaring `text_case` on the dataset. This heuristic misclassifies
-    in both directions and cannot do better from a single row: a lowercase
-    FRAGMENT of a cased source (SPGISpeech's sliding window emits these for
-    13% of rows) is character-identical to a row from a genuinely uncased
-    source, and punctuation does not separate them either.
-    """
-    letters = [c for c in text if c.isalpha()]
-    if len(letters) < _MIN_TRUECASE_LETTERS:
-        # Too short to recase meaningfully ("yeah", "OH"). Leave alone. Note
-        # this is only safe when the source is already cased; a declared
-        # `mono` source routes to _recase_monocase_text instead, which handles
-        # short text deterministically rather than passing it through.
-        return False
-    upper_count = sum(c.isupper() for c in letters)
-    upper_frac = upper_count / len(letters)
-    if upper_frac > 0.9:
-        return True  # ALL-CAPS source (Gigaspeech post-restoration, AMI)
-    # zero-cap (TEDLIUM, Peoples, Switchboard) → truecase;
-    # otherwise already cased (LibriHeavy, CV, SPGI, VoxPopuli) → skip.
-    return upper_count == 0
-
-
-def _capitalize_first_letter(text: str) -> str:
-    for i, char in enumerate(text):
-        if char.isalpha():
-            return f"{text[:i]}{char.upper()}{text[i + 1 :]}"
-    return text
-
-
-def _recase_monocase_text(text: str) -> str:
-    """Recase a row from a source declared `text_case: mono`.
-
-    Long text goes to the statistical truecaser. Short text does not: the
-    truecaser needs context, and without it the old code simply passed the row
-    through unchanged — which on an ALL-CAPS source means shipping "YEAH" /
-    "OKAY" / "HMM" as training labels. Measured at 21% of AMI rows. A
-    deterministic lowercase-then-capitalize is all these actually need and it
-    cannot invent proper nouns.
-    """
-    letters = [c for c in text if c.isalpha()]
-    if len(letters) >= _MIN_TRUECASE_LETTERS:
-        return _post_truecase_cleanup(truecase.get_true_case(text))
-    return _capitalize_first_letter(text.lower())
-
 
 def _resolve_transcribe_prompt(configured: str | None, datasets: list) -> str | None:
     """Pick the inference prompt a checkpoint is saved with.
@@ -388,94 +131,11 @@ def _resolve_transcribe_prompt(configured: str | None, datasets: list) -> str | 
     return None
 
 
-# Pure function of its input, and the collator normalizes each row twice: once
-# to test for an empty label and once to build the sample. Cache sized well
-# above the largest training batch so the second call is always a hit.
-@functools.lru_cache(maxsize=4096)
-def _normalize_label(raw_text: str, text_case: str | None = None) -> str:
-    """Canonicalize a training transcript label to cased+punct form.
-
-    Pipeline (in order):
-    1. ftfy + NFKC unicode cleanup: fix mojibake (â€™ → '), unescape HTML
-       entities, fold smart quotes to straight, normalize composed /
-       decomposed forms and width variants. Defensive — our 100-sample-
-       per-dataset audit found zero non-ASCII in current sources, but
-       tail samples (especially OCR-derived audiobook text in LibriHeavy)
-       may carry curly quotes / Unicode oddities. Idempotent on clean
-       text; ~10us per call.
-    2. Map Gigaspeech inline-punct tags (<COMMA>/<PERIOD>/etc.) to real
-       punctuation. Done before the residual-marker strip so the tags
-       become punct rather than getting stripped to nothing.
-    3. Strip non-punct annotation markers (<unk>, <LAUGH>, <inaudible>,
-       Gigaspeech <MUSIC>/<NOISE>/<SIL>/<OTHER>, etc.) and TEDLIUM
-       editorial brackets ([ ... ]). For Gigaspeech non-speech tags the
-       audio segment may still contain speech around the tagged moment;
-       strip-not-drop preserves the partial transcript. The collator's
-       empty-label filter catches the entire-label-was-just-a-tag case.
-    4. Collapse the `per cent` spelling variant to `percent`. The literal
-       `%` character is PRESERVED — see the note below.
-    5. Collapse whitespace.
-    6. Recase according to `text_case`, the source's declared casing policy
-       (set per dataset in the data config, carried on the `_text_case`
-       column). `mono` lifts ALL-CAPS sources (Gigaspeech, AMI) and zero-cap
-       sources (TEDLIUM, Peoples, Switchboard) to proper-cased form; `cased`
-       leaves already-cased sources (LibriHeavy, CV, SPGI, VoxPopuli)
-       untouched. When a source declares nothing, fall back to the per-row
-       _needs_truecase heuristic — which is what every source used to get,
-       and which misclassifies lowercase fragments of cased sources.
-
-    A prior revision of step 4 also ran `text.replace("%", " percent")`, to
-    mirror an eval-side analysis rule. That was removed
-    (2026-09-18) because it destroyed the `%` character in 100% of training
-    targets: only Earnings22 and SPGISpeech ship `%` natively (~6,188 rows of
-    the ~3.09M mix) and both were rewritten, so the decoder emitted 0 `%` in
-    6,055 sampled eval predictions and scored 0% on the `percent` class of
-    the raw-text ITN metric against 92.9% for a commercial baseline — ~93% of
-    a measured 66%-vs-94% ITN gap, from this one line.
-
-    Two facts make the removal safe rather than a trade:
-      - It is WER-neutral by construction. Whisper's EnglishTextNormalizer,
-        which the eval applies symmetrically to reference and hypothesis,
-        maps "105 percent" and "105%" to the identical string. WER cannot
-        see this change in either direction.
-      - The capability was never missing. `$` was not stripped and the
-        decoder reproduces it correctly — including spontaneously, e.g.
-        "five thousand dollars" -> "$400,000" — on ~240 training rows, 26x
-        less supervision than `%` would have had. So the cause was the
-        rewrite, not the data volume.
-
-    An eval-side copy of that rule is fine: applied to both sides at scoring
-    time, it is canonicalization rather than label destruction.
-
-    Output target format is cased text with punctuation where available —
-    aligning the dominant training label distribution to the Qwen3
-    decoder's native output format. WER scoring uses Whisper's
-    EnglishTextNormalizer which lowercases + strips punct on both
-    prediction and reference, so the format choice does not affect WER
-    comparability across runs.
-    """
-    text = (raw_text or "").strip()
-    if not text:
-        return ""
-    text = ftfy.fix_text(text, normalization="NFKC")
-    text = _GIGASPEECH_PUNCT_RE.sub(lambda m: _GIGASPEECH_PUNCT_MAP[m.group(1).upper()], text)
-    text = _RESIDUAL_ANGLE_TAG_RE.sub(" ", text)
-    text = _TEDLIUM_BRACKET_RE.sub(" ", text)
-    text = _PER_CENT_RE.sub("percent", text)
-    text = _ORPHAN_NT_RE.sub(r"\1't", text)
-    text = _WHITESPACE_RE.sub(" ", text).strip()
-    if text_case == TEXT_CASE_MONO and text.islower():
-        text = _EDGE_EVENT_RE.sub("", text).strip()
-    if not text:
-        return ""
-    if text_case == TEXT_CASE_CASED:
-        return text
-    if text_case == TEXT_CASE_MONO:
-        return _recase_monocase_text(text)
-    if _needs_truecase(text):
-        text = truecase.get_true_case(text)
-        text = _post_truecase_cleanup(text)
-    return text
+# `Dataset.add_column` annotates `new_fingerprint: str` as a required argument,
+# but its @fingerprint_transform wrapper computes the fingerprint whenever the
+# caller leaves it out, which is how it is meant to be called. This is that
+# runtime signature, called exactly as `ds.add_column(name, column)` would be.
+_add_column = cast(Callable[[Dataset, str, list[Any]], Dataset], Dataset.add_column)
 
 
 class DatasetLoader:
@@ -498,7 +158,8 @@ class DatasetLoader:
     def _prepare_split(self, dataset_cfg: DictConfig, split: str) -> Dataset:
         dataset_path = dataset_cfg.get("path")
         if not dataset_path:
-            raise ValueError("Dataset path is required")
+            msg = "Dataset path is required"
+            raise ValueError(msg)
 
         ds = load_dataset(
             dataset_path,
@@ -508,6 +169,9 @@ class DatasetLoader:
             num_proc=self.num_proc,
             trust_remote_code=True,
         )
+        # A concrete `split` without streaming always yields a single Dataset
+        # (not a DatasetDict / IterableDataset).
+        assert isinstance(ds, Dataset)
 
         # Constant per-source provenance columns. These MUST be added here,
         # before any filter() below, and not down next to the other column
@@ -526,11 +190,12 @@ class DatasetLoader:
         text_case = dataset_cfg.get("text_case")
         if text_case is not None:
             if text_case not in (TEXT_CASE_MONO, TEXT_CASE_CASED):
-                raise ValueError(
+                msg = (
                     f"text_case must be {TEXT_CASE_MONO!r} or {TEXT_CASE_CASED!r}, "
                     f"got {text_case!r} for {dataset_path}"
                 )
-            ds = ds.add_column("_text_case", [text_case] * len(ds))
+                raise ValueError(msg)
+            ds = _add_column(ds, "_text_case", [text_case] * len(ds))
 
         # text_punct: declares whether this source's transcripts carry
         # punctuation. Deliberately separate from text_case -- they are not the
@@ -540,10 +205,9 @@ class DatasetLoader:
         text_punct = dataset_cfg.get("text_punct")
         if text_punct is not None:
             if not isinstance(text_punct, bool):
-                raise ValueError(
-                    f"text_punct must be a bool, got {text_punct!r} for {dataset_path}"
-                )
-            ds = ds.add_column("_text_punct", [text_punct] * len(ds))
+                msg = f"text_punct must be a bool, got {text_punct!r} for {dataset_path}"
+                raise ValueError(msg)
+            ds = _add_column(ds, "_text_punct", [text_punct] * len(ds))
 
         # CommonVoice strict-validated filter: Mozilla's `train` split is
         # already up-vote validated (up_votes >= 2 AND up_votes > down_votes),
@@ -585,18 +249,20 @@ class DatasetLoader:
             above = exclude_where.get("above")
             below = exclude_where.get("below")
             if not column or (not names and above is None and below is None):
-                raise ValueError(
+                msg = (
                     f"exclude_where needs 'column' plus at least one of "
                     f"'values' / 'above' / 'below', got {exclude_where!r} "
                     f"for {dataset_path}"
                 )
+                raise ValueError(msg)
             if column not in ds.column_names:
                 # Fail loudly: a silently-ignored filter would train on the
                 # rows you believe you excluded, and the mix table would lie.
-                raise ValueError(
+                msg = (
                     f"exclude_where column {column!r} not in {dataset_path} "
                     f"(available: {sorted(ds.column_names)})"
                 )
+                raise ValueError(msg)
             # Gigaspeech's `source` is a ClassLabel, so its rows hold ints
             # (0=audiobook, 1=podcast, 2=youtube), NOT the label strings the
             # datasets-server `statistics` endpoint renders. Comparing rows
@@ -610,10 +276,11 @@ class DatasetLoader:
                     # Report every bad name at once rather than dying on the first.
                     unknown = sorted(n for n in names if n not in feature.names)
                     if unknown:
-                        raise ValueError(
+                        msg = (
                             f"exclude_where value {unknown} not a label of {column!r} in "
                             f"{dataset_path} (defined: {feature.names})"
                         )
+                        raise ValueError(msg)
                     wanted = {feature.str2int(n) for n in names}
                 else:
                     wanted = set(names)
@@ -652,11 +319,12 @@ class DatasetLoader:
             # full run on the mix you thought you had excluded, and only
             # finding out from the eval.
             if dropped == 0:
-                raise ValueError(
+                msg = (
                     f"exclude_where on {dataset_path} matched 0 of {before} rows "
                     f"({column}: values={sorted(names)} above={above} below={below}). "
                     f"Check the column's value type and spelling -- feature is {feature!r}."
                 )
+                raise ValueError(msg)
 
         col_map = {
             "text": dataset_cfg.get("text_column", "text"),
@@ -757,7 +425,7 @@ class DatasetLoader:
             return ds
         return concatenate_datasets([ds] * times)
 
-    def load(self) -> tuple[Dataset, Dataset]:
+    def load(self) -> tuple[Dataset | None, Dataset | None]:
         train_datasets, val_datasets = [], []
 
         # epoch_expansion: build ONE physical epoch that is worth N logical
@@ -784,13 +452,14 @@ class DatasetLoader:
         # and silently training 4 epochs' worth would be worse than either.
         expansion = self.epoch_expansion
         if expansion > 1 and self.num_train_epochs > 1:
-            raise ValueError(
+            msg = (
                 f"epoch_expansion={expansion} and num_train_epochs="
                 f"{self.num_train_epochs} would compound to "
                 f"{expansion * self.num_train_epochs} epochs of exposure. "
                 f"epoch_expansion already folds the repeats into one physical "
                 f"epoch, so set num_train_epochs: 1 when using it."
             )
+            raise ValueError(msg)
         if expansion > 1:
             logger.info(
                 "epoch_expansion=%d: building one physical epoch worth %d "
@@ -836,7 +505,7 @@ class DatasetLoader:
         val_ds = concatenate_datasets(val_datasets) if val_datasets else None
 
         # Global cap still applied last as a backstop. With per-dataset
-        # cap set, this is usually a no-op (per-dataset × num-eval-sets
+        # cap set, this is usually a no-op (per-dataset x num-eval-sets
         # comes in under the global limit).
         if val_ds and self.config.get("max_eval_samples"):
             n_samples = min(len(val_ds), self.config.max_eval_samples)
@@ -945,7 +614,7 @@ class DataCollator:
                 # target missing its first or last spoken word while the audio
                 # retains it, which supervises onset/offset truncation — the
                 # measured root cause of this recipe's Peoples regression.
-                # See _EDGE_CONTENT_TAG_RE for the rates and the evidence.
+                # See scripts/labels.py _EDGE_CONTENT_TAG_RE for the rates and the evidence.
                 if _has_edge_content_tag(raw_text):
                     continue
                 duration_s = audio.size / self.sample_rate
@@ -972,7 +641,8 @@ class DataCollator:
             finally:
                 f["audio"] = None
         if not audio_arrays:
-            raise ValueError("No valid audio samples in batch")
+            msg = "No valid audio samples in batch"
+            raise ValueError(msg)
         return audio_arrays, valid_features
 
     def _build_sample(self, feature: dict, num_audio_tokens: int) -> dict:
@@ -1009,7 +679,8 @@ class DataCollator:
         audio_token_counts = token_counts_tensor.tolist()
 
         text_features = [
-            self._build_sample(f, n) for f, n in zip(valid_features, audio_token_counts)
+            self._build_sample(f, n)
+            for f, n in zip(valid_features, audio_token_counts, strict=True)
         ]
 
         batch = self.text_collator(text_features)
@@ -1037,7 +708,7 @@ class ASRTrainer(Trainer):
         self.encoder_learning_rate = encoder_learning_rate
         self.encoder_weight_decay = encoder_weight_decay
 
-    def create_optimizer(self):
+    def create_optimizer(self, model: torch.nn.Module | None = None) -> torch.optim.Optimizer:
         """Optimizer with separate LR / weight decay per component.
 
         Mirrors HF Trainer.create_optimizer's decay/no-decay split, but adds a
@@ -1061,10 +732,7 @@ class ASRTrainer(Trainer):
             or self.encoder_weight_decay is not None
         )
         if self.optimizer is not None or not overrides:
-            return super().create_optimizer()
-
-        from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
-        from transformers.trainer_pt_utils import get_parameter_names
+            return super().create_optimizer(model)
 
         # ALL_LAYERNORM_LAYERS only contains torch.nn.LayerNorm, but every
         # decoder here normalizes with an RMSNorm subclass instead, whose gain
@@ -1083,7 +751,12 @@ class ASRTrainer(Trainer):
         # `linear_attn.norm.weight` gains (ones-init, so decay pulls them
         # toward zero) into the decay group, the exact failure this block
         # exists to prevent.
-        opt_model = self.model
+        # Same model resolution as Trainer.create_optimizer, which train() calls
+        # with the accelerator-prepared model when optimizer creation is delayed.
+        opt_model = self.model if model is None else model
+        if opt_model is None:
+            msg = "ASRTrainer.create_optimizer needs a model"
+            raise ValueError(msg)
         norm_modules = [type(m) for m in opt_model.modules() if "Norm" in type(m).__name__]
         forbidden = list(ALL_LAYERNORM_LAYERS) + norm_modules
         decay_parameters = set(get_parameter_names(opt_model, forbidden))
@@ -1194,7 +867,9 @@ class ASRTrainer(Trainer):
         ]
         optimizer_grouped_parameters = [g for g in optimizer_grouped_parameters if g["params"]]
 
-        optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args, opt_model)
+        optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(
+            self.args, opt_model if isinstance(opt_model, PreTrainedModel) else None
+        )
         self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
         return self.optimizer
 
@@ -1202,13 +877,22 @@ class ASRTrainer(Trainer):
 class PushToHubCallback(TrainerCallback):
     """Pushes model to Hub on every save."""
 
-    def on_save(self, args, state, control, **kwargs):
+    def on_save(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs: Any,
+    ) -> None:
+        # Returning None leaves `control` as is: CallbackHandler only replaces
+        # it when a callback returns a new one.
+        del control
         if not (args.push_to_hub and args.hub_model_id):
-            return control
+            return
 
         model = kwargs.get("model")
         if model is None:
-            return control
+            return
 
         with contextlib.suppress(Exception):
             model.push_to_hub(
@@ -1216,8 +900,6 @@ class PushToHubCallback(TrainerCallback):
                 commit_message=f"Training in progress - step {state.global_step}",
                 private=args.hub_private_repo,
             )
-
-        return control
 
 
 def get_valid_training_args(config: dict) -> dict:
@@ -1310,7 +992,7 @@ def _require_fused_cross_entropy(model, cfg) -> None:
 
     batch = cfg.training.get("per_device_train_batch_size", 1)
     est_gib = batch * 330 * vocab * 4 * 2 / 2**30
-    raise RuntimeError(
+    msg = (
         f"liger's fused linear cross-entropy is NOT active for "
         f"{type(model.language_model).__name__} (vocab {vocab:,}). Every "
         f"training step would materialize a (batch, seq, {vocab:,}) logits "
@@ -1322,20 +1004,24 @@ def _require_fused_cross_entropy(model, cfg) -> None:
         f"Override with `training.allow_unfused_ce=true` if this is "
         f"deliberate."
     )
+    raise RuntimeError(msg)
 
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig) -> None:
     push_to_hub = cfg.training.get("push_to_hub") and cfg.training.get("hub_model_id")
     if push_to_hub and not os.environ.get("HF_TOKEN"):
-        raise ValueError(
+        msg = (
             "HF_TOKEN environment variable is required when push_to_hub is enabled. "
             "Set it with: export HF_TOKEN=your_token"
         )
+        raise ValueError(msg)
 
     if cfg.training.get("report_to") == "wandb":
-        wandb_config = OmegaConf.to_container(cfg, resolve=True)
-        assert isinstance(wandb_config, dict)
+        cfg_container = OmegaConf.to_container(cfg, resolve=True)
+        assert isinstance(cfg_container, dict)
+        # The root config's keys are the group names (model/data/training).
+        wandb_config = {str(k): v for k, v in cfg_container.items()}
         git_commit, git_dirty = _git_state()
         if git_commit:
             # Surface the commit in the run config so it's queryable/filterable
@@ -1344,13 +1030,13 @@ def main(cfg: DictConfig) -> None:
             # and can't be used to group/filter runs.
             wandb_config["git_commit"] = git_commit
             wandb_config["git_dirty"] = git_dirty
-        wandb.init(
+        run = wandb.init(
             project=cfg.training.get("wandb_project", "tiny-audio"),
             config=wandb_config,
         )
         if git_commit:
-            wandb.run.summary["git_commit"] = git_commit
-            wandb.run.summary["git_dirty"] = git_dirty
+            run.summary["git_commit"] = git_commit
+            run.summary["git_dirty"] = git_dirty
 
     # Patch the decoder's transformers module with liger fused kernels before
     # the LM class is instantiated. The big win is fused linear cross-entropy:
@@ -1383,9 +1069,10 @@ def main(cfg: DictConfig) -> None:
             )
         else:
             try:
-                import liger_kernel.transformers as liger
-
-                getattr(liger, patcher_name)()
+                if LIGER_TRANSFORMERS is None:
+                    assert _LIGER_IMPORT_ERROR is not None
+                    raise _LIGER_IMPORT_ERROR
+                getattr(LIGER_TRANSFORMERS, patcher_name)()
                 logger.info("Applied liger kernels via %s()", patcher_name)
             except (ImportError, AttributeError) as e:
                 logger.warning(
@@ -1396,8 +1083,10 @@ def main(cfg: DictConfig) -> None:
                     e,
                 )
 
-    model_config_dict = OmegaConf.to_container(cfg.model, resolve=True)
-    assert isinstance(model_config_dict, dict), "model config must be a dict"
+    model_container = OmegaConf.to_container(cfg.model, resolve=True)
+    assert isinstance(model_container, dict), "model config must be a dict"
+    # Keys are ModelConfig field names (scripts/train_config.py), i.e. strings.
+    model_config_dict = {str(k): v for k, v in model_container.items()}
     for param in TRAINING_MODEL_PARAMS:
         val = cfg.training.get(param)
         if val is None:
@@ -1515,7 +1204,9 @@ def main(cfg: DictConfig) -> None:
     trainer.save_model(_internal_call=bool(push_to_hub))
 
     if push_to_hub:
-        trainer.model.push_to_hub(
+        # `model` is the object Trainer holds as `trainer.model` (no
+        # model_init, no FSDP re-wrapping here), typed as the ASRModel it is.
+        model.push_to_hub(
             cfg.training.hub_model_id,
             commit_message="Training complete - final model",
             private=cfg.training.get("hub_private_repo", False),
