@@ -13,7 +13,7 @@ from typing import Any, Protocol, cast
 import numpy as np
 import numpy.typing as npt
 import torch
-from transformers import PreTrainedTokenizerBase
+from transformers import PreTrainedTokenizerBase, SequenceFeatureExtractor
 from trl.import_utils import TRLExperimentalWarning
 
 from scripts.labels import has_edge_content_tag, normalize_label
@@ -76,14 +76,15 @@ class DataCollator:
     def __init__(
         self,
         tokenizer: PreTrainedTokenizerBase,
-        feature_extractor: AudioFeatureExtractor,
+        feature_extractor: SequenceFeatureExtractor,
         sample_rate: int,
         projector: _OutputLengthProjector | None = None,
         encoder_conv_layers: Sequence[ConvLayerSpec] | None = None,
         audio_token: str = "<audio>",
     ) -> None:
         self.tokenizer = tokenizer
-        self.feature_extractor = feature_extractor
+        # Every concrete SequenceFeatureExtractor (Whisper, GLM-ASR) is callable.
+        self.feature_extractor = cast(AudioFeatureExtractor, feature_extractor)
         self.sample_rate = sample_rate
         self.projector = projector
         self.encoder_conv_layers = encoder_conv_layers or DEFAULT_ENCODER_CONV_LAYERS

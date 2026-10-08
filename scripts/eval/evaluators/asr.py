@@ -34,8 +34,9 @@ from transformers import TextIteratorStreamer, pipeline
 
 from scripts.eval.audio import as_16k_array, is_str_dict, prepare_wav_bytes
 from scripts.eval.speaker_metrics import serialize_turns
+from tiny_audio.asr_attention import resolve_attn_implementation
 from tiny_audio.asr_config import ASRConfig
-from tiny_audio.asr_modeling import ASRModel, resolve_attn_implementation
+from tiny_audio.asr_modeling import ASRModel
 from tiny_audio.asr_pipeline import ASRPipeline
 
 from .base import (

@@ -41,7 +41,6 @@ from scripts.train_collator import TRANSCRIBE_PROMPT_PUNCT, DataCollator
 from scripts.train_config import register_configs
 from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
-from tiny_audio.asr_types import AudioFeatureExtractor
 
 # liger is a linux-only optional dependency (see pyproject.toml); without it
 # training falls back to stock kernels and unfused cross-entropy.
@@ -997,8 +996,7 @@ def main(cfg: DictConfig) -> None:
 
     data_collator = DataCollator(
         tokenizer=model.tokenizer,
-        # Every concrete SequenceFeatureExtractor (Whisper, GLM-ASR) is callable.
-        feature_extractor=cast(AudioFeatureExtractor, model.feature_extractor),
+        feature_extractor=model.feature_extractor,
         sample_rate=cfg.data.sample_rate,
         projector=model.projector,
         encoder_conv_layers=model.config.encoder_conv_layers,
