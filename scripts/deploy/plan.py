@@ -251,11 +251,23 @@ def _repo_weight_bytes(repo_id: str, repo_type: str = "model", name: str | None 
 def _load_cfg(experiment: str, overrides: list[str]):
     from hydra import compose, initialize_config_dir
 
+    from scripts import train_config  # noqa: F401  (registers the `base_config` schema)
     from scripts.utils import get_project_root
 
     configs = get_project_root() / "configs"
     with initialize_config_dir(config_dir=str(configs), version_base=None):
         return compose(config_name="config", overrides=[f"+experiments={experiment}", *overrides])
+
+
+def _get(node, key: str, default):
+    """`node.get(key, default)` that also treats an explicit None as unset.
+
+    The structured-config schema (scripts/train_config.py) declares optional
+    keys with a None default, so a plain `.get` returns None instead of the
+    fallback for any key the composed config left unset.
+    """
+    val = node.get(key)
+    return default if val is None else val
 
 
 def _hidden(cfg_obj) -> int | None:
@@ -274,7 +286,7 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
     cfg = _load_cfg(experiment, overrides)
     plan = Plan()
 
-    model_dtype = str(cfg.model.get("model_dtype", "bfloat16"))
+    model_dtype = str(_get(cfg.model, "model_dtype", "bfloat16"))
     bytes_per = DTYPE_BYTES.get(model_dtype, 2)
     train = cfg.training
 
@@ -286,8 +298,8 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
     enc_cfg_probe = AutoConfig.from_pretrained(audio_id)
     enc_probe_inner = getattr(enc_cfg_probe, "encoder_config", None) or enc_cfg_probe
     enc_depth = int(getattr(enc_probe_inner, "num_hidden_layers", 0) or 0)
-    enc_top_n = int(train.get("encoder_trainable_top_layers", 0) or 0)
-    enc_frozen_flag = bool(train.get("freeze_audio_encoder", True))
+    enc_top_n = int(_get(train, "encoder_trainable_top_layers", 0) or 0)
+    enc_frozen_flag = bool(_get(train, "freeze_audio_encoder", True))
 
     # A partial unfreeze is trainable too. `freeze_audio_encoder: true` PLUS
     # `encoder_trainable_top_layers: N` is the documented idiom, so reading the
@@ -322,7 +334,7 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
 
     # ---- decoder -----------------------------------------------------------
     dec_params, dec_dtype = _safetensors_params(text_id, _NON_LM_TOWER_PREFIXES)
-    dec_trainable = not train.get("freeze_language_model", True)
+    dec_trainable = not _get(train, "freeze_language_model", True)
     dec_cfg = AutoConfig.from_pretrained(text_id)
     text_cfg = dec_cfg.get_text_config() if hasattr(dec_cfg, "get_text_config") else dec_cfg
     # Split the frozen vocabulary table out of the trainable decoder. The
@@ -332,7 +344,7 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
     frozen_tables: dict[str, int] = {}
     if dec_trainable:
         tables = _vocab_table_params(text_cfg)
-        if train.get("freeze_text_embed_tokens", False) and tables.get("embed_tokens"):
+        if _get(train, "freeze_text_embed_tokens", False) and tables.get("embed_tokens"):
             frozen_tables["embed_tokens"] = tables["embed_tokens"]
     frozen_table_params = sum(frozen_tables.values())
 
@@ -350,10 +362,10 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
     # is on -- it understated the granite_qwen_lora recipe by 67.28M and made
     # AdamW state look 6x smaller than it is. The adapters are freshly
     # initialised, so they add optimizer state but nothing to download.
-    if cfg.model.get("use_lora", False):
+    if _get(cfg.model, "use_lora", False):
         lora_params = _lora_trainable_params(
             text_id,
-            int(cfg.model.get("lora_rank", 8)),
+            int(_get(cfg.model, "lora_rank", 8)),
             cfg.model.get("lora_target_modules") or ["q_proj", "v_proj"],
         )
         if lora_params:
@@ -361,7 +373,7 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
             label = targets if isinstance(targets, str) else "custom targets"
             plan.components.append(
                 Component(
-                    f"  LoRA adapters (r={cfg.model.get('lora_rank', 8)}, {label})",
+                    f"  LoRA adapters (r={_get(cfg.model, 'lora_rank', 8)}, {label})",
                     lora_params,
                     0,  # fresh init, nothing to fetch
                     True,
@@ -392,8 +404,8 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
             text_model_id=text_id,
             encoder_dim=encoder_dim,
             llm_dim=llm_dim,
-            projector_type=str(cfg.model.get("projector_type", "mlp")),
-            projector_pool_stride=int(cfg.model.get("projector_pool_stride", 4)),
+            projector_type=str(_get(cfg.model, "projector_type", "mlp")),
+            projector_pool_stride=int(_get(cfg.model, "projector_pool_stride", 4)),
             projector_hidden_dim=cfg.model.get("projector_hidden_dim"),
         )
         cls = PROJECTOR_CLASSES[shim.projector_type]
@@ -432,11 +444,11 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
     grads = trainable_params * trainable_bytes_per
     optim = trainable_params * trainable_bytes_per * OPTIMIZER_STATES
 
-    batch = int(train.get("per_device_train_batch_size", 1))
+    batch = int(_get(train, "per_device_train_batch_size", 1))
     layers = int(getattr(text_cfg, "num_hidden_layers", 0) or 0)
     inter = int(getattr(text_cfg, "intermediate_size", 0) or 0)
     vocab = int(getattr(text_cfg, "vocab_size", 0) or 0)
-    ckpt = bool(train.get("gradient_checkpointing", False))
+    ckpt = bool(_get(train, "gradient_checkpointing", False))
 
     # ACTIVATIONS ARE AUTOCAST'S DTYPE, NOT THE MASTER WEIGHTS'. Under
     # `bf16: true` every matmul emits bf16, so the tape is 2 B/element even
@@ -488,10 +500,10 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
     # frozen 55.4 GiB, top-4 60.6, full ~79.4 at batch 48, and 4/16 of the
     # full increment is 6.0 GiB against an observed 5.2.
     enc_layers = int(getattr(enc_inner, "num_hidden_layers", 0) or 0)
-    if not bool(train.get("freeze_audio_encoder", True)):
+    if not bool(_get(train, "freeze_audio_encoder", True)):
         trainable_blocks = enc_layers
     else:
-        top_n = int(train.get("encoder_trainable_top_layers", 0) or 0)
+        top_n = int(_get(train, "encoder_trainable_top_layers", 0) or 0)
         trainable_blocks = min(top_n, enc_layers)
 
     enc_acts = 0
@@ -528,7 +540,7 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
     # GiB and then OOMed on a 12.37 GiB logits gradient. The term is still
     # optimistic if liger has no patcher for the architecture -- train.py
     # warns in that case, and so does ASRModel.__init__.
-    fused = bool(train.get("use_liger", True))
+    fused = bool(_get(train, "use_liger", True))
     logits = 0 if fused else batch * seq_len * vocab * 4 * 2
 
     # Autocast's bf16 copy of every fp32 weight. torch.autocast caches its
@@ -588,7 +600,7 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
     # param. save_total_limit copies sit on disk simultaneously, so retention
     # multiplies -- charging one projector-sized checkpoint understated a joint
     # fine-tune by ~500x.
-    keep = max(int(train.get("save_total_limit", 1) or 1), 1)
+    keep = max(int(_get(train, "save_total_limit", 1) or 1), 1)
     ckpt_each = trainable_params * trainable_bytes_per * (1 + OPTIMIZER_STATES)
     ckpt_bytes = ckpt_each * keep
 

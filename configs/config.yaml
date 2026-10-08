@@ -3,7 +3,13 @@
 # Runs the joint from-scratch recipe by default: frozen GLM-ASR-Nano-2512
 # encoder + fresh MLP projector + Qwen3-0.6B decoder fine-tuned jointly.
 # Use `+experiments=mps_smoke` for the local MPS/CPU smoke variant.
+#
+# Every key below is checked against the structured-config schema in
+# scripts/train_config.py (`base_config`): unknown keys and mistyped values
+# fail at startup. Add new knobs there first, or use `+training.<key>=...`
+# for a one-off.
 defaults:
+  - base_config
   - data: multiasr
   - training: production
   - _self_

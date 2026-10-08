@@ -268,6 +268,8 @@ poetry run python scripts/train.py +experiments=stage_1 \
 poetry run python scripts/train.py +experiments=stage_1 data=librispeech_dummy
 ```
 
+The YAML files are validated against a typed [structured-config](https://hydra.cc/docs/tutorials/structured_config/intro/) schema in `scripts/train_config.py`, so a misspelled key or a wrongly typed value fails at startup. To add a new knob, declare it there; for a one-off run, append an undeclared key with `+training.<key>=<value>`.
+
 ### Config Files
 
 ```
