@@ -145,13 +145,11 @@ class Plan:
         return sum(c.params for c in self.components if c.trainable)
 
     @property
-    def need_vram_gib(self) -> float:
-        """Overhead-padded VRAM a GPU must have to fit this plan."""
+    def need_vram_gib(self) -> float:  # overhead-padded VRAM a GPU must have
         return self.vram[VRAM_RECOMMENDED_KEY]
 
     @property
-    def disk_gb(self) -> int:
-        """Disk to request: the estimate plus 15% and 5 GB of slack."""
+    def disk_gb(self) -> int:  # disk to request: the estimate + 15% + 5 GB of slack
         return int(self.disk["recommended"] * 1.15) + 5
 
 
@@ -352,17 +350,15 @@ def _add_datasets(plan: Plan, data: DictConfig) -> None:
         plan.dataset_rows.append((f"{path}" + (f":{name}" if name else ""), size))
 
 
+# Per token per layer: attention q/k/v/o + residual (~6*dim) and the MLP's
+# gate/up/down (~3*inter). Coarse but the right order. Scaled by
+# ACTIVATION_CALIBRATION -- see its definition; unscaled this term is 2.55x
+# under what the granite_qwen run actually used, which is enough to
+# recommend a 48 GB card for a job that needs ~42 GiB.
 def _tape_bytes(
     batch: int, seq: int, dim: int, inter: int, layers: int, act_bytes_per: int, ckpt: bool
 ) -> float:
-    """Activation tape retained across `layers` transformer-shaped blocks.
-
-    Per token per layer: attention q/k/v/o + residual (~6*dim) and the MLP's
-    gate/up/down (~3*inter). Coarse but the right order. Scaled by
-    ACTIVATION_CALIBRATION -- see its definition; unscaled this term is 2.55x
-    under what the granite_qwen run actually used, which is enough to
-    recommend a 48 GB card for a job that needs ~42 GiB.
-    """
+    """Activation tape retained across `layers` transformer-shaped blocks."""
     per_tok_layer = act_bytes_per * (6 * dim + 3 * inter) * ACTIVATION_CALIBRATION
     if ckpt:
         # Only layer boundaries are kept; one layer is recomputed at a time.
