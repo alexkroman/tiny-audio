@@ -14,6 +14,7 @@ import typer
 from fabric import Connection
 from invoke import UnexpectedExit
 from rich.prompt import Prompt
+from tenacity import RetryError, retry, stop_after_attempt, wait_fixed
 
 from scripts.eval.constants import AssemblyAIModel
 from scripts.utils import get_project_root
@@ -21,6 +22,8 @@ from scripts.utils import get_project_root
 app = typer.Typer(help="Train and evaluate on remote RunPod pods.", add_completion=False)
 
 SSH_KEY_PATH = "~/.ssh/id_ed25519"
+SSH_CONNECT_ATTEMPTS = 3
+SSH_CONNECT_WAIT_S = 5
 
 # Every command that talks to a pod takes the same two positionals, spelled and
 # described identically, so `ta runpod <cmd> <HOST> <PORT>` always works.
@@ -113,10 +116,17 @@ def get_connection(host: str, port: int) -> Connection:
 def test_connection(conn: Connection) -> bool:
     """Test SSH connection to the remote host."""
     print(f"Testing SSH connection to {conn.host}:{conn.port}...")
-    try:
+
+    # `ta runpod wait` returns once RunPod assigns the SSH endpoint, which can be
+    # a few seconds before sshd inside the container accepts connections.
+    @retry(stop=stop_after_attempt(SSH_CONNECT_ATTEMPTS), wait=wait_fixed(SSH_CONNECT_WAIT_S))
+    def probe() -> None:
         conn.run("echo Connected", hide=True)
-    except Exception as e:
-        print(f"Failed to connect via SSH: {e}")
+
+    try:
+        probe()
+    except RetryError as e:
+        print(f"Failed to connect via SSH: {e.last_attempt.exception()}")
         return False
     print("SSH connection successful!")
     return True

@@ -288,3 +288,58 @@ def test_generic_training_script_runs_scripts_train():
 
     script = build_training_script("granite_qwen", "token", None, None, [])
     assert "python -m scripts.train +experiments=granite_qwen" in script
+
+
+class TestDeployRetries:
+    """`wait` polling and the SSH probe retry through tenacity."""
+
+    @pytest.fixture(autouse=True)
+    def _no_sleep(self, monkeypatch):
+        # tenacity sleeps through time.sleep; skip the backoff in tests.
+        monkeypatch.setattr("tenacity.nap.time.sleep", lambda _s: None)
+
+    def test_wait_polls_until_ssh_endpoint_appears(self, monkeypatch, capsys):
+        import subprocess
+        from types import SimpleNamespace
+
+        from scripts.deploy.plan import wait_command
+
+        outputs = iter(["", '{"ssh": null}', '{"ssh": {"ip": "1.2.3.4", "port": 22022}}'])
+        monkeypatch.setattr(
+            subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=next(outputs))
+        )
+        wait_command(pod_id="pod", timeout_s=900)
+        assert capsys.readouterr().out.strip() == "1.2.3.4 22022"
+
+    def test_wait_gives_up_after_timeout(self, monkeypatch, capsys):
+        import subprocess
+        from types import SimpleNamespace
+
+        import typer
+
+        from scripts.deploy.plan import wait_command
+
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="{}"))
+        with pytest.raises(typer.Exit):
+            wait_command(pod_id="pod", timeout_s=0)
+        assert "no SSH endpoint within 0s" in capsys.readouterr().out
+
+    def test_ssh_probe_retries_then_succeeds(self):
+        from unittest.mock import MagicMock
+
+        from scripts.deploy.runpod import test_connection
+
+        conn = MagicMock()
+        conn.run.side_effect = [OSError("refused"), None]
+        assert test_connection(conn) is True
+        assert conn.run.call_count == 2
+
+    def test_ssh_probe_gives_up(self):
+        from unittest.mock import MagicMock
+
+        from scripts.deploy.runpod import SSH_CONNECT_ATTEMPTS, test_connection
+
+        conn = MagicMock()
+        conn.run.side_effect = OSError("refused")
+        assert test_connection(conn) is False
+        assert conn.run.call_count == SSH_CONNECT_ATTEMPTS
