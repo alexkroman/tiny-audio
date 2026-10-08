@@ -15,7 +15,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Any, Unpack, cast
+from typing import IO, TYPE_CHECKING, Any, Protocol, Unpack, cast
 
 import assemblyai as aai
 import numpy as np
@@ -279,9 +279,9 @@ def _use_sdpa_where_safe(model: ASRModel) -> None:
     if resolved is None or resolved == model.language_model.config._attn_implementation:
         return
     # transformers leaves the per-submodule dict form unparameterized.
-    model.language_model.set_attn_implementation(
+    model.language_model.set_attn_implementation(  # pyright: ignore[reportUnknownMemberType]
         resolved
-    )  # pyright: ignore[reportUnknownMemberType]
+    )
 
 
 def _build_local_pipeline(model_path: str, *, local_code: bool = False) -> ASRPipeline:
@@ -511,26 +511,30 @@ class LocalStreamingEvaluator(Evaluator):
         return metrics
 
 
+class _SpeechRecognitionClient(Protocol):
+    """The slice of `huggingface_hub.InferenceClient` EndpointEvaluator calls.
+
+    The response type is a dict subclass carrying the endpoint's JSON fields.
+    """
+
+    def automatic_speech_recognition(self, audio: bytes, /) -> Mapping[str, Any]: ...
+
+
 class EndpointEvaluator(Evaluator):
     """Evaluator for HuggingFace Inference Endpoints."""
 
     def __init__(self, endpoint_url: str, **kwargs: Unpack[EvaluatorOptions]) -> None:
         super().__init__(**kwargs)
-        self.client = InferenceClient(base_url=endpoint_url)
+        self.client: _SpeechRecognitionClient = InferenceClient(base_url=endpoint_url)
 
     def transcribe(self, audio: object) -> Transcription:
         wav_bytes = prepare_wav_bytes(audio)
 
         start = time.time()
-        # huggingface_hub leaves `extra_body` an unparameterized dict.
-        result = self.client.automatic_speech_recognition(
-            wav_bytes
-        )  # pyright: ignore[reportUnknownMemberType]
+        result = self.client.automatic_speech_recognition(wav_bytes)
         elapsed = time.time() - start
 
-        # The output type is a dict subclass carrying the response fields.
-        fields = cast("Mapping[str, Any]", result)
-        text: str = fields.get("text", fields.get("transcription", ""))
+        text: str = result.get("text", result.get("transcription", ""))
         return text, elapsed, None
 
 
@@ -682,9 +686,8 @@ class AssemblyAIStreamingEvaluator(Evaluator):
             (StreamingEvents.Termination, on_terminated),
         ]
         for event, handler in handlers:
-            client.on(
-                event, handler
-            )  # pyright: ignore[reportUnknownMemberType]  # handler: bare Callable
+            # `handler` is annotated as a bare Callable.
+            client.on(event, handler)  # pyright: ignore[reportUnknownMemberType]
         client.connect(
             StreamingParameters(
                 sample_rate=16000,

@@ -24,25 +24,25 @@ from scripts.labels import (
 
 
 class TestGigaspeechPunctTags:
-    def test_comma_tag_becomes_comma(self):
+    def test_comma_tag_becomes_comma(self) -> None:
         result = _normalize_label("HELLO <COMMA> WORLD <PERIOD>")
         assert "," in result
         assert "." in result
         assert "<COMMA>" not in result
         assert "<PERIOD>" not in result
 
-    def test_question_and_exclamation(self):
+    def test_question_and_exclamation(self) -> None:
         result = _normalize_label("WHAT IS THIS <QUESTIONMARK> AMAZING <EXCLAMATIONPOINT>")
         assert "?" in result
         assert "!" in result
 
-    def test_punct_tags_lowercase(self):
+    def test_punct_tags_lowercase(self) -> None:
         # IGNORECASE: tags may appear in lowercase too.
         result = _normalize_label("hello <comma> world <period>")
         assert "," in result
         assert "." in result
 
-    def test_apostrophe_preserved_with_punct_tags(self):
+    def test_apostrophe_preserved_with_punct_tags(self) -> None:
         # Gigaspeech preserves contractions; tag restoration shouldn't disturb them.
         result = _normalize_label("THEY'RE LEAVING <COMMA> AREN'T THEY <QUESTIONMARK>")
         assert "they're" in result.lower()
@@ -58,18 +58,18 @@ class TestNonSpeechTags:
     """
 
     @pytest.mark.parametrize("tag", ["<SIL>", "<NOISE>", "<MUSIC>", "<OTHER>"])
-    def test_tag_stripped_keeps_surrounding_speech(self, tag):
+    def test_tag_stripped_keeps_surrounding_speech(self, tag: str) -> None:
         result = _normalize_label(f"SOME SPEECH {tag} MORE SPEECH")
         assert tag not in result
         assert "speech" in result.lower()
         assert result, "Sample with speech around the tag should NOT be dropped"
 
-    def test_lowercase_tag_stripped(self):
+    def test_lowercase_tag_stripped(self) -> None:
         result = _normalize_label("some speech <music> more")
         assert "<music>" not in result
         assert "speech" in result
 
-    def test_tag_alone_becomes_empty(self):
+    def test_tag_alone_becomes_empty(self) -> None:
         # The entire label was just the tag — strip leaves nothing, returns "",
         # collator's empty-label filter then drops the sample.
         assert _normalize_label("<MUSIC>") == ""
@@ -77,36 +77,36 @@ class TestNonSpeechTags:
 
 
 class TestConditionalTruecase:
-    def test_all_uppercase_gets_recased(self):
+    def test_all_uppercase_gets_recased(self) -> None:
         # Gigaspeech / AMI style — should be lifted to proper case.
         result = _normalize_label("THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG")
         assert result[0].isupper()
         # At least some downstream tokens should be lowercase now.
         assert any(c.islower() for c in result)
 
-    def test_all_lowercase_gets_recased(self):
+    def test_all_lowercase_gets_recased(self) -> None:
         # TEDLIUM / Peoples / Switchboard style.
         result = _normalize_label("the quick brown fox jumps over the lazy dog")
         # Truecase should at least capitalize the sentence-initial word.
         assert result[0].isupper()
 
-    def test_already_cased_text_preserved(self):
+    def test_already_cased_text_preserved(self) -> None:
         # LibriHeavy / CV / VoxPopuli / SPGI style — already proper-cased.
         # Critical: truecase should NOT damage "McClarnon" -> "Mcclarnon".
         text = "It was also confirmed that McClarnon is still a member of the band."
         result = _normalize_label(text)
         assert "McClarnon" in result, f"Truecase damaged proper noun: {result}"
 
-    def test_libriheavy_passthrough(self):
+    def test_libriheavy_passthrough(self) -> None:
         text = "My, what imaginations these children have developed!"
         assert _normalize_label(text) == text
 
-    def test_short_text_skipped(self):
+    def test_short_text_skipped(self) -> None:
         # "yeah" / "OH" / "MM" — too short to recase usefully.
         assert _normalize_label("yeah") == "yeah"
         assert _normalize_label("OH").lower() == "oh" or _normalize_label("OH") == "OH"
 
-    def test_needs_truecase_heuristic(self):
+    def test_needs_truecase_heuristic(self) -> None:
         assert _needs_truecase("HELLO WORLD HOW ARE YOU TODAY") is True  # all caps
         assert _needs_truecase("hello world how are you today") is True  # zero caps
         assert _needs_truecase("Hello world, how are you today.") is False  # cased
@@ -114,23 +114,23 @@ class TestConditionalTruecase:
 
 
 class TestResidualMarkers:
-    def test_tedlium_unk_stripped(self):
+    def test_tedlium_unk_stripped(self) -> None:
         # _normalize_label sees `<unk> i thought ...` -> strip <unk>, truecase
         result = _normalize_label("<unk> i thought i would read poems today")
         assert "<unk>" not in result
         # Should still have the rest of the sentence.
         assert "thought" in result.lower()
 
-    def test_switchboard_laugh_stripped(self):
+    def test_switchboard_laugh_stripped(self) -> None:
         assert "<LAUGH>" not in _normalize_label("yeah <LAUGH> you know to death")
         assert "<laugh>" not in _normalize_label("yeah <laugh> you know to death")
 
-    def test_tedlium_bracket_stripped(self):
+    def test_tedlium_bracket_stripped(self) -> None:
         result = _normalize_label("the topic of [ medicine ] is important today")
         assert "[" not in result
         assert "medicine" not in result
 
-    def test_inaudible_stripped(self):
+    def test_inaudible_stripped(self) -> None:
         result = _normalize_label("we walked <inaudible> down the street")
         assert "<inaudible>" not in result
 
@@ -143,11 +143,11 @@ class TestPercentCanonicalization:
     "five percent" and "5%" to the same string on both sides of the score.
     """
 
-    def test_percent_sign_is_preserved(self):
+    def test_percent_sign_is_preserved(self) -> None:
         result = _normalize_label("inflation rose to five % this year")
         assert "%" in result
 
-    def test_per_cent_becomes_single_word(self):
+    def test_per_cent_becomes_single_word(self) -> None:
         result = _normalize_label("inflation rose to five per cent this year")
         assert "percent" in result.lower()
         assert "per cent" not in result.lower()
@@ -157,55 +157,55 @@ class TestUnicodeCleanup:
     """ftfy + NFKC pass — defensive layer for mojibake, smart quotes,
     HTML entities, composed/decomposed forms, and width variants."""
 
-    def test_mojibake_fixed(self):
+    def test_mojibake_fixed(self) -> None:
         # Common UTF-8-double-encoded apostrophe corruption.
         result = _normalize_label("Itâ€™s a good idea")
         assert "'" in result
         assert "â€™" not in result
 
-    def test_smart_quotes_normalized(self):
+    def test_smart_quotes_normalized(self) -> None:
         # Curly quotes folded to straight (NFKC + ftfy).
         result = _normalize_label("She said “yes” and walked away.")
         assert "“" not in result
         assert "”" not in result
         assert '"' in result
 
-    def test_curly_apostrophe_normalized(self):
+    def test_curly_apostrophe_normalized(self) -> None:
         result = _normalize_label("I don\u2019t think so.")
         assert "\u2019" not in result
         assert "'" in result
 
-    def test_full_width_latin_normalized(self):
+    def test_full_width_latin_normalized(self) -> None:
         # NFKC folds full-width to half-width.
         result = _normalize_label("\uff28\uff25\uff2c\uff2c\uff2f \uff37\uff2f\uff32\uff2c\uff24")
         assert "HELLO" in result.upper() or "Hello" in result
 
-    def test_html_entity_decoded(self):
+    def test_html_entity_decoded(self) -> None:
         result = _normalize_label("Tom &amp; Jerry")
         assert "&amp;" not in result
         assert "&" in result
 
-    def test_clean_ascii_passthrough(self):
+    def test_clean_ascii_passthrough(self) -> None:
         # Already clean — should be a no-op aside from truecase / regex.
         text = "It's already clean."
         assert _normalize_label(text) == text
 
 
 class TestEdgeCases:
-    def test_empty_input(self):
+    def test_empty_input(self) -> None:
         assert _normalize_label("") == ""
         assert _normalize_label(None) == ""
         assert _normalize_label("   ") == ""
 
-    def test_only_markers_becomes_empty(self):
+    def test_only_markers_becomes_empty(self) -> None:
         # If all that remains after stripping is whitespace, return empty
         # so the collator's empty-label filter discards the sample.
         assert _normalize_label("<unk> <unk> <unk>") == ""
 
-    def test_only_garbage_tag(self):
+    def test_only_garbage_tag(self) -> None:
         assert _normalize_label("<MUSIC>") == ""
 
-    def test_only_brackets_becomes_empty(self):
+    def test_only_brackets_becomes_empty(self) -> None:
         assert _normalize_label("[ stage direction ]") == ""
 
 
@@ -234,11 +234,11 @@ class TestDeclaredTextCase:
     ]
 
     @pytest.mark.parametrize("text", SPGI_FRAGMENTS)
-    def test_cased_source_fragments_are_left_alone(self, text):
+    def test_cased_source_fragments_are_left_alone(self, text: str) -> None:
         assert _normalize_label(text, TEXT_CASE_CASED) == text
 
     @pytest.mark.parametrize("text", SPGI_FRAGMENTS)
-    def test_heuristic_would_have_corrupted_these(self, text):
+    def test_heuristic_would_have_corrupted_these(self, text: str) -> None:
         """Guard: pins the bug the declaration exists to prevent.
 
         If the heuristic ever stops misfiring here, the parametrized cases
@@ -246,7 +246,7 @@ class TestDeclaredTextCase:
         """
         assert _normalize_label(text, None) != text
 
-    def test_truecase_invents_proper_nouns_on_fragments(self):
+    def test_truecase_invents_proper_nouns_on_fragments(self) -> None:
         """The concrete damage: ordinary common nouns promoted to proper."""
         text = (
             "with which we will work and be able to clear out all the various "
@@ -261,21 +261,21 @@ class TestDeclaredTextCase:
         ("raw", "expected"),
         [("YEAH", "Yeah"), ("OKAY", "Okay"), ("HMM", "Hmm"), ("NO", "No"), ("IT'S", "It's")],
     )
-    def test_short_monocase_rows_are_recased(self, raw, expected):
+    def test_short_monocase_rows_are_recased(self, raw: str, expected: str) -> None:
         """Real AMI rows: 21% fall under the truecase floor and used to pass
         through verbatim, shipping ALL-CAPS training labels."""
         assert _normalize_label(raw, TEXT_CASE_MONO) == expected
 
-    def test_short_rows_bypass_the_statistical_truecaser(self):
+    def test_short_rows_bypass_the_statistical_truecaser(self) -> None:
         """Deterministic recase, so a backchannel cannot become a proper noun."""
         assert _normalize_label("SO UH", TEXT_CASE_MONO) == "So uh"
 
-    def test_long_monocase_rows_still_truecase(self):
+    def test_long_monocase_rows_still_truecase(self) -> None:
         result = _normalize_label("THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG", TEXT_CASE_MONO)
         assert result[0].isupper()
         assert any(c.islower() for c in result)
 
-    def test_unset_policy_preserves_legacy_behavior(self):
+    def test_unset_policy_preserves_legacy_behavior(self) -> None:
         for text in ["YEAH", "the quick brown fox jumps over the lazy dog", "Already Cased Text."]:
             assert _normalize_label(text, None) == _normalize_label(text)
 
@@ -287,7 +287,7 @@ class TestSpelledLetterRuns:
     punctuation, so every period in it is part of an acronym.
     """
 
-    def test_acronym_run_does_not_capitalize_next_word(self):
+    def test_acronym_run_does_not_capitalize_next_word(self) -> None:
         result = _normalize_label(
             "IF YOU IF YOU S. S. H. AND THEY HAVE THIS BIG WARNING ABOUT DOING NOTHING",
             TEXT_CASE_MONO,
@@ -295,12 +295,12 @@ class TestSpelledLetterRuns:
         assert "S. S. H. and" in result, result
         assert "S. S. H. And" not in result
 
-    def test_real_sentence_boundary_still_capitalizes(self):
+    def test_real_sentence_boundary_still_capitalizes(self) -> None:
         """Gigaspeech's tag-derived boundaries must keep working."""
         result = _normalize_label("six tomatoes. the next thing we tried", TEXT_CASE_MONO)
         assert "tomatoes. The" in result, result
 
-    def test_single_letter_without_a_run_still_capitalizes(self):
+    def test_single_letter_without_a_run_still_capitalizes(self) -> None:
         """'e t. the video game' — the letter before the period carries no
         period of its own, so this is a boundary, not an acronym run.
 
@@ -314,30 +314,30 @@ class TestSpelledLetterRuns:
 class TestTedliumEdgeEvents:
     """TEDLIUM writes audience events as bare lowercase words at segment edges."""
 
-    def test_leading_laughter_stripped(self):
+    def test_leading_laughter_stripped(self) -> None:
         out = _normalize_label("laughter so i had to add handcuffs", TEXT_CASE_MONO)
         assert "laughter" not in out.lower()
         assert out.lower().startswith("so i had")
 
-    def test_trailing_chain_stripped(self):
+    def test_trailing_chain_stripped(self) -> None:
         out = _normalize_label("walking around like crazy laughter applause", TEXT_CASE_MONO)
         assert out.lower().endswith("like crazy")
 
-    def test_event_only_label_becomes_empty(self):
+    def test_event_only_label_becomes_empty(self) -> None:
         assert _normalize_label("applause", TEXT_CASE_MONO) == ""
 
-    def test_mid_segment_real_speech_kept(self):
+    def test_mid_segment_real_speech_kept(self) -> None:
         out = _normalize_label("the first time i felt applause on the vest", TEXT_CASE_MONO)
         assert "applause" in out.lower()
 
-    def test_word_prefix_not_matched(self):
+    def test_word_prefix_not_matched(self) -> None:
         out = _normalize_label("laughteresque moments", TEXT_CASE_MONO)
         assert out.lower().startswith("laughteresque")
 
-    def test_cased_source_edge_word_kept(self):
+    def test_cased_source_edge_word_kept(self) -> None:
         text = "The hall erupted in laughter"
         assert _normalize_label(text, TEXT_CASE_CASED) == text
 
-    def test_all_caps_mono_source_kept(self):
+    def test_all_caps_mono_source_kept(self) -> None:
         out = _normalize_label("THEY ROARED WITH LAUGHTER", TEXT_CASE_MONO)
         assert out.lower().endswith("laughter")

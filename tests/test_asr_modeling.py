@@ -5,7 +5,7 @@ import json
 from collections.abc import Sequence
 from pathlib import Path
 from types import ModuleType
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -27,6 +27,7 @@ from tiny_audio.asr_modeling import (
     VOCAB_PAD_MULTIPLE,
     ASRModel,
     _apply_chat_template,
+    _LoadStateDictResult,
     _assert_projector_loaded,
     _max_attention_head_dim,
     _patch_gemma_decode_loop,
@@ -39,8 +40,17 @@ if TYPE_CHECKING:
     from tiny_audio.asr_types import GenerativeDecoder
 
 
+class _GenerationSettings(Protocol):
+    eos_token_id: list[int] | None
+    no_repeat_ngram_size: int
+
+
+def _generation_settings(model: ASRModel) -> _GenerationSettings:
+    return model.generation_config
+
+
 def _eos_ids(model: ASRModel) -> list[int]:
-    return cast(list[int], model.generation_config.eos_token_id)
+    return cast(list[int], _generation_settings(model).eos_token_id)
 
 
 def _input_embedding_rows(model: ASRModel) -> int:
@@ -90,14 +100,14 @@ class TestTokenizerInit:
         assert embed.num_embeddings >= len(base_asr_model.tokenizer)
 
     def test_generation_config_eos_synced(self, base_asr_model: ASRModel) -> None:
-        eos_ids = cast("list[int] | None", base_asr_model.generation_config.eos_token_id)
+        eos_ids = _generation_settings(base_asr_model).eos_token_id
         assert eos_ids is None or all(e is not None for e in eos_ids)
 
     def test_generation_config_carries_no_repeat_ngram_size(self, base_asr_model: ASRModel) -> None:
         # `generate()` consults the GenerationConfig only; a value that lives
         # on ASRConfig alone is inert, which is how the loop guard shipped
         # disabled to the Hub.
-        no_repeat_ngram_size = cast(int, base_asr_model.generation_config.no_repeat_ngram_size)
+        no_repeat_ngram_size = _generation_settings(base_asr_model).no_repeat_ngram_size
         assert no_repeat_ngram_size == base_asr_model.config.no_repeat_ngram_size
         assert no_repeat_ngram_size == 12
 
@@ -453,14 +463,14 @@ class TestGradientCheckpointing:
     override directly, so a future kwarg fails here instead of on a GPU."""
 
     def test_enable_via_upstream_entry_point(self, base_asr_model: ASRModel) -> None:
-        base_asr_model.gradient_checkpointing_enable()
+        base_asr_model.gradient_checkpointing_enable()  # pyright: ignore[reportUnknownMemberType]  # untyped kwargs dict upstream
         assert base_asr_model.language_model.is_gradient_checkpointing
         base_asr_model.gradient_checkpointing_disable()
         assert not base_asr_model.language_model.is_gradient_checkpointing
 
     def test_enable_accepts_upstream_kwargs(self, base_asr_model: ASRModel) -> None:
         # Mirrors the exact call transformers.Trainer makes.
-        base_asr_model.gradient_checkpointing_enable(
+        base_asr_model.gradient_checkpointing_enable(  # pyright: ignore[reportUnknownMemberType]  # untyped kwargs dict upstream
             gradient_checkpointing_kwargs={"use_reentrant": False},
             every_n_layers=1,
         )
@@ -468,7 +478,9 @@ class TestGradientCheckpointing:
         base_asr_model.gradient_checkpointing_disable()
 
     def test_signature_matches_upstream(self, base_asr_model: ASRModel) -> None:
-        upstream = inspect.signature(PreTrainedModel._set_gradient_checkpointing).parameters
+        upstream = inspect.signature(
+            PreTrainedModel._set_gradient_checkpointing  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]  # untyped callable param upstream
+        ).parameters
         ours = inspect.signature(base_asr_model._set_gradient_checkpointing).parameters
         accepts_var_kwargs = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in ours.values())
         missing = [n for n in upstream if n != "self" and n not in ours]
@@ -703,7 +715,7 @@ class TestStateDictTrainableModules:
 
         # The saved keys must be the ones load_state_dict expects, or the
         # round-trip silently drops them under strict=False.
-        result = model.load_state_dict(keys, strict=False)
+        result = cast(_LoadStateDictResult, model.load_state_dict(keys, strict=False))
         assert result.unexpected_keys == []
 
     def test_encoder_keys_cover_trainable_encoder_params(self) -> None:
@@ -882,7 +894,7 @@ class TestForwardPassesReturnDict:
                     return getattr(real, name)
 
         spy = Spy()
-        ids = base_asr_model.tokenizer("hi <audio> there", return_tensors="pt").input_ids
+        ids = base_asr_model.tokenizer("hi <audio> there", return_tensors="pt")["input_ids"]
         base_asr_model.language_model = cast("GenerativeDecoder", spy)
         try:
             base_asr_model(

@@ -26,21 +26,21 @@ class TestPercentCanonicalization:
     "105%" to the same string on both reference and hypothesis.
     """
 
-    def test_percent_symbol_is_preserved(self):
+    def test_percent_symbol_is_preserved(self) -> None:
         # Lowercase input → truecase fires → sentence-initial cap.
         assert _normalize_label("we grew 25%") == "We grew 25%"
 
-    def test_percent_symbol_mid_sentence(self):
+    def test_percent_symbol_mid_sentence(self) -> None:
         # Truecase capitalizes acronym-shaped tokens like "q2" → "Q2".
         assert _normalize_label("a 25% margin in q2") == "A 25% margin in Q2"
 
-    def test_decimal_percent(self):
+    def test_decimal_percent(self) -> None:
         assert _normalize_label("decreasing 0.4% quarter") == "Decreasing 0.4% quarter"
 
-    def test_per_cent_two_word_form(self):
+    def test_per_cent_two_word_form(self) -> None:
         assert _normalize_label("we grew 25 per cent") == "We grew 25 percent"
 
-    def test_already_spoken_form_unchanged_except_truecase(self):
+    def test_already_spoken_form_unchanged_except_truecase(self) -> None:
         # Same percent canon path; lowercase input gets sentence-initial cap.
         assert _normalize_label("we grew 25 percent") == "We grew 25 percent"
 
@@ -50,19 +50,19 @@ class TestGigaspeechPunctRestoration:
     The normalizer maps each to real punctuation BEFORE the truecase pass.
     """
 
-    def test_period_at_end(self):
+    def test_period_at_end(self) -> None:
         assert _normalize_label("BOOST PIPES <PERIOD>") == "Boost pipes."
 
-    def test_comma_mid_sentence(self):
+    def test_comma_mid_sentence(self) -> None:
         assert _normalize_label("PIPES <COMMA> AND THE FLOWERS") == "Pipes, and the flowers"
 
-    def test_multiple_punct_tags(self):
+    def test_multiple_punct_tags(self) -> None:
         assert _normalize_label("HELLO <COMMA> WORLD <PERIOD>") == "Hello, world."
 
-    def test_question_tag(self):
+    def test_question_tag(self) -> None:
         assert _normalize_label("REALLY <QUESTIONMARK>") == "Really?"
 
-    def test_exclamation_tag(self):
+    def test_exclamation_tag(self) -> None:
         # Short input (<5 letters total after punct) skips truecase.
         assert _normalize_label("WOW <EXCLAMATIONPOINT>") == "WOW!"
 
@@ -73,19 +73,19 @@ class TestNonSpeechTagStripping:
     collator catches the entire-label-was-just-a-tag edge case.
     """
 
-    def test_music_stripped(self):
+    def test_music_stripped(self) -> None:
         assert _normalize_label("hello <music> world") == "Hello world"
 
-    def test_noise_at_start(self):
+    def test_noise_at_start(self) -> None:
         assert _normalize_label("<noise> hello") == "Hello"
 
-    def test_other_at_end(self):
+    def test_other_at_end(self) -> None:
         assert _normalize_label("hello <other>") == "Hello"
 
-    def test_sil_stripped(self):
+    def test_sil_stripped(self) -> None:
         assert _normalize_label("hello <sil> world") == "Hello world"
 
-    def test_tag_alone_becomes_empty(self):
+    def test_tag_alone_becomes_empty(self) -> None:
         # Tag-only label → strip leaves nothing → empty string returned.
         # Collator's empty-label filter then drops the row.
         assert _normalize_label("<music>") == ""
@@ -93,13 +93,13 @@ class TestNonSpeechTagStripping:
 
 
 class TestGigaspeechEdgeCases:
-    def test_punct_tag_at_start_no_leading_space(self):
+    def test_punct_tag_at_start_no_leading_space(self) -> None:
         # `\s*` in the regex matches zero-width at string start.
         # Resulting `.Boost` is unusual but a literal consequence of the
         # mapping rule; downstream WER scoring normalizes regardless.
         assert _normalize_label("<period>boost") == ".Boost"
 
-    def test_unknown_angle_bracket_token_stripped(self):
+    def test_unknown_angle_bracket_token_stripped(self) -> None:
         # ASR transcripts never legitimately contain `<word>` tokens, so
         # ALL residual `<...>` (after the Gigaspeech punct map runs) are
         # treated as annotation markers and stripped. Prior whitelist
@@ -109,35 +109,35 @@ class TestGigaspeechEdgeCases:
 
 
 class TestCombinedNormalization:
-    def test_percent_and_gigaspeech_marker(self):
+    def test_percent_and_gigaspeech_marker(self) -> None:
         # Now that `%` survives, no lowercase "percent" is appended, so the
         # text stays ALL-CAPS → upper_frac > 0.9 → truecase FIRES. Under the
         # old rewrite this landed in the mixed-case band and truecase was
         # skipped, yielding "WE GREW 25 percent.".
         assert _normalize_label("WE GREW 25% <PERIOD>") == "We grew 25%."
 
-    def test_marker_then_percent(self):
+    def test_marker_then_percent(self) -> None:
         assert _normalize_label("HELLO <COMMA> WE GREW 25%") == "Hello, we grew 25%"
 
 
 class TestHygiene:
-    def test_strips_leading_trailing_whitespace(self):
+    def test_strips_leading_trailing_whitespace(self) -> None:
         assert _normalize_label("   hello world   ") == "Hello world"
 
-    def test_collapses_internal_whitespace(self):
+    def test_collapses_internal_whitespace(self) -> None:
         assert _normalize_label("hello    world") == "Hello world"
 
-    def test_empty_input(self):
+    def test_empty_input(self) -> None:
         assert _normalize_label("") == ""
 
-    def test_only_whitespace(self):
+    def test_only_whitespace(self) -> None:
         assert _normalize_label("   ") == ""
 
-    def test_only_marker_remains_after_strip(self):
+    def test_only_marker_remains_after_strip(self) -> None:
         # <period> → '.' via Gigaspeech-tag map; whole label becomes just '.'.
         assert _normalize_label("<period>") == "."
 
-    def test_already_cased_passes_through(self):
+    def test_already_cased_passes_through(self) -> None:
         # Mixed case (sentence-initial caps + proper nouns) → upper_count > 0
         # → truecase SKIPPED → output preserves existing casing.
         assert (
@@ -159,30 +159,30 @@ class TestTedliumNormalization:
     practice only the mid-sentence case below survives into training.
     """
 
-    def test_unk_at_start(self):
+    def test_unk_at_start(self) -> None:
         assert (
             _normalize_label("<unk> i thought i would read poems") == "I thought I would read poems"
         )
 
-    def test_unk_mid_sentence(self):
+    def test_unk_mid_sentence(self) -> None:
         assert _normalize_label("hello <unk> world") == "Hello world"
 
-    def test_unk_at_end(self):
+    def test_unk_at_end(self) -> None:
         assert (
             _normalize_label("washing my mouth out with soap <unk>")
             == "Washing my mouth out with soap"
         )
 
-    def test_bracket_block_stripped(self):
+    def test_bracket_block_stripped(self) -> None:
         assert _normalize_label("she said [ medicine ] and laughed") == "She said and laughed"
 
-    def test_long_bracket_block_stripped(self):
+    def test_long_bracket_block_stripped(self) -> None:
         assert (
             _normalize_label("then [ her face and hands stood out ] she paused")
             == "Then she paused"
         )
 
-    def test_unk_and_bracket_combined(self):
+    def test_unk_and_bracket_combined(self) -> None:
         assert _normalize_label("<unk> hello [ aside ] world") == "Hello world"
 
 
@@ -216,7 +216,7 @@ class TestEdgeContentTagFilter:
             "<unk> both ends <unk>",
         ],
     )
-    def test_edge_content_tag_is_dropped(self, text):
+    def test_edge_content_tag_is_dropped(self, text: str) -> None:
         assert _has_edge_content_tag(text) is True
 
     @pytest.mark.parametrize(
@@ -241,10 +241,10 @@ class TestEdgeContentTagFilter:
             "",
         ],
     )
-    def test_kept(self, text):
+    def test_kept(self, text: str) -> None:
         assert _has_edge_content_tag(text) is False
 
-    def test_none_is_safe(self):
+    def test_none_is_safe(self) -> None:
         assert _has_edge_content_tag(None) is False
 
 
@@ -253,14 +253,14 @@ class TestEdAccNormalization:
     in ~20% of rows. All stripped; surrounding text gets recased per truecase.
     """
 
-    def test_overlap_marker_stripped(self):
+    def test_overlap_marker_stripped(self) -> None:
         # Truecase capitalizes "Promo" (recognized as a proper-noun-ish token).
         assert (
             _normalize_label("YOU'RE A BIG PROMO <OVERLAP> YOU'RE THE BIG PROMOTER")
             == "You're a big Promo you're the big promoter"
         )
 
-    def test_laugh_marker_stripped(self):
+    def test_laugh_marker_stripped(self) -> None:
         # Mid-sentence "Yeah" cap is a known truecase library quirk
         # (sentence-boundary heuristic over-capitalizes interjections).
         assert (
@@ -268,20 +268,20 @@ class TestEdAccNormalization:
             == "Analyzing this conversation but anyway Yeah"
         )
 
-    def test_dtmf_marker_stripped(self):
+    def test_dtmf_marker_stripped(self) -> None:
         assert (
             _normalize_label("EVERYBODY IS GOING THERE AND <DTMF> A LITTLE BIT GRIM")
             == "Everybody is going there and a little bit grim"
         )
 
-    def test_foreign_marker_stripped(self):
+    def test_foreign_marker_stripped(self) -> None:
         assert _normalize_label("HE SAID <FOREIGN> AND LAUGHED") == "He said and laughed"
 
-    def test_no_speech_marker_stripped(self):
+    def test_no_speech_marker_stripped(self) -> None:
         # Hyphenated tag form must be caught literally.
         assert _normalize_label("OKAY <NO-SPEECH> RIGHT") == "Okay right"
 
-    def test_lipsmack_marker_stripped(self):
+    def test_lipsmack_marker_stripped(self) -> None:
         # Short total letter count (< 5 after strip) → truecase SKIPPED.
         assert _normalize_label("UM <LIPSMACK> SO") == "UM SO"
 
@@ -289,7 +289,7 @@ class TestEdAccNormalization:
         "marker",
         ["overlap", "laugh", "dtmf", "foreign", "no-speech", "lipsmack"],
     )
-    def test_lowercase_form_also_stripped(self, marker):
+    def test_lowercase_form_also_stripped(self, marker: str) -> None:
         # Generic `<[^>]+>` strip is case-agnostic — both cases handled.
         assert _normalize_label(f"hello <{marker}> world") == "Hello world"
 
@@ -297,14 +297,14 @@ class TestEdAccNormalization:
 class TestEarnings22Normalization:
     """Earnings22 ships <clear_throat>/<inaudible>/<crosstalk> in ~3% of rows."""
 
-    def test_clear_throat_marker_stripped(self):
+    def test_clear_throat_marker_stripped(self) -> None:
         assert _normalize_label("um <clear_throat> as i was saying") == "Um as I was saying"
 
-    def test_inaudible_marker_stripped(self):
+    def test_inaudible_marker_stripped(self) -> None:
         # "q4" → "Q4" by truecase (recognized acronym shape).
         assert _normalize_label("the revenue <inaudible> in q4") == "The revenue in Q4"
 
-    def test_crosstalk_marker_stripped(self):
+    def test_crosstalk_marker_stripped(self) -> None:
         assert _normalize_label("yeah <crosstalk> i agree") == "Yeah I agree"
 
 
@@ -318,7 +318,7 @@ class TestBodilyNoiseMarkers:
         "marker",
         ["sigh", "inhale", "exhale", "breath", "cough", "throat", "sniff", "click"],
     )
-    def test_bodily_noise_marker_stripped(self, marker):
+    def test_bodily_noise_marker_stripped(self, marker: str) -> None:
         assert _normalize_label(f"hello <{marker}> world") == "Hello world"
 
 
@@ -327,7 +327,7 @@ class TestPerCentBoundary:
     `text.replace("per cent", "percent")` mangled `per centage` → `percentage`
     and would have mangled `per centimeter` → `percentimeter`."""
 
-    def test_per_centage_preserved(self):
+    def test_per_centage_preserved(self) -> None:
         # Lowercase mono-case → truecase fires → sentence-initial cap, and
         # may also cap "centage" as a perceived proper-noun (truecase
         # library artifact, unrelated to the regex fix). The contract this
@@ -336,12 +336,12 @@ class TestPerCentBoundary:
         assert "percentage" not in result
         assert "per centage" in result
 
-    def test_per_centimeter_preserved(self):
+    def test_per_centimeter_preserved(self) -> None:
         result = _normalize_label("five per centimeter").lower()
         assert "percentimeter" not in result
         assert "per centimeter" in result
 
-    def test_per_cent_still_collapsed_when_word_bounded(self):
+    def test_per_cent_still_collapsed_when_word_bounded(self) -> None:
         assert _normalize_label("five per cent here") == "Five percent here"
 
 
@@ -349,7 +349,7 @@ class TestTruecaseArtifactCleanup:
     """Truecase's NLTK tokenizer introduces three classes of artifact in
     its output. The post-truecase cleanup function fixes each."""
 
-    def test_mid_sentence_period_no_leading_space(self):
+    def test_mid_sentence_period_no_leading_space(self) -> None:
         # Truecase output `rate . But` → cleaned to `rate. But`. The
         # `<PERIOD>` substitution happens in ~25% of Gigaspeech rows.
         assert (
@@ -357,25 +357,25 @@ class TestTruecaseArtifactCleanup:
             == "Use a rate. But today it works"
         )
 
-    def test_sentence_start_after_period_capitalized(self):
+    def test_sentence_start_after_period_capitalized(self) -> None:
         # Truecase may leave the next sentence lowercase after a
         # mid-sentence period (`E T. the Video game`). Post-cleanup caps it.
         assert _normalize_label("E T <PERIOD> THE VIDEO GAME <PERIOD>") == "E T. The Video game."
 
-    def test_em_dash_spaces_restored(self):
+    def test_em_dash_spaces_restored(self) -> None:
         # Truecase collapses ` -- ` → `--`. Post-cleanup restores spacing.
         # Input is mono-case lowercase so truecase fires; the cleanup
         # then re-inserts the em-dash spaces.
         assert _normalize_label("we agreed -- it was fine") == "We agreed -- it was fine"
 
-    def test_gonna_artifact_normalized(self):
+    def test_gonna_artifact_normalized(self) -> None:
         # Truecase mangles `GONNA`/`gonna` → `gonNA` regardless of input case.
         assert _normalize_label("I'M GONNA DO IT NOW") == "I'm gonna do it now"
 
-    def test_wanna_artifact_normalized(self):
+    def test_wanna_artifact_normalized(self) -> None:
         assert _normalize_label("you wanna go home") == "You wanna go home"
 
-    def test_gotta_artifact_normalized(self):
+    def test_gotta_artifact_normalized(self) -> None:
         # Same MidWord-caps family as gonna/wanna — truecase outputs `gotTA`.
         assert _normalize_label("YOU GOTTA DO IT NOW") == "You gotta do it now"
 
@@ -405,24 +405,24 @@ class TestOrphanedNtContraction:
             "weren",
         ],
     )
-    def test_orphan_nt_joined(self, stem):
+    def test_orphan_nt_joined(self, stem: str) -> None:
         assert _normalize_label(f"i {stem} 't think so").lower().startswith(f"i {stem}'t")
 
-    def test_does_not_break_correct_form(self):
+    def test_does_not_break_correct_form(self) -> None:
         # Already-joined `didn't` (no space) must be untouched.
         result = _normalize_label("i didn't think so")
         assert "didn't" in result
         assert "didn 't" not in result
         assert "didn 'T" not in result
 
-    def test_does_not_break_alternate_tokenization(self):
+    def test_does_not_break_alternate_tokenization(self) -> None:
         # TEDLIUM's other tokenization style — `did n't` — joins correctly
         # via truecase's existing contraction vocabulary. Our regex must
         # not interfere.
         result = _normalize_label("they did n't think so")
         assert "didn't" in result
 
-    def test_does_not_match_apostrophe_followed_by_letters(self):
+    def test_does_not_match_apostrophe_followed_by_letters(self) -> None:
         # `'tis` / `'twas` (archaic) — apostrophe followed by letters that
         # aren't a contraction suffix. Our regex requires `\w+n` before the
         # space; `hark` ends in `k`, so the orphan-n't fix does NOT fire.
@@ -431,7 +431,7 @@ class TestOrphanedNtContraction:
         result = _normalize_label("hark 'tis the night")
         assert "'tis" in result.lower()  # case-insensitive: regex didn't mangle it
 
-    def test_no_change_when_preceding_word_doesnt_end_in_n(self):
+    def test_no_change_when_preceding_word_doesnt_end_in_n(self) -> None:
         # The `\w+n` anchor restricts our fix to negation contractions.
         # Forms like `friends ' mothers` (plural possessive) and `it 's`
         # (which truecase handles) stay on the existing code path.
@@ -445,8 +445,8 @@ class TestAdjacentNoWhitespaceMarkers:
     words. The substitute-with-space approach (vs. substitute-with-empty)
     keeps `hello<unk>world` from becoming `helloworld`."""
 
-    def test_angle_tag_no_whitespace(self):
+    def test_angle_tag_no_whitespace(self) -> None:
         assert _normalize_label("hello<unk>world") == "Hello world"
 
-    def test_square_bracket_no_whitespace(self):
+    def test_square_bracket_no_whitespace(self) -> None:
         assert _normalize_label("abc[laughter]def") == "Abc def"

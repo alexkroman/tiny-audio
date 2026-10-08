@@ -66,7 +66,7 @@ def _arguments(command):
     return [p for p in command.params if p.param_type_name == "argument"]
 
 
-def test_every_subcommand_is_reachable():
+def test_every_subcommand_is_reachable() -> None:
     assert {path[0] for path, _ in _LEAVES} == {
         "train",
         "eval",
@@ -80,7 +80,7 @@ def test_every_subcommand_is_reachable():
 
 
 @pytest.mark.parametrize(("path", "command"), _LEAVES, ids=_LEAF_IDS)
-def test_options_declare_long_name_and_help(path, command):
+def test_options_declare_long_name_and_help(path: tuple[str, ...], command: click.Command) -> None:
     for option in _options(command):
         longs = [o for o in option.opts if o.startswith("--")]
         assert longs, f"{' '.join(path)}: option {option.opts} has no --long-name"
@@ -88,12 +88,12 @@ def test_options_declare_long_name_and_help(path, command):
 
 
 @pytest.mark.parametrize(("path", "command"), _LEAVES, ids=_LEAF_IDS)
-def test_arguments_have_help(path, command):
+def test_arguments_have_help(path: tuple[str, ...], command: click.Command) -> None:
     for argument in _arguments(command):
         assert argument.help, f"{' '.join(path)}: argument {argument.name} has no help text"
 
 
-def test_short_flags_mean_one_thing():
+def test_short_flags_mean_one_thing() -> None:
     seen: dict[str, set[str]] = defaultdict(set)
     for path, command in _LEAVES:
         for option in _options(command):
@@ -108,7 +108,7 @@ def test_short_flags_mean_one_thing():
     assert all(len(longs) == 1 for longs in seen.values()), dict(seen)
 
 
-def test_long_flags_keep_the_same_short_alias_everywhere():
+def test_long_flags_keep_the_same_short_alias_everywhere() -> None:
     shorts_by_long: dict[str, set[frozenset[str]]] = defaultdict(set)
     for _path, command in _LEAVES:
         for option in _options(command):
@@ -119,7 +119,7 @@ def test_long_flags_keep_the_same_short_alias_everywhere():
     assert not inconsistent, inconsistent
 
 
-def test_runpod_pod_commands_take_host_and_port_first():
+def test_runpod_pod_commands_take_host_and_port_first() -> None:
     pod_commands = {"deploy", "train", "attach", "eval", "checkpoint"}
     for path, command in _LEAVES:
         if path[0] == "runpod" and path[1] in pod_commands:
@@ -128,7 +128,7 @@ def test_runpod_pod_commands_take_host_and_port_first():
             assert all(a.required for a in _arguments(command)[:2]), " ".join(path)
 
 
-def test_analysis_and_debug_commands_take_the_model_positionally():
+def test_analysis_and_debug_commands_take_the_model_positionally() -> None:
     for path, command in _LEAVES:
         if path[0] in {"analysis", "debug"}:
             where = " ".join(path)

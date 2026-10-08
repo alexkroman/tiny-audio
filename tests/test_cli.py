@@ -27,7 +27,7 @@ def _clean(text: str) -> str:
 class TestMainCLI:
     """Tests for the main CLI entry point."""
 
-    def test_help_shows_all_commands(self):
+    def test_help_shows_all_commands(self) -> None:
         """Test that --help shows all registered commands."""
         result = runner.invoke(app, ["--help"])
         assert result.exit_code == 0
@@ -36,13 +36,13 @@ class TestMainCLI:
         for cmd in expected_commands:
             assert cmd in output, f"Expected '{cmd}' in help output"
 
-    def test_no_args_shows_help(self):
+    def test_no_args_shows_help(self) -> None:
         """Test that running without args shows help."""
         result = runner.invoke(app, [])
         assert result.exit_code in (0, 2)
         assert "Usage:" in _clean(result.output)
 
-    def test_invalid_command(self):
+    def test_invalid_command(self) -> None:
         """Test that invalid command shows error."""
         result = runner.invoke(app, ["invalid-command"])
         assert result.exit_code != 0
@@ -63,7 +63,7 @@ class TestSubcommandHelp:
             (["dev"], ["lint", "format", "test", "handler"]),
         ],
     )
-    def test_subcommand_help(self, cmd, expected_keywords):
+    def test_subcommand_help(self, cmd: list[str], expected_keywords: list[str]) -> None:
         """Test that subcommand --help works and shows expected keywords."""
         result = runner.invoke(app, [*cmd, "--help"])
         assert result.exit_code == 0, f"'{' '.join(cmd)} --help' failed: {result.output}"
@@ -93,7 +93,7 @@ class TestNestedCommands:
             (["dev", "handler"], "model"),
         ],
     )
-    def test_nested_command_help(self, cmd_path, expected_keyword):
+    def test_nested_command_help(self, cmd_path: list[str], expected_keyword: str) -> None:
         """Test that nested commands are accessible and show expected options."""
         result = runner.invoke(app, [*cmd_path, "--help"])
         assert result.exit_code == 0, f"'{' '.join(cmd_path)} --help' failed: {result.output}"
@@ -104,7 +104,7 @@ class TestNestedCommands:
 class TestDevCommands:
     """Tests specific to dev command structure."""
 
-    def test_dev_has_all_expected_commands(self):
+    def test_dev_has_all_expected_commands(self) -> None:
         """Test that dev --help lists all expected subcommands."""
         result = runner.invoke(app, ["dev", "--help"])
         assert result.exit_code == 0
@@ -131,20 +131,20 @@ class TestDevCommands:
 class TestEvalCommand:
     """Tests specific to eval command behavior."""
 
-    def test_eval_no_args_shows_error(self):
+    def test_eval_no_args_shows_error(self) -> None:
         """`--model` is required, so Click reports it before anything runs."""
         result = runner.invoke(app, ["eval"])
         assert result.exit_code == 2
         output = _clean(result.output)
         assert "--model" in output or "-m" in output
 
-    def test_eval_rejects_unknown_dataset(self):
+    def test_eval_rejects_unknown_dataset(self) -> None:
         """Dataset names are a Click choice built from the registry."""
         result = runner.invoke(app, ["eval", "-m", "x", "-d", "not-a-dataset"])
         assert result.exit_code == 2
         assert "not-a-dataset" in _clean(result.output)
 
-    def test_subcommands_do_not_install_completion(self):
+    def test_subcommands_do_not_install_completion(self) -> None:
         """Only the root app owns shell completion."""
         for cmd in (["eval"], ["dev"], ["runpod", "train"]):
             output = _clean(runner.invoke(app, [*cmd, "--help"]).output)
@@ -173,7 +173,7 @@ class TestCLIStructure:
             ["dev", "handler"],
         ],
     )
-    def test_nested_commands_accessible(self, cmd_path):
+    def test_nested_commands_accessible(self, cmd_path: list[str]) -> None:
         """Test that all nested commands are accessible."""
         result = runner.invoke(app, [*cmd_path, "--help"])
         assert result.exit_code == 0, f"'{' '.join(cmd_path)} --help' failed: {result.output}"

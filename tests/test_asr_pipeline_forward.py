@@ -4,7 +4,9 @@ The pipeline is built with `object.__new__` and a MagicMock model, so nothing
 here loads weights or touches the Hub.
 """
 
+from collections.abc import Iterator
 from types import SimpleNamespace
+from typing import Any, NoReturn, cast
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -17,21 +19,32 @@ from tiny_audio.asr_pipeline import ASRPipeline
 
 
 @pytest.fixture
-def pipeline():
+def pipeline() -> ASRPipeline:
     """ASRPipeline whose model is a MagicMock on CPU."""
     pipe = object.__new__(ASRPipeline)
-    pipe.model = MagicMock()
-    pipe.model.device = torch.device("cpu")
-    pipe.model.generation_config.eos_token_id = None
-    pipe.model.TRANSCRIBE_PROMPT = "default prompt"
-    pipe.tokenizer = MagicMock()
-    pipe.tokenizer.decode.return_value = "hello world"
-    pipe.feature_extractor = MagicMock()
-    pipe.feature_extractor.sampling_rate = 16000
+    model = MagicMock()
+    model.device = torch.device("cpu")
+    model.generation_config.eos_token_id = None
+    model.TRANSCRIBE_PROMPT = "default prompt"
+    pipe.model = model
+    tokenizer = MagicMock()
+    tokenizer.decode.return_value = "hello world"
+    pipe.tokenizer = tokenizer
+    feature_extractor = MagicMock()
+    feature_extractor.sampling_rate = 16000
+    pipe.feature_extractor = feature_extractor
     return pipe
 
 
-def model_inputs() -> dict:
+def mock_model(pipe: ASRPipeline) -> MagicMock:
+    return cast(MagicMock, pipe.model)
+
+
+def mock_tokenizer(pipe: ASRPipeline) -> MagicMock:
+    return cast(MagicMock, pipe.tokenizer)
+
+
+def model_inputs() -> dict[str, Any]:
     return {
         "input_features": torch.zeros(1, 80, 10),
         "attention_mask": torch.ones(1, 10, dtype=torch.long),
@@ -42,32 +55,32 @@ def model_inputs() -> dict:
 class TestForward:
     """Token-only and score-carrying generate outputs."""
 
-    def test_plain_generate_returns_tokens_and_is_last(self, pipeline):
+    def test_plain_generate_returns_tokens_and_is_last(self, pipeline: ASRPipeline) -> None:
         tokens = torch.tensor([[5, 6, 7]])
-        pipeline.model.generate.return_value = tokens
+        mock_model(pipeline).generate.return_value = tokens
         out = pipeline._forward(model_inputs())
         assert out == {"tokens": tokens, "is_last": False}
-        kwargs = pipeline.model.generate.call_args.kwargs
+        kwargs = mock_model(pipeline).generate.call_args.kwargs
         assert kwargs["input_features"].shape == (1, 80, 10)
         assert kwargs["audio_attention_mask"].shape == (1, 10)
 
-    def test_is_last_defaults_to_true(self, pipeline):
-        pipeline.model.generate.return_value = torch.tensor([[1]])
+    def test_is_last_defaults_to_true(self, pipeline: ASRPipeline) -> None:
+        mock_model(pipeline).generate.return_value = torch.tensor([[1]])
         inputs = model_inputs()
         del inputs["is_last"]
         assert pipeline._forward(inputs)["is_last"] is True
 
-    def test_output_scores_yields_top_two_logprobs(self, pipeline):
+    def test_output_scores_yields_top_two_logprobs(self, pipeline: ASRPipeline) -> None:
         step_scores = (
             torch.tensor([[0.0, 2.0, 1.0, -1.0]]),
             torch.tensor([[3.0, 0.0, 0.0, 0.0]]),
         )
-        pipeline.model.generate.return_value = SimpleNamespace(
+        mock_model(pipeline).generate.return_value = SimpleNamespace(
             sequences=torch.tensor([[1, 0]]), scores=step_scores
         )
         out = pipeline._forward(model_inputs(), output_scores=True)
 
-        assert pipeline.model.generate.call_args.kwargs["return_dict_in_generate"] is True
+        assert mock_model(pipeline).generate.call_args.kwargs["return_dict_in_generate"] is True
         assert len(out["top1_logprob"]) == 2
         assert len(out["top2_logprob"]) == 2
         for step, (top1, top2) in enumerate(
@@ -78,16 +91,16 @@ class TestForward:
             assert top2 == pytest.approx(expected[1].item())
             assert top1 >= top2
 
-    def test_output_scores_with_no_steps(self, pipeline):
-        pipeline.model.generate.return_value = SimpleNamespace(
+    def test_output_scores_with_no_steps(self, pipeline: ASRPipeline) -> None:
+        mock_model(pipeline).generate.return_value = SimpleNamespace(
             sequences=torch.tensor([[1]]), scores=()
         )
         out = pipeline._forward(model_inputs(), output_scores=True)
         assert out["top1_logprob"] == []
         assert out["top2_logprob"] == []
 
-    def test_batched_scores_are_refused(self, pipeline):
-        pipeline.model.generate.return_value = SimpleNamespace(
+    def test_batched_scores_are_refused(self, pipeline: ASRPipeline) -> None:
+        mock_model(pipeline).generate.return_value = SimpleNamespace(
             sequences=torch.tensor([[1], [2]]), scores=(torch.zeros(2, 4),)
         )
         with pytest.raises(ValueError, match="batch of 2"):
@@ -97,37 +110,42 @@ class TestForward:
 class TestPostprocess:
     """Token filtering, think-tag stripping, repetition truncation, logprobs."""
 
-    def test_filters_every_configured_eos_id(self, pipeline):
-        pipeline.model.generation_config.eos_token_id = [2, 9]
+    def test_filters_every_configured_eos_id(self, pipeline: ASRPipeline) -> None:
+        mock_model(pipeline).generation_config.eos_token_id = [2, 9]
         pipeline.postprocess({"tokens": torch.tensor([[4, 2, 5, 9]])})
-        decoded = pipeline.tokenizer.decode.call_args.args[0]
+        decoded = mock_tokenizer(pipeline).decode.call_args.args[0]
         assert decoded == [4, 5]
 
-    def test_scalar_eos_id(self, pipeline):
-        pipeline.model.generation_config.eos_token_id = 2
+    def test_scalar_eos_id(self, pipeline: ASRPipeline) -> None:
+        mock_model(pipeline).generation_config.eos_token_id = 2
         pipeline.postprocess({"tokens": torch.tensor([[2, 4]])})
-        assert pipeline.tokenizer.decode.call_args.args[0] == [4]
+        assert mock_tokenizer(pipeline).decode.call_args.args[0] == [4]
 
-    def test_trailing_repetitions_are_truncated(self, pipeline):
-        pipeline.tokenizer.decode.return_value = "so the the the the"
+    def test_trailing_repetitions_are_truncated(self, pipeline: ASRPipeline) -> None:
+        mock_tokenizer(pipeline).decode.return_value = "so the the the the"
         assert pipeline.postprocess({"tokens": torch.tensor([[1]])})["text"] == "so the"
 
-    def test_logprobs_pass_through(self, pipeline):
+    def test_logprobs_pass_through(self, pipeline: ASRPipeline) -> None:
         out = pipeline.postprocess(
             {"tokens": torch.tensor([[1]]), "top1_logprob": [-0.1], "top2_logprob": [-2.0]}
         )
         assert out["top1_logprob"] == [-0.1]
         assert out["top2_logprob"] == [-2.0]
 
-    def test_no_logprob_keys_when_not_captured(self, pipeline):
+    def test_no_logprob_keys_when_not_captured(self, pipeline: ASRPipeline) -> None:
         out = pipeline.postprocess({"tokens": torch.tensor([[1]])})
         assert set(out) == {"text"}
 
-    def test_empty_list_falls_back_to_parent(self, pipeline, monkeypatch):
+    def test_empty_list_falls_back_to_parent(
+        self, pipeline: ASRPipeline, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def parent_postprocess(self: object, outputs: object, **kw: Any) -> dict[str, object]:
+            return {"text": "parent", "outputs": outputs}
+
         monkeypatch.setattr(
             transformers.AutomaticSpeechRecognitionPipeline,
             "postprocess",
-            lambda self, outputs, **kw: {"text": "parent", "outputs": outputs},
+            parent_postprocess,
         )
         out = pipeline.postprocess([])
         assert out == {"text": "parent", "outputs": {}}
@@ -136,10 +154,14 @@ class TestPostprocess:
 class TestPreprocess:
     """Dataset-style dicts are translated for the parent pipeline."""
 
-    def test_array_dict_becomes_raw_and_is_last_is_added(self, pipeline, monkeypatch):
-        seen = {}
+    def test_array_dict_becomes_raw_and_is_last_is_added(
+        self, pipeline: ASRPipeline, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: dict[str, Any] = {}
 
-        def fake_preprocess(self, inputs, **params):
+        def fake_preprocess(
+            self: object, inputs: dict[str, Any], **params: Any
+        ) -> Iterator[dict[str, Any]]:
             seen["inputs"] = inputs
             yield {"input_features": torch.zeros(1)}
             yield {"input_features": torch.zeros(1), "is_last": False}
@@ -158,10 +180,12 @@ class TestPreprocess:
 class TestCallPromptHandling:
     """`user_prompt` swaps the model prompt for exactly one call."""
 
-    def test_prompt_is_restored_after_an_exception(self, pipeline, monkeypatch):
-        seen = {}
+    def test_prompt_is_restored_after_an_exception(
+        self, pipeline: ASRPipeline, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: dict[str, Any] = {}
 
-        def failing_call(self, inputs, **kwargs):
+        def failing_call(self: object, inputs: object, **kwargs: Any) -> NoReturn:
             seen["prompt_during_call"] = pipeline.model.TRANSCRIBE_PROMPT
             raise RuntimeError("boom")
 
@@ -174,19 +198,26 @@ class TestCallPromptHandling:
         assert seen["prompt_during_call"] == "custom"
         assert pipeline.model.TRANSCRIBE_PROMPT == "default prompt"
 
-    def test_no_user_prompt_leaves_model_untouched(self, pipeline, monkeypatch):
+    def test_no_user_prompt_leaves_model_untouched(
+        self, pipeline: ASRPipeline, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fake_call(self: object, inputs: object, **kw: Any) -> dict[str, str]:
+            return {"text": "x"}
+
         monkeypatch.setattr(
             transformers.AutomaticSpeechRecognitionPipeline,
             "__call__",
-            lambda self, inputs, **kw: {"text": "x"},
+            fake_call,
         )
         pipeline({"array": np.zeros(16)})
         assert pipeline.model.TRANSCRIBE_PROMPT == "default prompt"
 
-    def test_return_speakers_implies_timestamps(self, pipeline, monkeypatch):
-        seen = {}
+    def test_return_speakers_implies_timestamps(
+        self, pipeline: ASRPipeline, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: dict[str, Any] = {}
 
-        def fake_timed(inputs, **kwargs):
+        def fake_timed(inputs: object, **kwargs: Any) -> dict[str, str]:
             seen.update(kwargs)
             return {"text": "x"}
 
@@ -197,14 +228,19 @@ class TestCallPromptHandling:
 
 
 class TestTranscribeTimed:
-    def test_empty_transcript_never_loads_the_aligner(self, pipeline, monkeypatch):
+    def test_empty_transcript_never_loads_the_aligner(
+        self, pipeline: ASRPipeline, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fake_call(self: object, inputs: object, **kw: Any) -> dict[str, str]:
+            return {"text": ""}
+
         monkeypatch.setattr(
             transformers.AutomaticSpeechRecognitionPipeline,
             "__call__",
-            lambda self, inputs, **kw: {"text": ""},
+            fake_call,
         )
 
-        def must_not_load():
+        def must_not_load() -> NoReturn:
             msg = "aligner should not load for empty text"
             raise AssertionError(msg)
 

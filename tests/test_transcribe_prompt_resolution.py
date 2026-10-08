@@ -19,11 +19,14 @@ class TestResolveTranscribePrompt:
         assert _resolve_transcribe_prompt("custom", datasets) == "custom"
 
     def test_no_punct_source_stays_unset(self) -> None:
-        datasets = [{"path": "ami", "text_punct": False}, {"path": "undeclared"}]
+        datasets: list[dict[str, object]] = [
+            {"path": "ami", "text_punct": False},
+            {"path": "undeclared"},
+        ]
         assert _resolve_transcribe_prompt(None, datasets) is None
 
     def test_eval_only_punct_source_does_not_count(self) -> None:
-        datasets = [
+        datasets: list[dict[str, object]] = [
             {"path": "ami", "text_punct": False},
             {"path": "gs-dev", "text_punct": True, "train_splits": []},
         ]

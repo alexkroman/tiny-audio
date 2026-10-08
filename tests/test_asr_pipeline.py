@@ -189,7 +189,7 @@ class TestPipelineCall:
         calls: list[int] = []
 
         def fake_call(self: object, inputs: dict[str, Any], **kwargs: Any) -> dict[str, str]:
-            calls.append(len(inputs.get("raw", inputs.get("array"))))
+            calls.append(len(inputs["raw"] if "raw" in inputs else inputs["array"]))
             k = len(calls) - 1
             return {"text": f"w{k}a w{k}b"}
 
@@ -231,9 +231,11 @@ class TestPipelineCall:
         self, pipeline: ASRPipeline, chunked: list[int], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Long audio chunks even without timestamps; one call would stop at max_new_tokens."""
-        monkeypatch.setattr(
-            QwenForcedAligner, "align_chunks", lambda *a, **k: pytest.fail("aligner called")
-        )
+
+        def no_align(*args: object, **kwargs: object) -> NoReturn:
+            pytest.fail("aligner called")
+
+        monkeypatch.setattr(QwenForcedAligner, "align_chunks", no_align)
         result = pipeline({"array": self._speech(30.0, 12.0), "sampling_rate": 16000})
         assert len(chunked) == 2
         assert 12.0 <= chunked[0] / 16000 <= 12.2
@@ -289,20 +291,28 @@ class TestPipelineCall:
         self, pipeline: ASRPipeline, chunked: list[int], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Words take the Nemotron speaker active at their time; segments come back too."""
-        monkeypatch.setattr(
-            QwenForcedAligner,
-            "align_chunks",
-            lambda chunks, sample_rate=16000: [
+
+        def fake_align(
+            chunks: Sequence[tuple[object, str]], sample_rate: int = 16000
+        ) -> list[list[AlignedWord]]:
+            return [
                 [
                     {"word": "w0a", "start": 0.5, "end": 0.9},
                     {"word": "w0b", "start": 3.1, "end": 3.5},
                 ]
-            ],
-        )
+            ]
+
+        monkeypatch.setattr(QwenForcedAligner, "align_chunks", fake_align)
         activity = np.zeros((500, 8), dtype=np.float32)
         activity[0:250, 3] = 0.9  # arrives first -> SPEAKER_0
         activity[250:500, 5] = 0.9
-        monkeypatch.setattr(NemotronDiarizer, "activity", lambda audio, sample_rate=16000: activity)
+
+        def fake_activity(
+            audio: npt.ArrayLike, sample_rate: int = 16000
+        ) -> npt.NDArray[np.float32]:
+            return activity
+
+        monkeypatch.setattr(NemotronDiarizer, "activity", fake_activity)
 
         result = pipeline(
             {"array": self._speech(5.0, 2.0), "sampling_rate": 16000}, return_speakers=True

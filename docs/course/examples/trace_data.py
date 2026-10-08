@@ -212,8 +212,9 @@ def main() -> None:
         proj_norm = projector_flat / projector_flat.norm(dim=-1, keepdim=True)
         # torch leaves Tensor.norm's `dim` / `dtype` unannotated.
         text_norms = cast(
-            torch.Tensor, text_embeddings.norm(dim=-1, keepdim=True)
-        )  # pyright: ignore[reportUnknownMemberType]
+            torch.Tensor,
+            text_embeddings.norm(dim=-1, keepdim=True),  # pyright: ignore[reportUnknownMemberType]
+        )
         text_norm = text_embeddings / text_norms
 
         # Get top token for each time step

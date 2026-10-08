@@ -180,11 +180,11 @@ def load_eval_dataset(
         ),
     )
     # datasets leaves the feature dict/list/seed parameters unparameterized.
-    ds = ds.cast_column(
+    ds = ds.cast_column(  # pyright: ignore[reportUnknownMemberType]
         cfg.audio_field, Audio(sampling_rate=16000)
-    )  # pyright: ignore[reportUnknownMemberType]
+    )
     if shuffle:
-        ds = ds.shuffle(
+        ds = ds.shuffle(  # pyright: ignore[reportUnknownMemberType]
             seed=SHUFFLE_SEED, buffer_size=SHUFFLE_BUFFER_SIZE
-        )  # pyright: ignore[reportUnknownMemberType]
+        )
     return ds
