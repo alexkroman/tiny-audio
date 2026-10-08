@@ -2,14 +2,16 @@
 
 import functools
 import io
+import json
 import re
+from pathlib import Path
 from typing import ClassVar
 
 import librosa
 import numpy as np
 import soundfile as sf
 import torch
-from transformers import WhisperTokenizer
+from huggingface_hub import hf_hub_download
 from transformers.models.whisper.english_normalizer import EnglishTextNormalizer
 
 
@@ -133,8 +135,10 @@ class TextNormalizer:
 def _english_normalizer() -> EnglishTextNormalizer:
     """Build Whisper's English normalizer once per process.
 
-    Constructing it pulls the whisper-tiny tokenizer, and a `ta eval -d all`
-    run builds one TextNormalizer per evaluator per dataset.
+    A `ta eval -d all` run builds one TextNormalizer per evaluator per
+    dataset. Only the spelling map is needed, so fetch whisper-tiny's
+    `normalizer.json` rather than its whole tokenizer -- that is all
+    `WhisperTokenizer.english_spelling_normalizer` reads.
     """
-    tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-tiny")
-    return EnglishTextNormalizer(tokenizer.english_spelling_normalizer)
+    spelling = Path(hf_hub_download("openai/whisper-tiny", "normalizer.json"))
+    return EnglishTextNormalizer(json.loads(spelling.read_text(encoding="utf-8")))

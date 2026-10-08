@@ -157,7 +157,11 @@ cython_debug/
 # macOS
 .DS_Store
 .ruff_cache
-.claude
+# Claude Code: share the project settings and hooks (the web sandbox runs
+# them); keep personal settings.local.json and worktrees out.
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
 
 # Model and data files
 *.pth

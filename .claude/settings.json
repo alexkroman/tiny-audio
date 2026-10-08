@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/session-start.sh",
+            "timeout": 1200,
+            "type": "command"
+          }
+        ],
+        "matcher": "startup"
+      }
+    ]
+  }
+}
