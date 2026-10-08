@@ -74,10 +74,10 @@ def _dir_segment(value: str) -> str:
 
     Run directories are `{date}_{time}_{model}[_{endpoint}]_{dataset}`, and
     every consumer splits them on `_` (`scripts.utils._extract_model_from_dir`
-    takes field 2, `scripts.analysis.extract_dataset_name` takes the last).
-    An underscore inside a field silently shifts all the others: with
-    `--model-name granite_qwen` the model parses as "granite", so
-    `ta analysis compare granite_qwen` can never find the run it just wrote.
+    takes field 2, the dataset is the last). An underscore inside a field
+    silently shifts all the others: with `--model-name granite_qwen` the
+    model parses as "granite", so the run it just wrote can never be found
+    by that label.
     """
     return _DIR_SEGMENT_RE.sub("-", value).strip("-") or "unknown"
 
@@ -460,7 +460,7 @@ def main(
         typer.Option(
             "--model-name",
             help="Override the auto-derived model label used in output dir names "
-            "and downstream `ta analysis` matching (otherwise derived from --model).",
+            "(otherwise derived from --model).",
         ),
     ] = None,
     run_id: Annotated[
@@ -468,15 +468,15 @@ def main(
         typer.Option(
             "--run-id",
             help="Reuse an existing sweep's Run ID (from its metrics.txt) to finish "
-            "datasets a crashed or truncated sweep never reached, so `ta analysis` "
-            "groups the new results with the old ones. Must match that sweep's "
+            "datasets a crashed or truncated sweep never reached, so the new "
+            "results group with the old ones. Must match that sweep's "
             "--model and --max-samples.",
         ),
     ] = None,
 ):
     """Evaluate ASR models on standard datasets."""
-    # One id for the whole sweep, written into every dataset's metrics.txt.
-    # See save_results for why `ta analysis` needs it.
+    # One id for the whole sweep, written into every dataset's metrics.txt so
+    # the datasets of one sweep can be grouped together afterwards.
     run_id = run_id or uuid.uuid4().hex[:12]
 
     # Built once, before the loop: model load / Swift build / API client setup

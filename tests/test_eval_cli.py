@@ -125,7 +125,7 @@ class TestSaveResults:
 
         The directory name is split on `_` by `_extract_model_from_dir`, so an
         underscore in the model label used to shift every later field and make
-        `ta analysis compare granite_qwen` match nothing.
+        a lookup by `granite_qwen` match nothing.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             result_dir = save_results(

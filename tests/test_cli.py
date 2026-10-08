@@ -32,7 +32,7 @@ class TestMainCLI:
         result = runner.invoke(app, ["--help"])
         assert result.exit_code == 0
         output = _clean(result.output)
-        expected_commands = ["eval", "analysis", "deploy", "push", "runpod", "debug", "demo", "dev"]
+        expected_commands = ["train", "eval", "deploy", "push", "runpod", "debug", "demo", "dev"]
         for cmd in expected_commands:
             assert cmd in output, f"Expected '{cmd}' in help output"
 
@@ -55,11 +55,10 @@ class TestSubcommandHelp:
         ("cmd", "expected_keywords"),
         [
             (["eval"], ["--model", "-m"]),
-            (["analysis"], ["high-wer", "compare"]),
             (["deploy"], ["--repo-id", "-r"]),
             (["push"], ["--repo-id", "-r"]),
             (["runpod"], ["deploy", "train", "attach"]),
-            (["debug"], ["analyze-weights", "analyze-lora", "check-gradient-flow"]),
+            (["debug"], ["check-gradient-flow"]),
             (["demo"], ["--model", "-m", "--port", "-p"]),
             (["dev"], ["lint", "format", "test", "handler"]),
         ],
@@ -85,13 +84,7 @@ class TestNestedCommands:
             (["runpod", "attach"], "host"),
             (["runpod", "checkpoint"], "host"),
             # Debug subcommands
-            (["debug", "analyze-lora"], "model"),
             (["debug", "check-gradient-flow"], "model"),
-            (["debug", "compare-to-base"], "--base-model"),
-            # Analysis subcommands
-            (["analysis", "high-wer"], "threshold"),
-            (["analysis", "compare"], "models"),
-            (["analysis", "entity-errors"], "--entity-type"),
             # Dev subcommands
             (["dev", "lint"], "linter"),
             (["dev", "format"], "format"),
@@ -173,10 +166,7 @@ class TestCLIStructure:
             ["runpod", "attach"],
             ["runpod", "checkpoint"],
             # Debug subcommands
-            ["debug", "analyze-lora"],
-            # Analysis subcommands
-            ["analysis", "high-wer"],
-            ["analysis", "compare"],
+            ["debug", "check-gradient-flow"],
             # Dev subcommands
             ["dev", "lint"],
             ["dev", "test"],

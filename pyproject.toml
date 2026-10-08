@@ -349,8 +349,6 @@ extend-ignore = [
 known-third-party = ["wandb"]
 
 [tool.ruff.lint.per-file-ignores]
-# Mathematical notation (A, B, W, S for matrices) is conventional in LoRA analysis
-"scripts/debug/analyze_lora.py" = ["N806"]
 # `test` here is a typer command (`ta dev handler`), not a pytest test; its
 # defaulted parameters are CLI options.
 "scripts/deploy/handler_local.py" = ["PT028"]
@@ -365,15 +363,8 @@ exclude = ["MODEL_CARD.md", "demo/README.md"]
 branch = true
 source = ["tiny_audio", "scripts"]
 omit = [
-    # One-off research probes, not shipped behaviour; each is a __main__ script
-    # against a live checkpoint or dataset and has no unit-testable surface.
-    "scripts/debug/probe_*.py",
-    "scripts/debug/bench_*.py",
-    "scripts/debug/inspect_datasets.py",
+    # A __main__ probe against a live checkpoint; no unit-testable surface.
     "scripts/debug/check_gradient_flow.py",
-    "scripts/debug/compare_to_base.py",
-    "scripts/debug/analyze_weights.py",
-    "scripts/debug/analyze_lora.py",
 ]
 
 [tool.coverage.report]
