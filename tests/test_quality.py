@@ -1,6 +1,7 @@
 """The quality ratchets in scripts/quality.py."""
 
 import json
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
@@ -40,7 +41,7 @@ class TestFileLengthViolations:
 
 class TestCoverage:
     @staticmethod
-    def report(**files):
+    def report(**files: tuple[int, int]) -> dict[str, dict[str, dict[str, dict[str, int]]]]:
         return {
             "files": {
                 path: {"summary": {"num_statements": total, "covered_lines": covered}}

@@ -27,8 +27,8 @@ from tiny_audio.asr_modeling import (
     VOCAB_PAD_MULTIPLE,
     ASRModel,
     _apply_chat_template,
-    _LoadStateDictResult,
     _assert_projector_loaded,
+    _LoadStateDictResult,
     _max_attention_head_dim,
     _patch_gemma_decode_loop,
     _resolve_attn_implementation,
@@ -187,7 +187,9 @@ class TestLoadAudioEncoder:
         assert base_asr_model.audio_tower.training is False
 
     @pytest.mark.parametrize("layout", ["nested", "flat"])
-    def test_glm_branch_uses_audio_tower(self, monkeypatch: pytest.MonkeyPatch, layout: str) -> None:
+    def test_glm_branch_uses_audio_tower(
+        self, monkeypatch: pytest.MonkeyPatch, layout: str
+    ) -> None:
         """Verify GLM dispatch path without downloading the real GLM model.
 
         Both submodule layouts must work. transformers 5.x makes
@@ -236,7 +238,9 @@ class TestLoadAudioEncoder:
             # Frozen encoder gets switched to inference mode via `.train(False)`.
             tower.train.assert_called_once_with(False)
 
-    def test_glm_branch_raises_when_audio_tower_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_glm_branch_raises_when_audio_tower_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A future layout change should fail loudly, not hand back a stub."""
         mock_full = MagicMock()
         del mock_full.model
@@ -415,7 +419,9 @@ class TestSavePretrained:
         for k, v in original_proj.items():
             assert torch.allclose(v, loaded_proj[k])
 
-    def test_save_lora_writes_adapter_config(self, lora_asr_model: ASRModel, tmp_path: Path) -> None:
+    def test_save_lora_writes_adapter_config(
+        self, lora_asr_model: ASRModel, tmp_path: Path
+    ) -> None:
         save_dir = tmp_path / "lora_model"
         lora_asr_model.save_pretrained(save_dir)
 
@@ -423,7 +429,9 @@ class TestSavePretrained:
         assert (save_dir / "adapter_config.json").exists()
         assert (save_dir / "adapter_model.safetensors").exists()
 
-    def test_save_lora_clears_base_model_path_when_no_repo_id(self, lora_asr_model: ASRModel, tmp_path: Path) -> None:
+    def test_save_lora_clears_base_model_path_when_no_repo_id(
+        self, lora_asr_model: ASRModel, tmp_path: Path
+    ) -> None:
         save_dir = tmp_path / "lora_model"
         lora_asr_model.save_pretrained(save_dir)
 
@@ -433,7 +441,9 @@ class TestSavePretrained:
         # Should be empty string (not None / "None") when no repo_id is given
         assert adapter_cfg["base_model_name_or_path"] == ""
 
-    def test_save_lora_uses_repo_id_when_provided(self, lora_asr_model: ASRModel, tmp_path: Path) -> None:
+    def test_save_lora_uses_repo_id_when_provided(
+        self, lora_asr_model: ASRModel, tmp_path: Path
+    ) -> None:
         save_dir = tmp_path / "lora_model_with_repo"
         lora_asr_model.save_pretrained(save_dir, repo_id="alex/test-model")
 
@@ -628,9 +638,7 @@ class TestEosTokenResolution:
         assert endoftext in _eos_ids(base_asr_model)
 
     def test_includes_tokenizer_eos(self, base_asr_model: ASRModel) -> None:
-        assert (
-            base_asr_model.tokenizer.eos_token_id in _eos_ids(base_asr_model)
-        )
+        assert base_asr_model.tokenizer.eos_token_id in _eos_ids(base_asr_model)
 
     def test_is_non_empty(self, base_asr_model: ASRModel) -> None:
         assert _eos_ids(base_asr_model)
@@ -662,7 +670,9 @@ class TestEosTokenResolution:
         assert tail_ids, "template appends nothing after assistant content"
         assert tail_ids[0] in _eos_ids(base_asr_model)
 
-    def test_derives_a_terminator_the_name_probes_do_not_know(self, base_asr_model: ASRModel, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_derives_a_terminator_the_name_probes_do_not_know(
+        self, base_asr_model: ASRModel, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Derivation must find a turn terminator absent from the hardcoded names.
 
         Stands in for Gemma 4's "<turn|>": a real vocab entry that none of
@@ -677,7 +687,9 @@ class TestEosTokenResolution:
         )
         assert base_asr_model._derive_turn_end_token_id() == tok.convert_tokens_to_ids(marker)
 
-    def test_derivation_ignores_a_plain_text_terminator(self, base_asr_model: ASRModel, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_derivation_ignores_a_plain_text_terminator(
+        self, base_asr_model: ASRModel, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A template ending on ordinary text yields no stop token.
 
         Adopting a text token as EOS would truncate real transcripts, so the
@@ -807,7 +819,7 @@ class TestChunkedEmbedding:
 
     def test_matches_the_unchunked_lookup(self, monkeypatch: pytest.MonkeyPatch) -> None:
         mod = self._forced(monkeypatch, 64)
-        torch.manual_seed(0)  # pyright: ignore[reportUnknownMemberType]  # untyped seed param in torch
+        torch.manual_seed(0)  # pyright: ignore[reportUnknownMemberType]  # untyped seed arg
         emb = torch.nn.Embedding(50, 8)
         ids = torch.tensor([[0, 7, 49, 23]])
         expected = emb(ids)
@@ -818,7 +830,7 @@ class TestChunkedEmbedding:
 
     def test_preserves_the_gemma_embed_scale(self, monkeypatch: pytest.MonkeyPatch) -> None:
         mod = self._forced(monkeypatch, 64)
-        torch.manual_seed(0)  # pyright: ignore[reportUnknownMemberType]  # untyped seed param in torch
+        torch.manual_seed(0)  # pyright: ignore[reportUnknownMemberType]  # untyped seed arg
         emb = torch.nn.Embedding(50, 8)
         # Gemma4TextScaledWordEmbedding multiplies the lookup by embed_scale;
         # dropping it would shrink every per-layer embedding by sqrt(dim).
@@ -827,7 +839,9 @@ class TestChunkedEmbedding:
         expected = torch.nn.functional.embedding(ids, emb.weight) * 16.0
         assert torch.equal(mod.ChunkedEmbedding(emb)(ids), expected)
 
-    def test_chunk_oversized_embeddings_reports_and_is_idempotent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_chunk_oversized_embeddings_reports_and_is_idempotent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         mod = self._forced(monkeypatch, 64)
         root = torch.nn.Module()
         root.inner = torch.nn.Module()
@@ -940,7 +954,9 @@ class TestVocabPadding:
         a mismatch surfaces as a shape error at checkpoint save rather than here.
         """
         rows = _input_embedding_rows(base_asr_model)
-        output_embeddings = cast(torch.nn.Linear, base_asr_model.language_model.get_output_embeddings())
+        output_embeddings = cast(
+            torch.nn.Linear, base_asr_model.language_model.get_output_embeddings()
+        )
         assert output_embeddings.weight.shape[0] == rows
         assert base_asr_model.language_model.config.vocab_size == rows
 
@@ -949,9 +965,7 @@ class TestAssertProjectorLoaded:
     """Tests for the projector key guard on from_pretrained."""
 
     @staticmethod
-    def _keys(
-        missing: Sequence[str] = (), unexpected: Sequence[str] = ()
-    ) -> _IncompatibleKeys:
+    def _keys(missing: Sequence[str] = (), unexpected: Sequence[str] = ()) -> _IncompatibleKeys:
         return _IncompatibleKeys(list(missing), list(unexpected))
 
     def test_accepts_frozen_module_keys(self) -> None:
@@ -1012,7 +1026,9 @@ class TestFusedCrossEntropyRouting:
         return seen
 
     @pytest.mark.parametrize("training", [True, False])
-    def test_skip_logits_requested_whenever_labels_are_present(self, base_asr_model: ASRModel, monkeypatch: pytest.MonkeyPatch, training: bool) -> None:
+    def test_skip_logits_requested_whenever_labels_are_present(
+        self, base_asr_model: ASRModel, monkeypatch: pytest.MonkeyPatch, training: bool
+    ) -> None:
         seen = self._record_skip_logits(base_asr_model, monkeypatch)
         input_ids = torch.tensor([[1, 2, 3, 4, 5]])
 
@@ -1029,7 +1045,9 @@ class TestFusedCrossEntropyRouting:
 
         assert seen == [True]
 
-    def test_unlabelled_forward_keeps_its_logits(self, base_asr_model: ASRModel, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_unlabelled_forward_keeps_its_logits(
+        self, base_asr_model: ASRModel, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """generate() and friends run without labels and do need the logits."""
         seen = self._record_skip_logits(base_asr_model, monkeypatch)
         input_ids = torch.tensor([[1, 2, 3, 4, 5]])
@@ -1040,7 +1058,9 @@ class TestFusedCrossEntropyRouting:
         assert seen == [None]
         assert out.logits is not None
 
-    def test_explicit_skip_logits_is_not_overridden(self, base_asr_model: ASRModel, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_explicit_skip_logits_is_not_overridden(
+        self, base_asr_model: ASRModel, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A caller that asks for logits with labels still gets them."""
         seen = self._record_skip_logits(base_asr_model, monkeypatch)
         input_ids = torch.tensor([[1, 2, 3, 4, 5]])

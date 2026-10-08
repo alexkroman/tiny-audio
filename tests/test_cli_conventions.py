@@ -9,13 +9,21 @@ The rules (also documented in README's "CLI conventions"):
 * analysis and debug commands take the model as their first positional.
 """
 
+from __future__ import annotations
+
 from collections import defaultdict
+from collections.abc import Iterator
+from typing import TYPE_CHECKING, cast
 
 import pytest
 import typer
+import typer.core
 import typer.main
 
 from scripts.cli import app
+
+if TYPE_CHECKING:
+    from typer import _click
 
 # Options Click/Typer add on their own; not subject to the rules above.
 _BUILTIN_OPTIONS = {"--help", "--install-completion", "--show-completion"}
@@ -40,10 +48,12 @@ RESERVED_SHORT_FLAGS = {
 }
 
 
-def _walk(command, path=()):
+def _walk(
+    command: _click.Command, path: tuple[str, ...] = ()
+) -> Iterator[tuple[tuple[str, ...], _click.Command]]:
     """Yield (path, click.Command) for every leaf command under `command`."""
     ctx = typer.Context(command)
-    if hasattr(command, "list_commands"):
+    if isinstance(command, typer.core.TyperGroup):
         for name in command.list_commands(ctx):
             sub = command.get_command(ctx, name)
             if sub is not None:
@@ -56,14 +66,16 @@ _LEAVES = list(_walk(typer.main.get_command(app)))
 _LEAF_IDS = [" ".join(path) for path, _ in _LEAVES]
 
 
-def _options(command):
+def _options(command: _click.Command) -> Iterator[typer.core.TyperOption]:
     for param in command.params:
         if param.param_type_name == "option" and not set(param.opts) & _BUILTIN_OPTIONS:
-            yield param
+            yield cast(typer.core.TyperOption, param)
 
 
-def _arguments(command):
-    return [p for p in command.params if p.param_type_name == "argument"]
+def _arguments(command: _click.Command) -> list[typer.core.TyperArgument]:
+    return [
+        cast(typer.core.TyperArgument, p) for p in command.params if p.param_type_name == "argument"
+    ]
 
 
 def test_every_subcommand_is_reachable() -> None:
@@ -80,7 +92,7 @@ def test_every_subcommand_is_reachable() -> None:
 
 
 @pytest.mark.parametrize(("path", "command"), _LEAVES, ids=_LEAF_IDS)
-def test_options_declare_long_name_and_help(path: tuple[str, ...], command: click.Command) -> None:
+def test_options_declare_long_name_and_help(path: tuple[str, ...], command: _click.Command) -> None:
     for option in _options(command):
         longs = [o for o in option.opts if o.startswith("--")]
         assert longs, f"{' '.join(path)}: option {option.opts} has no --long-name"
@@ -88,7 +100,7 @@ def test_options_declare_long_name_and_help(path: tuple[str, ...], command: clic
 
 
 @pytest.mark.parametrize(("path", "command"), _LEAVES, ids=_LEAF_IDS)
-def test_arguments_have_help(path: tuple[str, ...], command: click.Command) -> None:
+def test_arguments_have_help(path: tuple[str, ...], command: _click.Command) -> None:
     for argument in _arguments(command):
         assert argument.help, f"{' '.join(path)}: argument {argument.name} has no help text"
 

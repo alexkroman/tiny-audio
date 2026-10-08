@@ -5,21 +5,20 @@ import sys
 import pytest
 from typer.testing import CliRunner
 
-from scripts import train_cli
 from scripts.cli import app
 
 runner = CliRunner()
 
 
 @pytest.fixture
-def calls(monkeypatch):
-    seen = []
+def calls(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    seen: list[list[str]] = []
 
     def fake_call(cmd: list[str]) -> int:
         seen.append(cmd)
         return 0
 
-    monkeypatch.setattr(train_cli.subprocess, "call", fake_call)
+    monkeypatch.setattr("scripts.train_cli.subprocess.call", fake_call)
     return seen
 
 
@@ -43,5 +42,8 @@ def test_hydra_flags_and_plus_overrides_pass_through(calls: list[list[str]]) -> 
 
 
 def test_exit_code_is_the_trainers(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(train_cli.subprocess, "call", lambda cmd: 3)
+    def failing_call(cmd: list[str]) -> int:
+        return 3
+
+    monkeypatch.setattr("scripts.train_cli.subprocess.call", failing_call)
     assert runner.invoke(app, ["train", "asr"]).exit_code == 3

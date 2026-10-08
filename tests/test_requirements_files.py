@@ -23,7 +23,7 @@ def requirement_lines(path: Path) -> list[str]:
 def test_every_line_is_a_valid_requirement(path: Path) -> None:
     lines = requirement_lines(path)
     assert lines, f"{path} lists no requirements"
-    invalid = []
+    invalid: list[str] = []
     for line in lines:
         try:
             Requirement(line)

@@ -1,13 +1,14 @@
 """Tests for the Hydra structured-config schema in scripts/train_config.py."""
 
 import inspect
+from collections.abc import Sequence
 from dataclasses import fields
 from pathlib import Path
 
 import pytest
 from hydra import compose, initialize_config_dir
 from hydra.errors import ConfigCompositionException
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 from transformers import TrainingArguments
 
 from scripts.train import TRAINING_MODEL_PARAMS
@@ -33,7 +34,7 @@ TRAIN_SCRIPT_KEYS = {
 }
 
 
-def _compose(overrides=()):
+def _compose(overrides: Sequence[str] = ()) -> DictConfig:
     with initialize_config_dir(config_dir=str(CONFIGS), version_base=None):
         return compose(config_name="config", overrides=list(overrides))
 

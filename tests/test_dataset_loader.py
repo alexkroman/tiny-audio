@@ -1,7 +1,7 @@
 """Tests for DatasetLoader column normalization."""
 
-from collections.abc import Sequence
-from typing import Any, ClassVar, cast
+from collections.abc import Callable, Sequence
+from typing import Any, ClassVar, Protocol, cast
 from unittest.mock import patch
 
 import numpy as np
@@ -10,6 +10,34 @@ from datasets import Audio, ClassLabel, Dataset
 from omegaconf import DictConfig, OmegaConf
 
 from scripts.train import DatasetLoader
+
+
+class _DatasetOps(Protocol):
+    """The `Dataset` calls made here, with the signatures they run with.
+
+    The library's own annotations are lost behind its untyped decorators.
+    """
+
+    def cast_column(self, column: str, feature: Audio | ClassLabel) -> Dataset: ...
+
+    def filter(self, function: Callable[[Any], bool], *, input_columns: str) -> Dataset: ...
+
+
+class _DatasetFactory(Protocol):
+    def from_dict(self, mapping: dict[str, list[Any]]) -> Dataset: ...
+
+
+def _from_dict(mapping: dict[str, list[Any]]) -> _DatasetOps:
+    return _ops(cast(_DatasetFactory, Dataset).from_dict(mapping))
+
+
+def _ops(ds: Dataset) -> _DatasetOps:
+    return cast(_DatasetOps, ds)
+
+
+def _label_id(feature: ClassLabel, name: str) -> int:
+    # `str2int` returns `int | Iterable` with the iterable's element type unannotated.
+    return cast(int, feature.str2int(name))  # pyright: ignore[reportUnknownMemberType]
 
 
 def _make_cfg(
@@ -27,10 +55,7 @@ def _make_cfg(
     }
     if epoch_expansion is not None:
         data["epoch_expansion"] = epoch_expansion
-    return cast(
-        DictConfig,
-        OmegaConf.create({"data": data, "training": {"seed": 42, "num_train_epochs": epochs}}),
-    )
+    return OmegaConf.create({"data": data, "training": {"seed": 42, "num_train_epochs": epochs}})
 
 
 def _fake_dataset(audio_seconds: float, **extra_cols: object) -> Dataset:
@@ -39,12 +64,12 @@ def _fake_dataset(audio_seconds: float, **extra_cols: object) -> Dataset:
         "audio": [{"array": np.zeros(n, dtype=np.float32), "sampling_rate": 16000}],
         **{k: [v] for k, v in extra_cols.items()},
     }
-    return Dataset.from_dict(rows).cast_column("audio", Audio(sampling_rate=16000))
+    return _from_dict(rows).cast_column("audio", Audio(sampling_rate=16000))
 
 
 def _prepare(loader: DatasetLoader, dataset_cfg: dict[str, Any], fake: Dataset) -> Dataset:
     with patch("scripts.train.load_dataset", return_value=fake):
-        return loader._prepare_split(cast(DictConfig, OmegaConf.create(dataset_cfg)), "train")
+        return loader._prepare_split(OmegaConf.create(dataset_cfg), "train")
 
 
 class TestColumnPruning:
@@ -116,7 +141,7 @@ class TestExcludeWhere:
         mythicinfinity/libriheavy ships. Text is a/b/c/... so assertions can
         name surviving rows after _prepare prunes the bound column away."""
         n = 16000
-        return Dataset.from_dict(
+        return _from_dict(
             {
                 "audio": [{"array": np.zeros(n, dtype=np.float32), "sampling_rate": 16000}]
                 * len(seconds),
@@ -136,7 +161,7 @@ class TestExcludeWhere:
         straight against them matched nothing and dropped 0 of 910,140 rows.
         """
         n = 16000
-        ds = Dataset.from_dict(
+        ds = _from_dict(
             {
                 "audio": [{"array": np.zeros(n, dtype=np.float32), "sampling_rate": 16000}]
                 * len(sources),
@@ -146,7 +171,9 @@ class TestExcludeWhere:
         ).cast_column("audio", Audio(sampling_rate=16000))
         if class_label:
             # Real Gigaspeech label order; ids are 0/1/2, not the names.
-            ds = ds.cast_column("source", ClassLabel(names=["audiobook", "podcast", "youtube"]))
+            ds = _ops(ds).cast_column(
+                "source", ClassLabel(names=["audiobook", "podcast", "youtube"])
+            )
         return ds
 
     _GS_ROWS: ClassVar[list[str]] = ["youtube", "audiobook", "podcast", "audiobook"]
@@ -155,21 +182,21 @@ class TestExcludeWhere:
         """The property that made the original bug silent."""
         ds = self._ds(self._GS_ROWS, class_label=True)
         assert ds["source"] == [2, 0, 1, 0]
-        assert ds.features["source"].str2int("audiobook") == 0
+        assert _label_id(cast(ClassLabel, ds.features["source"]), "audiobook") == 0
 
     def test_classlabel_values_resolve_before_filtering(self) -> None:
         ds = self._ds(self._GS_ROWS, class_label=True)
-        feature = ds.features["source"]
-        wanted = {feature.str2int(v) for v in ["audiobook"]}
+        feature = cast(ClassLabel, ds.features["source"])
+        wanted = {_label_id(feature, v) for v in ["audiobook"]}
         assert wanted == {0}
-        out = ds.filter(lambda v: v not in wanted, input_columns="source")
+        out = _ops(ds).filter(lambda v: v not in wanted, input_columns="source")
         assert len(out) == 2
         assert out["text"] == ["a", "c"]
 
     def test_naive_string_compare_on_classlabel_drops_nothing(self) -> None:
         """Regression guard: this is precisely what used to happen."""
         ds = self._ds(self._GS_ROWS, class_label=True)
-        out = ds.filter(lambda v: v not in {"audiobook", "podcast"}, input_columns="source")
+        out = _ops(ds).filter(lambda v: v not in {"audiobook", "podcast"}, input_columns="source")
         assert len(out) == len(ds), "if this passes, the int/str mismatch is real"
 
     @staticmethod
@@ -274,7 +301,7 @@ class TestEpochExpansion:
 
     @staticmethod
     def _rows(n: int, prefix: str = "r") -> Dataset:
-        return Dataset.from_dict(
+        return _from_dict(
             {
                 "audio": [{"array": np.zeros(16000, dtype=np.float32), "sampling_rate": 16000}] * n,
                 "text": [f"{prefix}{i}" for i in range(n)],
@@ -305,11 +332,11 @@ class TestEpochExpansion:
         }
         train = self._load(fake, entry, expansion=2)
         assert len(train) == 100, "total rows should equal cap x expansion"
-        assert len(set(train["text"])) == 80, "every eligible row should appear"
+        assert len(set(cast(list[str], train["text"]))) == 80, "every eligible row should appear"
 
         baseline = self._load(fake, entry, expansion=1)
         assert len(baseline) == 50
-        assert len(set(baseline["text"])) == 50
+        assert len(set(cast(list[str], baseline["text"]))) == 50
 
     def test_uncapped_source_is_repeated_verbatim(self) -> None:
         """A source already at natural size has no unused rows, so repeating
@@ -324,7 +351,7 @@ class TestEpochExpansion:
         }
         train = self._load(fake, entry, expansion=3)
         assert len(train) == 21
-        assert len(set(train["text"])) == 7
+        assert len(set(cast(list[str], train["text"]))) == 7
 
     def test_expansion_preserves_relative_mix_share(self) -> None:
         """Every source is multiplied by the same factor, so per-step mix
@@ -404,7 +431,7 @@ class TestNoFullRewrite:
     @staticmethod
     def _rows(durations: Sequence[float]) -> Dataset:
         n = 16000
-        return Dataset.from_dict(
+        return _from_dict(
             {
                 "audio": [{"array": np.zeros(n, dtype=np.float32), "sampling_rate": 16000}]
                 * len(durations),

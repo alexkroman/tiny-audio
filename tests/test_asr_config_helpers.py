@@ -6,8 +6,11 @@ dicts, so no test touches the network. The auto-detection helpers
 pure functions and are exercised directly.
 """
 
+from typing import Any, cast
+
 import pytest
 import torch
+import transformers
 
 from tiny_audio.asr_config import (
     DEFAULT_ENCODER_CONV_LAYERS,
@@ -20,8 +23,8 @@ from tiny_audio.asr_config import (
 
 # Minimal sub-configs: enough for `AutoConfig.for_model(model_type)` to
 # reconstruct a real config class without downloading anything.
-AUDIO_CFG = {"model_type": "whisper", "d_model": 64, "num_mel_bins": 80}
-TEXT_CFG = {
+AUDIO_CFG: dict[str, Any] = {"model_type": "whisper", "d_model": 64, "num_mel_bins": 80}
+TEXT_CFG: dict[str, Any] = {
     "model_type": "llama",
     "hidden_size": 32,
     "intermediate_size": 64,
@@ -31,7 +34,7 @@ TEXT_CFG = {
 }
 
 
-def make_config(**overrides) -> ASRConfig:
+def make_config(**overrides: Any) -> ASRConfig:
     """ASRConfig that never calls the Hub."""
     overrides.setdefault("audio_model_id", "openai/whisper-tiny")
     overrides.setdefault("text_model_id", "Qwen/Qwen3-0.6B")
@@ -54,7 +57,7 @@ class TestNativeAudioToken:
             (None, None),
         ],
     )
-    def test_lookup(self, text_model_id, expected) -> None:
+    def test_lookup(self, text_model_id: str | None, expected: str | None) -> None:
         assert native_audio_token(text_model_id) == expected
 
 
@@ -73,7 +76,7 @@ class TestIsTimeMajorEncoder:
             (None, False),
         ],
     )
-    def test_lookup(self, audio_model_id, expected) -> None:
+    def test_lookup(self, audio_model_id: str | None, expected: bool) -> None:
         assert is_time_major_encoder(audio_model_id) is expected
 
 
@@ -86,11 +89,11 @@ class TestComputeEncoderOutputLength:
         # comment on GRANITE_ENCODER_CONV_LAYERS.
         [(50, 12), (100, 25), (250, 62), (500, 125), (1000, 250)],
     )
-    def test_granite_layers_match_documented_values(self, mel_length, expected) -> None:
+    def test_granite_layers_match_documented_values(self, mel_length: int, expected: int) -> None:
         assert compute_encoder_output_length(mel_length, GRANITE_ENCODER_CONV_LAYERS) == expected
 
     @pytest.mark.parametrize(("mel_length", "expected"), [(3000, 1500), (2999, 1500), (1, 1)])
-    def test_whisper_layers_halve(self, mel_length, expected) -> None:
+    def test_whisper_layers_halve(self, mel_length: int, expected: int) -> None:
         assert compute_encoder_output_length(mel_length) == expected
         assert compute_encoder_output_length(mel_length, DEFAULT_ENCODER_CONV_LAYERS) == expected
 
@@ -100,7 +103,8 @@ class TestComputeEncoderOutputLength:
     def test_granite_layers_accept_tensor_batches(self) -> None:
         lengths = torch.tensor([50, 100, 250, 500, 1000])
         out = compute_encoder_output_length(lengths, GRANITE_ENCODER_CONV_LAYERS)
-        assert out.tolist() == [12, 25, 62, 125, 250]
+        # torch types Tensor.tolist() as list[Unknown]
+        assert out.tolist() == [12, 25, 62, 125, 250]  # pyright: ignore[reportUnknownMemberType]
 
 
 class TestASRConfigAutoDetection:
@@ -184,7 +188,7 @@ class TestASRConfigDefaults:
 
     def test_sub_configs_are_reconstructed_from_dicts(self) -> None:
         cfg = make_config()
-        assert cfg.audio_config.model_type == "whisper"
+        assert cast(transformers.PretrainedConfig, cfg.audio_config).model_type == "whisper"
         assert cfg.text_config.model_type == "llama"
         assert cfg.encoder is cfg.audio_config
 

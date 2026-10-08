@@ -9,7 +9,7 @@ import sys
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import pytest
 import typer
@@ -23,7 +23,7 @@ runner = CliRunner()
 
 
 @pytest.fixture
-def recorded_runs(monkeypatch):
+def recorded_runs(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, ...]]:
     """Replace `dev.run` with a recorder that returns exit code 0."""
     calls: list[tuple[str, ...]] = []
 
@@ -36,7 +36,7 @@ def recorded_runs(monkeypatch):
 
 
 @pytest.fixture
-def pyproject() -> dict:
+def pyproject() -> dict[str, Any]:
     return tomllib.loads((get_project_root() / "pyproject.toml").read_text())
 
 
@@ -44,21 +44,21 @@ class TestRunHelpers:
     """`run` and `run_all` semantics."""
 
     def test_run_returns_subprocess_exit_code(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        seen = {}
+        seen: dict[str, tuple[str, ...]] = {}
 
-        def fake_call(args):
+        def fake_call(args: tuple[str, ...]) -> int:
             seen["args"] = args
             return 7
 
-        monkeypatch.setattr(dev.subprocess, "call", fake_call)
+        monkeypatch.setattr("scripts.dev.subprocess.call", fake_call)
         assert dev.run("echo", "hi") == 7
         assert seen["args"] == ("echo", "hi")
 
     def test_run_all_stops_at_first_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
         codes = iter([0, 3, 0])
-        executed = []
+        executed: list[tuple[str, ...]] = []
 
-        def fake_run(*args):
+        def fake_run(*args: str) -> int:
             executed.append(args)
             return next(codes)
 
@@ -124,7 +124,7 @@ class TestCommandWiring:
         ]
 
     def test_failed_build_skips_the_artifact_checks(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        calls = []
+        calls: list[tuple[str, ...]] = []
 
         def failing_run(*args: str) -> int:
             calls.append(args)
@@ -152,7 +152,10 @@ class TestCommandWiring:
         assert recorded_runs == [tuple(dev.DEPS_COMMAND)]
 
     def test_failure_exit_code_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(dev, "run", lambda *args: 5)
+        def failing_run(*args: str) -> int:
+            return 5
+
+        monkeypatch.setattr(dev, "run", failing_run)
         assert runner.invoke(dev.app, ["lint"]).exit_code == 5
 
 
@@ -168,7 +171,7 @@ class TestFormatCode:
         return SimpleNamespace(stdout=self.LISTINGS[cmd[-1]])
 
     def test_every_tracked_markdown_and_json_file_is_formatted(self, recorded_runs: list[tuple[str, ...]], monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(dev.subprocess, "run", self._fake_ls_files)
+        monkeypatch.setattr("scripts.dev.subprocess.run", self._fake_ls_files)
         dev.format_code()
         assert ("mdformat", "README.md", "MODEL_CARD.md", "demo/README.md") in recorded_runs
         assert ("pretty-format-json", "--autofix", "quality/file_length.json") in recorded_runs
@@ -176,7 +179,10 @@ class TestFormatCode:
         assert [c[0] for c in recorded_runs[:3]] == ["black", "ruff", "ruff"]
 
     def test_no_markdown_means_no_mdformat_call(self, recorded_runs: list[tuple[str, ...]], monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(dev.subprocess, "run", lambda *a, **kw: SimpleNamespace(stdout=""))
+        def empty_ls_files(*_a: object, **_kw: object) -> SimpleNamespace:
+            return SimpleNamespace(stdout="")
+
+        monkeypatch.setattr("scripts.dev.subprocess.run", empty_ls_files)
         dev.format_code()
         assert all(c[0] not in {"mdformat", "pretty-format-json"} for c in recorded_runs)
 
@@ -266,27 +272,26 @@ class TestLazyRegistration:
     """`ta <group>` imports only that group's module."""
 
     @staticmethod
-    def _fresh_cli():
+    def _fresh_cli() -> None:
         """Reload scripts.cli so its LazyGroup starts with an empty cache."""
         importlib.reload(cli_module)  # re-executes the module in place
-        return cli_module
 
     def test_root_lists_every_subcommand_without_importing(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        cli = self._fresh_cli()
-        for module in cli.SUBCOMMANDS.values():
+        self._fresh_cli()
+        for module in cli_module.SUBCOMMANDS.values():
             monkeypatch.delitem(sys.modules, module, raising=False)
-        group = typer.main.get_command(cli.app)
-        assert isinstance(group, cli.LazyGroup)
+        group = typer.main.get_command(cli_module.app)
+        assert isinstance(group, cli_module.LazyGroup)
         ctx = typer.Context(group)
-        assert group.list_commands(ctx) == list(cli.SUBCOMMANDS)
-        assert not any(m in sys.modules for m in cli.SUBCOMMANDS.values())
+        assert group.list_commands(ctx) == list(cli_module.SUBCOMMANDS)
+        assert not any(m in sys.modules for m in cli_module.SUBCOMMANDS.values())
 
     def test_resolving_one_command_imports_only_its_module(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        cli = self._fresh_cli()
-        for module in cli.SUBCOMMANDS.values():
+        self._fresh_cli()
+        for module in cli_module.SUBCOMMANDS.values():
             monkeypatch.delitem(sys.modules, module, raising=False)
-        group = typer.main.get_command(cli.app)
-        assert isinstance(group, cli.LazyGroup)
+        group = typer.main.get_command(cli_module.app)
+        assert isinstance(group, cli_module.LazyGroup)
         ctx = typer.Context(group)
         command = group.get_command(ctx, "dev")
         assert command is not None
@@ -296,16 +301,16 @@ class TestLazyRegistration:
         assert "scripts.eval.cli" not in sys.modules
 
     def test_resolved_commands_are_cached(self) -> None:
-        cli = self._fresh_cli()
-        group = typer.main.get_command(cli.app)
-        assert isinstance(group, cli.LazyGroup)
+        self._fresh_cli()
+        group = typer.main.get_command(cli_module.app)
+        assert isinstance(group, cli_module.LazyGroup)
         ctx = typer.Context(group)
         assert group.get_command(ctx, "dev") is group.get_command(ctx, "dev")
 
     def test_unknown_command_resolves_to_none(self) -> None:
-        cli = self._fresh_cli()
-        group = typer.main.get_command(cli.app)
-        assert isinstance(group, cli.LazyGroup)
+        self._fresh_cli()
+        group = typer.main.get_command(cli_module.app)
+        assert isinstance(group, cli_module.LazyGroup)
         ctx = typer.Context(group)
         assert group.get_command(ctx, "nonsense") is None
 
