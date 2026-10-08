@@ -806,27 +806,45 @@ class NemotronDiarizer:
         return sorted(out, key=lambda seg: (seg["start"], seg["end"]))
 
     @classmethod
+    def speaker_columns(
+        cls,
+        spans: list[tuple[float | None, float | None]],
+        activity: np.ndarray,
+        keep: list[int],
+    ) -> list[int]:
+        """The kept activity column that said each `(start_s, end_s)` word.
+
+        The kept speaker most active over the word's span. A word with no
+        time, or where no kept speaker reaches MIN_WORD_ACTIVITY (it sits in
+        a pause), takes the previous word's speaker -- the next word's at the
+        start of the recording.
+        """
+        cols = np.asarray(keep)
+        picked: list[int | None] = []
+        for start, end in spans:
+            if start is None or end is None:
+                picked.append(None)
+                continue
+            lo = min(int(start / cls.FRAME_S), len(activity) - 1)
+            hi = max(lo + 1, min(int(np.ceil(end / cls.FRAME_S)), len(activity)))
+            mean = activity[lo:hi, cols].mean(axis=0)
+            best = int(mean.argmax())
+            picked.append(int(cols[best]) if mean[best] >= cls.MIN_WORD_ACTIVITY else None)
+        known = [p for p in picked if p is not None]
+        last = known[0] if known else keep[0]
+        out = []
+        for p in picked:
+            last = p if p is not None else last
+            out.append(last)
+        return out
+
+    @classmethod
     def assign_speakers_to_words(
         cls, words: list[dict], activity: np.ndarray, keep: list[int]
     ) -> list[dict]:
-        """Give each word the kept speaker most active over its span.
-
-        A word where no kept speaker reaches MIN_WORD_ACTIVITY (aligner put it
-        in a pause) takes the previous word's speaker -- the next word's at
-        the start of the recording.
-        """
+        """Label each `{"start", "end"}` word `SPEAKER_i` by `speaker_columns`."""
         names = {c: f"SPEAKER_{i}" for i, c in enumerate(keep)}
-        cols = np.asarray(keep)
-        picked: list[str | None] = []
-        for word in words:
-            lo = min(int(word["start"] / cls.FRAME_S), len(activity) - 1)
-            hi = max(lo + 1, min(int(np.ceil(word["end"] / cls.FRAME_S)), len(activity)))
-            mean = activity[lo:hi, cols].mean(axis=0)
-            best = int(mean.argmax())
-            picked.append(names[keep[best]] if mean[best] >= cls.MIN_WORD_ACTIVITY else None)
-        known = [p for p in picked if p is not None]
-        last = known[0] if known else names[keep[0]]
-        for word, p in zip(words, picked):
-            last = p if p is not None else last
-            word["speaker"] = last
+        spans = [(w["start"], w["end"]) for w in words]
+        for word, col in zip(words, cls.speaker_columns(spans, activity, keep)):
+            word["speaker"] = names[col]
         return words

@@ -2,7 +2,7 @@
 
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -29,7 +29,7 @@ __all__ = [
     "SpeakerDiarizer",
 ]
 
-# Timestamps and speakers transcribe in chunks cut at the quietest point between
+# Audio is transcribed in chunks cut at the quietest point between
 # these lengths. The model trained on clips of at most 19 s; 18 leaves room for
 # the inference lead-in. Short clips are one chunk, so their text is unchanged.
 CHUNK_MAX_S = 18.0
@@ -52,6 +52,19 @@ def chunk_bounds(
         start = cut
     bounds.append((start, n))
     return bounds
+
+
+# Below this RMS (-100 dBFS) a chunk is digital silence: exact zeros, as in
+# edited or remixed recordings. Given one, the model answers with a memorized
+# training sentence ("The film was directed by the same director who directed
+# 'The Man with the Moustache'") -- ten such chunks cost 2.3 WER on one AMI
+# meeting -- so it is skipped. Quiet real speech sits near -60 dBFS.
+SILENCE_RMS = 1e-5
+
+
+def is_silent(audio: np.ndarray) -> bool:
+    """True for digital silence (or an empty array): nothing for the model to hear."""
+    return audio.size == 0 or float(np.sqrt(np.mean(np.square(audio)))) < SILENCE_RMS
 
 
 _THINK_TAG_RE = re.compile(r"<think>.*?</think>\s*", flags=re.DOTALL)
@@ -144,7 +157,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
 
         try:
             if not return_timestamps:
-                return super().__call__(inputs, **kwargs)
+                return self._transcribe_plain(inputs, **kwargs)
             return self._transcribe_timed(
                 inputs,
                 return_speakers=return_speakers,
@@ -154,6 +167,45 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         finally:
             if original_prompt is not None:
                 self.model.TRANSCRIBE_PROMPT = original_prompt
+
+    def _transcribe_plain(self, inputs, **kwargs):
+        """Transcribe in the same chunks as `_transcribe_timed`, without timing words.
+
+        One call over a whole recording returns only its first
+        `max_new_tokens` of text (WER 97% on a 30-min AMI meeting), so plain
+        transcription chunks too. A short clip is one chunk: one call, the
+        same result as before. Inputs `_extract_audio` can't read (a batch)
+        go to the parent untouched.
+        """
+        audio = self._extract_audio(inputs)
+        if audio is None:
+            return super().__call__(inputs, **kwargs)
+        array = np.asarray(audio["array"], dtype=np.float32)
+        sr = audio.get("sampling_rate", 16000)
+
+        bounds = chunk_bounds(array, sr)
+        if len(bounds) == 1:
+            return self._transcribe_chunk(array, sr, **kwargs)
+        result: dict[str, Any] = {}
+        texts = []
+        for s, e in bounds:
+            out = self._transcribe_chunk(array[s:e], sr, **kwargs)
+            texts.append(out["text"])
+            # Per-step logprobs (output_scores=True) run on across chunks.
+            for key in ("top1_logprob", "top2_logprob"):
+                if key in out:
+                    result.setdefault(key, []).extend(out[key])
+        result["text"] = " ".join(t for t in texts if t)
+        return result
+
+    def _transcribe_chunk(self, chunk: np.ndarray, sample_rate: int, **kwargs) -> dict:
+        """One model call on one chunk; digital silence is "" without calling the model."""
+        if is_silent(chunk):
+            return {"text": ""}
+        # One input in, one dict out; the parent is typed for batches as well.
+        return cast(
+            "dict", super().__call__({"raw": chunk, "sampling_rate": sample_rate}, **kwargs)
+        )
 
     def _transcribe_timed(
         self,
@@ -179,12 +231,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         sr = audio.get("sampling_rate", 16000)
 
         bounds = chunk_bounds(array, sr)
-        texts = [
-            super(ASRPipeline, self).__call__({"raw": array[s:e], "sampling_rate": sr}, **kwargs)[
-                "text"
-            ]
-            for s, e in bounds
-        ]
+        texts = [self._transcribe_chunk(array[s:e], sr, **kwargs)["text"] for s, e in bounds]
         result: dict[str, Any] = {"text": " ".join(t for t in texts if t)}
 
         try:

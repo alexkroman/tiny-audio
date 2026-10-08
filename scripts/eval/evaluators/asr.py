@@ -519,6 +519,50 @@ class AssemblyAIEvaluator(Evaluator):
         return transcript.text or "", elapsed, None
 
 
+class AssemblyAINemotronEvaluator(Evaluator):
+    """AssemblyAI words, Nemotron-3-Diarization speakers (scripts/speaker_asr/nemotron.py).
+
+    The recording is transcribed in one request without `speaker_labels`, so
+    the words -- and WER -- are the ones the native-diarization run
+    (AssemblyAIEvaluator) scores; only who-said-what differs. Words are
+    re-timed by Qwen3-ForcedAligner and assigned to Nemotron speakers exactly
+    as for nemotron-qwen3-asr and the tiny-audio pipeline. With
+    `api_word_times`, the API's own word times are used instead of re-timing.
+    """
+
+    # `-w N` overlaps the API requests; Nemotron and the aligner share one
+    # device, and concurrent Metal encoding segfaults on MPS, so the local half
+    # runs one recording at a time.
+    _local_lock = threading.Lock()
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "universal-3-5-pro",
+        base_url: str | None = None,
+        api_word_times: bool = False,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.transcriber = setup_assemblyai(api_key, model, base_url=base_url)
+        self.api_word_times = api_word_times
+
+    def transcribe(self, audio) -> tuple[str, float, dict | None]:
+        from scripts.speaker_asr.nemotron import diarize_transcript
+
+        array = np.asarray(as_16k_array(audio), dtype=np.float32)
+        start = time.time()
+        transcript = self.transcriber.transcribe(io.BytesIO(prepare_wav_bytes(audio)))
+        words = [(w.text, w.start / 1000, w.end / 1000) for w in transcript.words or []]
+        if not self.speakers:
+            return transcript.text or "", time.time() - start, None
+        if not words:
+            return "", time.time() - start, None
+        with self._local_lock:
+            text = diarize_transcript(words, array, realign=not self.api_word_times).text
+        return text, time.time() - start, None
+
+
 def speaker_text(transcript) -> str:
     """An AssemblyAI transcript's utterances as `<SPK_n>` text (plain text if none)."""
     from scripts.speaker_asr.metrics import serialize_turns

@@ -56,6 +56,13 @@ class TestSegmentsAndWords:
         assert out[0]["speaker"] == "SPEAKER_0"
 
 
+class TestSpeakerColumns:
+    def test_untimed_and_silent_words_inherit(self):
+        act = activity([(0, 0, 1, 0.9)])
+        spans = [(0.2, 0.5), (2.5, 3.0), (None, None)]
+        assert NemotronDiarizer.speaker_columns(spans, act, [0]) == [0, 0, 0]
+
+
 class TestChunkBounds:
     def test_short_audio_is_one_chunk(self):
         assert chunk_bounds(np.ones(10 * 16000, np.float32), 16000) == [(0, 160000)]

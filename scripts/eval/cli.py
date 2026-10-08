@@ -19,6 +19,7 @@ from scripts.eval.evaluators import (
     AppleSpeechEvaluator,
     AssemblyAIEvaluator,
     AssemblyAIModel,
+    AssemblyAINemotronEvaluator,
     AssemblyAIStreamingEvaluator,
     DeepgramEvaluator,
     ElevenLabsEvaluator,
@@ -207,6 +208,7 @@ def expand_datasets(datasets: list[str]) -> list[str]:
 _NON_LOCAL_MODELS = frozenset(
     {
         "assemblyai",
+        "assemblyai-nemotron",
         "deepgram",
         "elevenlabs",
         "smallest",
@@ -248,6 +250,7 @@ def _build_evaluator(
     num_workers: int,
     user_prompt: str | None,
     local_code: bool = False,
+    api_word_times: bool = False,
 ) -> tuple[str, Evaluator]:
     """Construct the evaluator once for a whole sweep. Returns (model_id, evaluator).
 
@@ -298,6 +301,18 @@ def _build_evaluator(
                 base_url=base_url,
                 num_workers=num_workers,
             )
+    elif model == "assemblyai-nemotron":
+        if streaming:
+            raise typer.BadParameter("assemblyai-nemotron is evaluated offline: drop --streaming.")
+        api_key = _require_api_key(assemblyai_api_key, "--assemblyai-api-key", "ASSEMBLYAI_API_KEY")
+        model_id = f"{assemblyai_model.value}-nemotron" + ("-api-times" if api_word_times else "")
+        evaluator = AssemblyAINemotronEvaluator(
+            api_key=api_key,
+            model=assemblyai_model.value,
+            base_url=base_url,
+            api_word_times=api_word_times,
+            num_workers=num_workers,
+        )
     elif model == "deepgram":
         api_key = _require_api_key(deepgram_api_key, "--deepgram-api-key", "DEEPGRAM_API_KEY")
         model_id = "nova-3"
@@ -406,7 +421,7 @@ def main(
         typer.Option(
             "--model",
             "-m",
-            help="Model path/ID, 'assemblyai', 'deepgram', 'elevenlabs', 'smallest', 'apple-speech', or 'nemotron-qwen3-asr'",
+            help="Model path/ID, 'assemblyai', 'deepgram', 'elevenlabs', 'smallest', 'apple-speech', 'nemotron-qwen3-asr', or 'assemblyai-nemotron' (--assemblyai-model words, Nemotron speakers)",
         ),
     ],
     datasets: Annotated[
@@ -492,6 +507,14 @@ def main(
             "Local models only.",
         ),
     ] = False,
+    api_word_times: Annotated[
+        bool,
+        typer.Option(
+            "--api-word-times",
+            help="assemblyai-nemotron only: assign Nemotron speakers on the API's own "
+            "word times instead of re-timing words with Qwen3-ForcedAligner.",
+        ),
+    ] = False,
     model_name: Annotated[
         str | None,
         typer.Option(
@@ -532,6 +555,7 @@ def main(
         num_workers=num_workers,
         user_prompt=user_prompt,
         local_code=local_code,
+        api_word_times=api_word_times,
     )
 
     for dataset_name in expand_datasets([d.value for d in datasets]):

@@ -6,6 +6,7 @@ from scripts.eval.constants import AssemblyAIModel
 from .asr import (
     AppleSpeechEvaluator,
     AssemblyAIEvaluator,
+    AssemblyAINemotronEvaluator,
     AssemblyAIStreamingEvaluator,
     DeepgramEvaluator,
     ElevenLabsEvaluator,
@@ -27,6 +28,7 @@ __all__ = [
     "AppleSpeechEvaluator",
     "AssemblyAIEvaluator",
     "AssemblyAIModel",
+    "AssemblyAINemotronEvaluator",
     "AssemblyAIStreamingEvaluator",
     "DeepgramEvaluator",
     "ElevenLabsEvaluator",

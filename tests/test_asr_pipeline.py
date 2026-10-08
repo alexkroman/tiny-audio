@@ -300,15 +300,44 @@ class TestPipelineCall:
             [1.0, 1.0, 1.0 + cut_s, 1.0 + cut_s]
         )
 
-    def test_plain_call_does_not_chunk_or_align(self, pipeline, chunked, monkeypatch):
+    def test_plain_call_chunks_without_aligning(self, pipeline, chunked, monkeypatch):
+        """Long audio chunks even without timestamps; one call would stop at max_new_tokens."""
         from tiny_audio.asr_pipeline import QwenForcedAligner
 
         monkeypatch.setattr(
             QwenForcedAligner, "align_chunks", lambda *a, **k: pytest.fail("aligner called")
         )
         result = pipeline({"array": self._speech(30.0, 12.0), "sampling_rate": 16000})
-        assert len(chunked) == 1
-        assert "words" not in result
+        assert len(chunked) == 2
+        assert 12.0 <= chunked[0] / 16000 <= 12.2
+        assert result == {"text": "w0a w0b w1a w1b"}
+
+    def test_plain_short_clip_is_one_call(self, pipeline, chunked):
+        result = pipeline({"array": self._speech(5.0, 2.0), "sampling_rate": 16000})
+        assert chunked == [5 * 16000]
+        assert result == {"text": "w0a w0b"}
+
+    def test_digital_silence_is_not_transcribed(self, pipeline, chunked):
+        """All-zero chunks give "" without a model call: the model hallucinates on them."""
+        audio = self._speech(20.0, 15.0)
+        audio[: 12 * 16000] = 0.0  # the cut lands at 8 s: chunk 1 is exact zeros
+        result = pipeline({"array": audio, "sampling_rate": 16000})
+        assert len(chunked) == 1  # only the second chunk reached the model
+        assert result == {"text": "w0a w0b"}
+
+    def test_silent_short_clip_skips_the_model(self, pipeline, chunked):
+        assert pipeline({"array": np.zeros(16000, dtype=np.float32)}) == {"text": ""}
+        assert chunked == []
+
+    def test_plain_chunks_concatenate_logprobs(self, pipeline, monkeypatch):
+        import transformers
+
+        def fake_call(self, inputs, **kwargs):
+            return {"text": "x", "top1_logprob": [-0.1], "top2_logprob": [-2.0]}
+
+        monkeypatch.setattr(transformers.AutomaticSpeechRecognitionPipeline, "__call__", fake_call)
+        result = pipeline({"array": self._speech(30.0, 12.0), "sampling_rate": 16000})
+        assert result == {"text": "x x", "top1_logprob": [-0.1, -0.1], "top2_logprob": [-2.0, -2.0]}
 
     def test_alignment_failure_recorded(self, pipeline, chunked, monkeypatch):
         from tiny_audio.asr_pipeline import QwenForcedAligner

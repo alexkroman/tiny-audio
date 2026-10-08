@@ -8,7 +8,7 @@ import pytest
 from scripts.speaker_asr.longform import LongFormResult
 from scripts.speaker_asr.nemotron import (
     assign_speakers,
-    fill_gaps,
+    diarize_transcript,
     group_turns,
     time_all_words,
     transcribe_diarized,
@@ -32,26 +32,33 @@ class TestAssignSpeakers:
         act = activity([(0, 0.0, 1.0), (1, 1.0, 2.0)])
         assert assign_speakers([(0.9, 1.5)], act) == [1]
 
-    def test_silence_and_untimed_words_are_unassigned(self):
+    def test_silence_and_untimed_words_inherit_the_previous_speaker(self):
         act = activity([(0, 0.0, 1.0)])
-        assert assign_speakers([(2.0, 2.5), (None, None)], act) == [None, None]
+        assert assign_speakers([(0.2, 0.5), (2.0, 2.5), (None, None)], act) == [0, 0, 0]
+
+    def test_column_that_never_forms_a_turn_cannot_take_words(self):
+        act = activity([(0, 0.0, 1.0)])
+        act[100:200, 0] = 0.3  # the real speaker, fading
+        act[100:200, 5] = 0.45  # louder, but never above the 0.5 segment threshold
+        assert assign_speakers([(1.2, 1.6)], act) == [0]
 
     def test_word_past_end_of_activity_uses_last_frame(self):
         act = activity([(3, 3.5, 4.0)])
         assert assign_speakers([(4.2, 4.4)], act) == [3]
 
+    def test_is_the_shipped_pipeline_rule(self, monkeypatch):
+        """The eval holds no copy of the rule: it calls the diarizer the Hub model ships."""
+        from tiny_audio.diarization import NemotronDiarizer
 
-class TestFillGaps:
-    @pytest.mark.parametrize(
-        ("speakers", "expected"),
-        [
-            ([0, None, 1, None], [0, 0, 1, 1]),
-            ([None, None, 2], [2, 2, 2]),  # leading gap takes the first known speaker
-            ([None, None], [0, 0]),  # nobody heard at all: one speaker
-        ],
-    )
-    def test_fill(self, speakers, expected):
-        assert fill_gaps(speakers) == expected
+        calls = []
+
+        def spy(spans, act, keep):
+            calls.append(spans)
+            return [keep[0]] * len(spans)
+
+        monkeypatch.setattr(NemotronDiarizer, "speaker_columns", spy)
+        assign_speakers([(0.2, 0.5)], activity([(0, 0.0, 1.0)]))
+        assert calls == [[(0.2, 0.5)]]
 
 
 class TestTimeAllWords:
@@ -104,6 +111,49 @@ class TestTranscribeDiarized:
         )
         assert isinstance(result, LongFormResult)
         assert result.text == "<SPK_1>hi there<SPK_2>bye now"
+
+
+class TestDiarizeTranscript:
+    def test_words_grouped_by_api_time_then_retimed_per_chunk(self):
+        """API times pick each word's chunk; the aligner's chunk-local times decide the speaker."""
+
+        class StubDiarizer:
+            def activity(self, audio):
+                return activity([(4, 0.0, 15.0), (7, 15.0, 30.0)], seconds=30.0)
+
+        seen = []
+
+        def align(audio, text):
+            seen.append((len(audio), text))
+            return [
+                {"word": w, "start": 1.0 + i, "end": 1.5 + i} for i, w in enumerate(text.split())
+            ]
+
+        audio = np.zeros(30 * 16000, dtype=np.float32)
+        audio[15 * 16000] = 1.0  # quiet everywhere: force the cut via chunk_s
+        words = [("hi", 0.5, 0.9), ("there", 3.0, 3.4), ("bye", 16.0, 16.3), ("now", 29.0, 29.9)]
+        result = diarize_transcript(
+            words, audio, diarizer=StubDiarizer(), chunk_s=20.0, min_chunk_s=15.0, align=align
+        )
+        assert [text for _, text in seen] == ["hi there", "bye now"]
+        assert result.text == "<SPK_1>hi there<SPK_2>bye now"
+
+    def test_api_word_times_skip_the_aligner(self):
+        """realign=False: the API's own times decide the speaker, and the aligner never runs."""
+
+        class StubDiarizer:
+            def activity(self, audio):
+                return activity([(4, 0.0, 15.0), (7, 15.0, 30.0)], seconds=30.0)
+
+        def align(audio, text):
+            raise AssertionError("aligner must not run")
+
+        audio = np.zeros(30 * 16000, dtype=np.float32)
+        words = [("hi", 0.5, 0.9), ("there", 14.0, 14.4), ("bye", 16.0, 16.3)]
+        result = diarize_transcript(
+            words, audio, diarizer=StubDiarizer(), align=align, realign=False
+        )
+        assert result.text == "<SPK_1>hi there<SPK_2>bye"
 
 
 class TestLocalEvaluatorSpeakers:
