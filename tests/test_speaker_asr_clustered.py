@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from scripts.eval.speaker_metrics import cp_errors, parse_turns, serialize_turns
 from scripts.speaker_asr.clustered import (
     ClusterConfig,
     build_units,
@@ -14,7 +15,6 @@ from scripts.speaker_asr.clustered import (
     timed_words,
     transcribe_clustered,
 )
-from scripts.speaker_asr.metrics import cp_errors, parse_turns, serialize_turns
 
 SR = 16000
 

@@ -34,8 +34,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from scripts.eval.speaker_metrics import CONTEXT_END, parse_turns
 from scripts.speaker_asr.longform import LongFormResult, Turn, chunk_bounds
-from scripts.speaker_asr.metrics import CONTEXT_END, parse_turns
 
 SAMPLE_RATE = 16000
 

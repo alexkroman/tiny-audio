@@ -337,7 +337,7 @@ class LocalEvaluator(Evaluator):
         scored -- the same call a user makes. An alignment or diarization
         error is raised, not scored as an unlabelled transcript.
         """
-        from scripts.speaker_asr.metrics import serialize_turns
+        from scripts.eval.speaker_metrics import serialize_turns
 
         start = time.time()
         result = self.pipe(audio, user_prompt=self.user_prompt, return_speakers=True)
@@ -565,7 +565,7 @@ class AssemblyAINemotronEvaluator(Evaluator):
 
 def speaker_text(transcript) -> str:
     """An AssemblyAI transcript's utterances as `<SPK_n>` text (plain text if none)."""
-    from scripts.speaker_asr.metrics import serialize_turns
+    from scripts.eval.speaker_metrics import serialize_turns
 
     utterances = transcript.utterances or []
     if not utterances:

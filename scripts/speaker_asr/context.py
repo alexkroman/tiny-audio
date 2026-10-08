@@ -31,7 +31,7 @@ import random
 from collections import defaultdict
 from dataclasses import dataclass
 
-from scripts.speaker_asr.metrics import CONTEXT_END, SPEAKER_TOKEN, serialize_turns
+from scripts.eval.speaker_metrics import CONTEXT_END, SPEAKER_TOKEN, serialize_turns
 
 
 @dataclass(frozen=True)

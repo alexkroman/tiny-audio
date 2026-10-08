@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import torch
 
+from scripts.eval.speaker_metrics import parse_turns
 from scripts.speaker_asr.chunks import (
     ShortChunkConfig,
     augment,
@@ -17,7 +18,6 @@ from scripts.speaker_asr.chunks import (
     plan_meeting_chunks,
     timed_words,
 )
-from scripts.speaker_asr.metrics import parse_turns
 
 SR = 16000
 

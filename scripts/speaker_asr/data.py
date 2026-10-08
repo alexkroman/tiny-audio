@@ -26,7 +26,7 @@ import numpy as np
 import soundfile as sf
 import torch
 
-from scripts.speaker_asr.metrics import CONTEXT_END, serialize_turns
+from scripts.eval.speaker_metrics import CONTEXT_END, serialize_turns
 from scripts.turn_aware.data import TurnAwareCollator
 
 SAMPLE_RATE = 16000

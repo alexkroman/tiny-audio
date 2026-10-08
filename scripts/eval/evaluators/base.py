@@ -68,7 +68,7 @@ def _scoring_text(text: str) -> str:
     for attribution by cpWER in `compute_metrics`; a system that emits no
     speaker tokens is scored on the same words.
     """
-    from scripts.speaker_asr.metrics import has_speakers, plain_text
+    from scripts.eval.speaker_metrics import has_speakers, plain_text
 
     return plain_text(text) if has_speakers(text) else text
 
@@ -329,7 +329,7 @@ class Evaluator:
         cpWER - WER, what speaker mistakes cost on top of recognition. Rates
         in percent, like `wer`.
         """
-        from scripts.speaker_asr.metrics import has_speakers, speaker_metrics
+        from scripts.eval.speaker_metrics import has_speakers, speaker_metrics
 
         if not any(has_speakers(r.reference) for r in self.results):
             return {}

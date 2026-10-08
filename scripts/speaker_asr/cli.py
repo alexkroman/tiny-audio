@@ -292,10 +292,10 @@ def evaluate_cmd(
     from transformers import AutoProcessor
 
     from scripts.eval.audio import TextNormalizer
+    from scripts.eval.speaker_metrics import speaker_metrics
     from scripts.speaker_asr.config import context_config, load_config, n_speaker_tokens
     from scripts.speaker_asr.context import build_context_rows
     from scripts.speaker_asr.data import SpeakerASRDataset, UtteranceStore, load_texts, subset
-    from scripts.speaker_asr.metrics import speaker_metrics
     from scripts.speaker_asr.model import predict_rows, register_speaker_tokens
     from tiny_audio.turns import load_model
 
@@ -365,7 +365,7 @@ def _meetings(cfg, split: str, max_samples: int, max_minutes: float):
 
 def _reference(parts: list[dict], texts: dict[str, str]) -> str:
     """A whole meeting's `<SPK_n>` reference, turns in start-time order."""
-    from scripts.speaker_asr.metrics import serialize_turns
+    from scripts.eval.speaker_metrics import serialize_turns
 
     ordered = sorted(parts, key=lambda p: (p["offset_s"], p["dur_s"]))
     return serialize_turns((p["speaker"], texts.get(p["id"], "")) for p in ordered)
@@ -484,10 +484,10 @@ def evaluate_long_cmd(
     independently -- the no-linking baseline to compare against.
     """
     from scripts.eval.audio import TextNormalizer
+    from scripts.eval.speaker_metrics import cp_errors, speaker_metrics
     from scripts.speaker_asr.config import context_config, load_config
     from scripts.speaker_asr.data import load_texts, mix_window
     from scripts.speaker_asr.longform import transcribe_long
-    from scripts.speaker_asr.metrics import cp_errors, speaker_metrics
 
     if reference not in ("human", "self"):
         raise typer.BadParameter("--reference must be 'human' or 'self'")

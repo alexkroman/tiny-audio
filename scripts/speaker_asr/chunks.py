@@ -27,7 +27,7 @@ from pathlib import Path
 
 import numpy as np
 
-from scripts.speaker_asr.metrics import serialize_turns
+from scripts.eval.speaker_metrics import serialize_turns
 
 SAMPLE_RATE = 16000
 # Shortest clip worth force-aligning (0.1 s); wav2vec2's first conv needs more than its kernel.

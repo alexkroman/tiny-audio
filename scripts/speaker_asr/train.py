@@ -25,6 +25,7 @@ from hydra.utils import to_absolute_path
 from omegaconf import DictConfig, OmegaConf
 from transformers import Trainer, set_seed
 
+from scripts.eval.speaker_metrics import CONTEXT_END, speaker_metrics
 from scripts.speaker_asr.chunks import build_short_rows, busy_weights
 from scripts.speaker_asr.config import (
     context_config,
@@ -53,7 +54,6 @@ from scripts.speaker_asr.embedding import (
     turn_speakers,
 )
 from scripts.speaker_asr.junction import build_junction_rows, junction_count
-from scripts.speaker_asr.metrics import CONTEXT_END, speaker_metrics
 from scripts.speaker_asr.model import (
     apply_lora,
     init_speaker_rows,

@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from scripts.speaker_asr.metrics import CONTEXT_END, SPEAKER_TOKEN, speaker_tokens
+from scripts.eval.speaker_metrics import CONTEXT_END, SPEAKER_TOKEN, speaker_tokens
 
 LANGUAGE = "English"
 

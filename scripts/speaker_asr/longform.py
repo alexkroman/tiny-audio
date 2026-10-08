@@ -27,13 +27,13 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from scripts.speaker_asr.context import ContextConfig, prompt_speakers
-from scripts.speaker_asr.metrics import (
+from scripts.eval.speaker_metrics import (
     CONTEXT_END,
     SPEAKER_TOKEN,
     parse_turns,
     serialize_turns,
 )
+from scripts.speaker_asr.context import ContextConfig, prompt_speakers
 
 SAMPLE_RATE = 16000
 

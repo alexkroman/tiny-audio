@@ -8,9 +8,9 @@ from dataclasses import fields
 
 import pytest
 
+from scripts.eval.speaker_metrics import parse_turns
 from scripts.speaker_asr.data import format_target
 from scripts.speaker_asr.junction import JunctionConfig, build_junction_rows, junction_count
-from scripts.speaker_asr.metrics import parse_turns
 
 
 def meeting(group="m1", speakers="ABCD", minutes=30, every_s=7.0, dur_s=3.0, row0=0):

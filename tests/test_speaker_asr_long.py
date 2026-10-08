@@ -9,6 +9,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from scripts.eval.speaker_metrics import (
+    CONTEXT_END,
+    parse_turns,
+    sa_errors,
+    serialize_turns,
+    speaker_metrics,
+)
 from scripts.speaker_asr.context import ContextConfig, build_context_rows, prompt_speakers
 from scripts.speaker_asr.longform import (
     SAMPLE_RATE,
@@ -16,13 +23,6 @@ from scripts.speaker_asr.longform import (
     chunk_bounds,
     time_words,
     transcribe_long,
-)
-from scripts.speaker_asr.metrics import (
-    CONTEXT_END,
-    parse_turns,
-    sa_errors,
-    serialize_turns,
-    speaker_metrics,
 )
 
 # --------------------------------------------------------------------- format

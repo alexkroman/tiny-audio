@@ -264,7 +264,7 @@ def turn_embeddings(
     `transcript` is the chunk's decoded `<SPK_n>...` text; `prefix` an optional
     context prefix ending in `<CONTINUE>` (as decoded with).
     """
-    from scripts.speaker_asr.metrics import parse_turns
+    from scripts.eval.speaker_metrics import parse_turns
     from scripts.speaker_asr.model import n_speaker_tokens, speaker_token_ids
     from scripts.turn_aware.data import assistant_labels
 
