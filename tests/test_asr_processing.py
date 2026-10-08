@@ -25,12 +25,10 @@ class TestProcessorConstants:
 
     def test_audio_token_defined(self) -> None:
         """AUDIO_TOKEN constant should be defined."""
-        assert hasattr(ASRProcessor, "AUDIO_TOKEN")
         assert ASRProcessor.AUDIO_TOKEN == "<audio>"
 
     def test_transcribe_prompt_defined(self) -> None:
         """TRANSCRIBE_PROMPT must match the prompt used in training (scripts/train.py)."""
-        assert hasattr(ASRProcessor, "TRANSCRIBE_PROMPT")
         assert ASRProcessor.TRANSCRIBE_PROMPT == "Transcribe the speech to text"
 
     def test_default_conv_layers(self) -> None:

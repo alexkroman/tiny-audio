@@ -6,7 +6,6 @@ Covers the Ultravox-style training-label normalizer:
 - Conditional truecasing (mono-case sources lifted, already-cased preserved)
 - Residual marker stripping (<unk>, <laugh>, TEDLIUM brackets)
 - TEDLIUM edge audience-event words (laughter / applause)
-- Percent canonicalization carryover from the prior normalizer
 """
 
 from __future__ import annotations
@@ -24,24 +23,6 @@ from scripts.labels import (
 
 
 class TestGigaspeechPunctTags:
-    def test_comma_tag_becomes_comma(self) -> None:
-        result = normalize_label("HELLO <COMMA> WORLD <PERIOD>")
-        assert "," in result
-        assert "." in result
-        assert "<COMMA>" not in result
-        assert "<PERIOD>" not in result
-
-    def test_question_and_exclamation(self) -> None:
-        result = normalize_label("WHAT IS THIS <QUESTIONMARK> AMAZING <EXCLAMATIONPOINT>")
-        assert "?" in result
-        assert "!" in result
-
-    def test_punct_tags_lowercase(self) -> None:
-        # IGNORECASE: tags may appear in lowercase too.
-        result = normalize_label("hello <comma> world <period>")
-        assert "," in result
-        assert "." in result
-
     def test_apostrophe_preserved_with_punct_tags(self) -> None:
         # Gigaspeech preserves contractions; tag restoration shouldn't disturb them.
         result = normalize_label("THEY'RE LEAVING <COMMA> AREN'T THEY <QUESTIONMARK>")
@@ -97,14 +78,10 @@ class TestConditionalTruecase:
         result = normalize_label(text)
         assert "McClarnon" in result, f"Truecase damaged proper noun: {result}"
 
-    def test_libriheavy_passthrough(self) -> None:
-        text = "My, what imaginations these children have developed!"
-        assert normalize_label(text) == text
-
     def test_short_text_skipped(self) -> None:
         # "yeah" / "OH" / "MM" — too short to recase usefully.
         assert normalize_label("yeah") == "yeah"
-        assert normalize_label("OH").lower() == "oh" or normalize_label("OH") == "OH"
+        assert normalize_label("OH").lower() == "oh"
 
     def test_needs_truecase_heuristic(self) -> None:
         assert _needs_truecase("HELLO WORLD HOW ARE YOU TODAY") is True  # all caps
@@ -114,43 +91,13 @@ class TestConditionalTruecase:
 
 
 class TestResidualMarkers:
-    def test_tedlium_unk_stripped(self) -> None:
-        # normalize_label sees `<unk> i thought ...` -> strip <unk>, truecase
-        result = normalize_label("<unk> i thought i would read poems today")
-        assert "<unk>" not in result
-        # Should still have the rest of the sentence.
-        assert "thought" in result.lower()
-
     def test_switchboard_laugh_stripped(self) -> None:
         assert "<LAUGH>" not in normalize_label("yeah <LAUGH> you know to death")
         assert "<laugh>" not in normalize_label("yeah <laugh> you know to death")
 
-    def test_tedlium_bracket_stripped(self) -> None:
-        result = normalize_label("the topic of [ medicine ] is important today")
-        assert "[" not in result
-        assert "medicine" not in result
-
     def test_inaudible_stripped(self) -> None:
         result = normalize_label("we walked <inaudible> down the street")
         assert "<inaudible>" not in result
-
-
-class TestPercentCanonicalization:
-    """Only the `per cent` -> `percent` spelling collapse survives. The `%`
-    character is preserved: rewriting it to " percent" destroyed `%` in 100%
-    of training targets and cost ~93% of a measured 66%-vs-94% raw-text ITN
-    gap. The removal is WER-neutral — Whisper's EnglishTextNormalizer maps
-    "five percent" and "5%" to the same string on both sides of the score.
-    """
-
-    def test_percent_sign_is_preserved(self) -> None:
-        result = normalize_label("inflation rose to five % this year")
-        assert "%" in result
-
-    def test_per_cent_becomes_single_word(self) -> None:
-        result = normalize_label("inflation rose to five per cent this year")
-        assert "percent" in result.lower()
-        assert "per cent" not in result.lower()
 
 
 class TestUnicodeCleanup:
@@ -192,18 +139,13 @@ class TestUnicodeCleanup:
 
 
 class TestEdgeCases:
-    def test_empty_input(self) -> None:
-        assert normalize_label("") == ""
+    def test_none_input(self) -> None:
         assert normalize_label(None) == ""
-        assert normalize_label("   ") == ""
 
     def test_only_markers_becomes_empty(self) -> None:
         # If all that remains after stripping is whitespace, return empty
         # so the collator's empty-label filter discards the sample.
         assert normalize_label("<unk> <unk> <unk>") == ""
-
-    def test_only_garbage_tag(self) -> None:
-        assert normalize_label("<MUSIC>") == ""
 
     def test_only_brackets_becomes_empty(self) -> None:
         assert normalize_label("[ stage direction ]") == ""

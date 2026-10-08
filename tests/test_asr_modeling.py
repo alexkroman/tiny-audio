@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
-from conftest import gemma_decode_loop_stub
+from conftest import gemma_decode_loop_stub, make_asr_config, stub
 from peft.tuners.lora import LoraLayer
 from torch.nn.modules.module import _IncompatibleKeys
 from transformers.modeling_utils import PreTrainedModel
@@ -48,15 +48,10 @@ class TestProjectorDispatch:
         assert isinstance(base_asr_model.projector, MLPAudioProjector)
 
     def test_unknown_projector_type_raises(self) -> None:
-        bad_config = ASRConfig(
-            audio_model_id="openai/whisper-tiny",
-            text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
-            attn_implementation="eager",
-            model_dtype="float32",
-            projector_type="not_a_real_projector",
-        )
+        # Dims are given, so _create_projector never touches the (stub) model.
+        bad_config = ASRConfig(projector_type="not_a_real_projector", encoder_dim=384, llm_dim=576)
         with pytest.raises(ValueError, match="Unknown projector_type"):
-            ASRModel(bad_config)
+            ASRModel._create_projector(stub(), bad_config, torch.float32)
 
 
 class TestTokenizerInit:
@@ -135,14 +130,7 @@ class TestStateDict:
         assert all(k.startswith("projector.") for k in sd)
 
     def test_state_dict_includes_lm_when_unfrozen(self) -> None:
-        cfg = ASRConfig(
-            audio_model_id="openai/whisper-tiny",
-            text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
-            attn_implementation="eager",
-            model_dtype="float32",
-            freeze_language_model=False,
-        )
-        model = ASRModel(cfg)
+        model = ASRModel(make_asr_config(freeze_language_model=False))
         sd = model.state_dict()
         assert any(k.startswith("language_model.") for k in sd)
         assert any(k.startswith("projector.") for k in sd)
@@ -270,14 +258,7 @@ class TestFreezeProjector:
     """freeze_projector=True freezes projector params."""
 
     def test_freeze_projector_disables_grad(self) -> None:
-        cfg = ASRConfig(
-            audio_model_id="openai/whisper-tiny",
-            text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
-            attn_implementation="eager",
-            model_dtype="float32",
-            freeze_projector=True,
-        )
-        model = ASRModel(cfg)
+        model = ASRModel(make_asr_config(freeze_projector=True))
         for p in model.projector.parameters():
             assert p.requires_grad is False
 
@@ -642,6 +623,13 @@ class TestEosTokenResolution:
         assert base_asr_model._derive_turn_end_token_id() is None
 
 
+@pytest.fixture(scope="module")
+def unfrozen_encoder_model() -> ASRModel:
+    # Read-only users only: test_encoder_updates_survive_save_reload mutates
+    # weights, so it builds its own.
+    return ASRModel(make_asr_config(freeze_audio_encoder=False))
+
+
 class TestStateDictTrainableModules:
     """state_dict must serialize every module the freeze flags leave trainable."""
 
@@ -650,17 +638,8 @@ class TestStateDictTrainableModules:
         assert not any(k.startswith("audio_tower.") for k in keys)
         assert any(k.startswith("projector.") for k in keys)
 
-    def test_unfrozen_encoder_is_saved(self) -> None:
-        config = ASRConfig(
-            audio_model_id="openai/whisper-tiny",
-            text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
-            projector_type="mlp",
-            model_dtype="float32",
-            attn_implementation="eager",
-            freeze_audio_encoder=False,
-        )
-        model = ASRModel(config)
-
+    def test_unfrozen_encoder_is_saved(self, unfrozen_encoder_model: ASRModel) -> None:
+        model = unfrozen_encoder_model
         keys = model.state_dict()
         assert any(k.startswith("audio_tower.") for k in keys)
 
@@ -669,17 +648,10 @@ class TestStateDictTrainableModules:
         result = model.load_state_dict(keys, strict=False)
         assert result.unexpected_keys == []
 
-    def test_encoder_keys_cover_trainable_encoder_params(self) -> None:
-        config = ASRConfig(
-            audio_model_id="openai/whisper-tiny",
-            text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
-            projector_type="mlp",
-            model_dtype="float32",
-            attn_implementation="eager",
-            freeze_audio_encoder=False,
-        )
-        model = ASRModel(config)
-
+    def test_encoder_keys_cover_trainable_encoder_params(
+        self, unfrozen_encoder_model: ASRModel
+    ) -> None:
+        model = unfrozen_encoder_model
         saved = {
             k[len("audio_tower.") :] for k in model.state_dict() if k.startswith("audio_tower.")
         }
@@ -689,15 +661,7 @@ class TestStateDictTrainableModules:
 
     def test_encoder_updates_survive_save_reload(self, tmp_path: Path) -> None:
         """End-to-end: the checkpoint a training run writes must carry the encoder."""
-        config = ASRConfig(
-            audio_model_id="openai/whisper-tiny",
-            text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
-            projector_type="mlp",
-            model_dtype="float32",
-            attn_implementation="eager",
-            freeze_audio_encoder=False,
-        )
-        model = ASRModel(config)
+        model = ASRModel(make_asr_config(freeze_audio_encoder=False))
 
         # Stand in for what training would do to the encoder.
         probe_name, probe = next(iter(model.audio_tower.named_parameters()))

@@ -7,7 +7,7 @@ import offline_assets  # noqa: F401  # pyright: ignore[reportUnusedImport]
 # isort: split
 
 import os
-from typing import Any, TypedDict
+from typing import Any
 from unittest.mock import MagicMock, NonCallableMock
 
 import pytest
@@ -72,77 +72,43 @@ def mock_projector() -> MagicMock:
     return proj
 
 
-# =============================================================================
-# Deepgram Mock Factories
-# =============================================================================
-
-
-class DeepgramWordSpec(TypedDict):
-    """Word entry accepted by ``build_deepgram_transcription_response``."""
-
-    word: str
-    start: float
-    end: float
-
-
-def build_deepgram_word(word: str, start: float, end: float) -> MagicMock:
-    """Factory for Deepgram word mocks."""
-    w = MagicMock()
-    w.word = word
-    w.start = start
-    w.end = end
-    return w
-
-
-def build_deepgram_transcription_response(
-    transcript: str = "", words: list[DeepgramWordSpec] | None = None
-) -> MagicMock:
-    """Factory for Deepgram transcription API response mocks.
-
-    Args:
-        transcript: The full transcript text
-        words: List of dicts with keys: word, start, end
-
-    Returns:
-        MagicMock configured as a Deepgram response
-    """
-    response = MagicMock()
-    alternative = MagicMock()
-    alternative.transcript = transcript
-
-    if words:
-        alternative.words = [build_deepgram_word(w["word"], w["start"], w["end"]) for w in words]
-    else:
-        alternative.words = None if words is None else []
-
-    channel = MagicMock()
-    channel.alternatives = [alternative]
-    response.results.channels = [channel]
-    return response
-
-
 @pytest.fixture
-def deepgram_transcription_response() -> MagicMock:
-    """Sample Deepgram transcription response with word timestamps."""
-    return build_deepgram_transcription_response(
-        transcript="hello world",
-        words=[
-            {"word": "hello", "start": 0.0, "end": 0.5},
-            {"word": "world", "start": 0.5, "end": 1.0},
-        ],
-    )
+def no_retry_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skip tenacity's backoff waits so retry tests stay fast.
+
+    tenacity binds its sleep function when a ``@retry`` is declared, so the
+    only seam is the ``time.sleep`` it ends up calling.
+    """
+
+    def no_sleep(_s: float) -> None:
+        return None
+
+    monkeypatch.setattr("tenacity.nap.time.sleep", no_sleep)
+
+
+# =============================================================================
+# ASRModel configs and models
+# =============================================================================
+
+# Tiny encoder + LM that offline_assets serves locally.
+TINY_ASR_CONFIG_KWARGS: dict[str, Any] = {
+    "audio_model_id": "openai/whisper-tiny",
+    "text_model_id": "HuggingFaceTB/SmolLM2-135M-Instruct",
+    "projector_type": "mlp",
+    "model_dtype": "float32",
+    "attn_implementation": "eager",
+}
+
+
+def make_asr_config(**overrides: Any) -> ASRConfig:
+    """Tiny test ASRConfig with ``overrides`` applied on top of the shared defaults."""
+    return ASRConfig(**{**TINY_ASR_CONFIG_KWARGS, **overrides})
 
 
 @pytest.fixture(scope="session")
 def base_asr_config() -> ASRConfig:
     """Session-scoped base ASR config (no LoRA) - loaded once per test session."""
-    return ASRConfig(
-        audio_model_id="openai/whisper-tiny",
-        text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
-        projector_type="mlp",
-        model_dtype="float32",
-        attn_implementation="eager",
-    )
+    return make_asr_config()
 
 
 @pytest.fixture(scope="session")
@@ -154,12 +120,7 @@ def base_asr_model(base_asr_config: ASRConfig) -> ASRModel:
 @pytest.fixture(scope="session")
 def lora_asr_config() -> ASRConfig:
     """Session-scoped LoRA ASR config - loaded once per test session."""
-    return ASRConfig(
-        audio_model_id="openai/whisper-tiny",
-        text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
-        projector_type="mlp",
-        model_dtype="float32",
-        attn_implementation="eager",
+    return make_asr_config(
         use_lora=True,
         lora_rank=8,
         lora_alpha=16,
@@ -217,9 +178,3 @@ class MockProjectorConfig:
         self.llm_dim = kwargs.get("llm_dim", 512)
         self.projector_hidden_dim = kwargs.get("projector_hidden_dim", 1024)
         self.projector_pool_stride = kwargs.get("projector_pool_stride", 4)
-
-
-@pytest.fixture
-def projector_config() -> type[MockProjectorConfig]:
-    """Factory fixture for creating projector configs with custom settings."""
-    return MockProjectorConfig

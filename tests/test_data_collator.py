@@ -23,7 +23,7 @@ def projector() -> MockProjector:
     return MockProjector()
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def tokenizer() -> PreTrainedTokenizerBase:
     """Load the SmolLM tokenizer with <audio> token added."""
     tok: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(
@@ -36,7 +36,7 @@ def tokenizer() -> PreTrainedTokenizerBase:
     return tok
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def feature_extractor() -> WhisperFeatureExtractor:
     """Load Whisper feature extractor."""
     return WhisperFeatureExtractor.from_pretrained("openai/whisper-tiny")

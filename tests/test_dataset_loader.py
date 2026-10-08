@@ -71,7 +71,8 @@ class TestTextCaseColumn:
         ds = _prepare(DatasetLoader(_make_cfg([cfg])), cfg, fake)
 
         assert "_text_case" in ds.column_names, "pruned before reaching the collator"
-        assert ds[0]["_text_case"] == policy
+        # Column access: ds[0] would decode the audio column just to read a string.
+        assert ds["_text_case"] == [policy]
 
     def test_column_absent_when_undeclared(self) -> None:
         """Sources with no policy keep the legacy per-row heuristic."""

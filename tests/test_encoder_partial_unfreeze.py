@@ -381,6 +381,20 @@ class TestEncoderIsNeverLeftInTrainMode:
         assert model.audio_tower.training is False
 
 
+@pytest.fixture(scope="module")
+def bn_probe_model(base_asr_config: ASRConfig) -> ASRModel:
+    # Shared by TestFullyUnfrozenEncoderStillPinsBatchNorm: each test calls
+    # train() itself, and none changes weights or the pinned BN's running
+    # statistics.
+    config = copy.deepcopy(base_asr_config)
+    config.freeze_audio_encoder = False
+    model = ASRModel(config)
+    # whisper-tiny has no BatchNorm of its own; add one so the branch is
+    # actually exercised on a real ASRModel rather than a stand-in.
+    model.audio_tower.add_module("probe_bn", nn.BatchNorm1d(4))
+    return model
+
+
 class TestFullyUnfrozenEncoderStillPinsBatchNorm:
     """A fully trainable encoder must still normalise on pretrained BN stats.
 
@@ -401,43 +415,26 @@ class TestFullyUnfrozenEncoderStillPinsBatchNorm:
     12.27% -> 37.44%.
     """
 
-    def _model(self, base_asr_config: ASRConfig) -> ASRModel:
-        config = copy.deepcopy(base_asr_config)
-        config.freeze_audio_encoder = False
-        model = ASRModel(config)
-        # whisper-tiny has no BatchNorm of its own; add one so the branch is
-        # actually exercised on a real ASRModel rather than a stand-in.
-        model.audio_tower.add_module("probe_bn", nn.BatchNorm1d(4))
-        return model
+    def test_batchnorm_stays_in_eval_mode_under_train(self, bn_probe_model: ASRModel) -> None:
+        bn_probe_model.train()
+        assert bn_probe_model.audio_tower.get_submodule("probe_bn").training is False
 
-    def test_batchnorm_stays_in_eval_mode_under_train(self, base_asr_config: ASRConfig) -> None:
-        model = self._model(base_asr_config)
-        model.train()
-        assert model.audio_tower.get_submodule("probe_bn").training is False
-
-    def test_the_rest_of_the_encoder_does_enter_train_mode(
-        self, base_asr_config: ASRConfig
-    ) -> None:
+    def test_the_rest_of_the_encoder_does_enter_train_mode(self, bn_probe_model: ASRModel) -> None:
         """Only the BN statistics are pinned -- this is not a backdoor freeze."""
-        model = self._model(base_asr_config)
-        model.train()
-        assert model.audio_tower.training is True
-        assert model.audio_tower.get_submodule("conv1").training is True
+        bn_probe_model.train()
+        assert bn_probe_model.audio_tower.training is True
+        assert bn_probe_model.audio_tower.get_submodule("conv1").training is True
 
-    def test_batchnorm_affine_params_remain_trainable(self, base_asr_config: ASRConfig) -> None:
-        model = self._model(base_asr_config)
-        model.train()
-        bn = model.audio_tower.get_submodule("probe_bn")
+    def test_batchnorm_affine_params_remain_trainable(self, bn_probe_model: ASRModel) -> None:
+        bn_probe_model.train()
+        bn = bn_probe_model.audio_tower.get_submodule("probe_bn")
         assert isinstance(bn, nn.BatchNorm1d)
         assert bn.weight.requires_grad
         assert bn.bias.requires_grad
 
-    def test_pinned_batchnorm_does_not_update_running_stats(
-        self, base_asr_config: ASRConfig
-    ) -> None:
-        model = self._model(base_asr_config)
-        model.train()
-        bn = model.audio_tower.get_submodule("probe_bn")
+    def test_pinned_batchnorm_does_not_update_running_stats(self, bn_probe_model: ASRModel) -> None:
+        bn_probe_model.train()
+        bn = bn_probe_model.audio_tower.get_submodule("probe_bn")
         assert isinstance(bn, nn.BatchNorm1d)
         assert bn.running_mean is not None
         before = bn.running_mean.clone()
@@ -445,10 +442,9 @@ class TestFullyUnfrozenEncoderStillPinsBatchNorm:
         bn(torch.randn(8, 4) + 10.0)
         assert torch.equal(bn.running_mean, before)
 
-    def test_pinned_batchnorm_still_passes_gradient(self, base_asr_config: ASRConfig) -> None:
-        model = self._model(base_asr_config)
-        model.train()
-        bn = model.audio_tower.get_submodule("probe_bn")
+    def test_pinned_batchnorm_still_passes_gradient(self, bn_probe_model: ASRModel) -> None:
+        bn_probe_model.train()
+        bn = bn_probe_model.audio_tower.get_submodule("probe_bn")
         assert isinstance(bn, nn.BatchNorm1d)
         x = torch.randn(8, 4, requires_grad=True)
         bn(x).sum().backward()

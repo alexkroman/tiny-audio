@@ -11,6 +11,8 @@ import pytest
 
 from scripts.eval.evaluators.asr import SmallestEvaluator
 
+pytestmark = pytest.mark.usefixtures("no_retry_backoff")
+
 
 def _response(payload: dict[str, str]) -> MagicMock:
     resp = MagicMock()
@@ -26,15 +28,6 @@ def _http_error(code: int) -> urllib.error.HTTPError:
 @pytest.fixture
 def audio() -> dict[str, object]:
     return {"array": np.zeros(16000, dtype=np.float32), "sampling_rate": 16000}
-
-
-@pytest.fixture(autouse=True)
-def no_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
-    # tenacity sleeps between attempts; skip the wait so retry tests stay fast.
-    def no_sleep(_s: float) -> None:
-        return None
-
-    monkeypatch.setattr("tenacity.nap.time.sleep", no_sleep)
 
 
 class TestSmallestEvaluator:

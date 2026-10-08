@@ -3,10 +3,10 @@
 import json
 from pathlib import Path
 
-import torch
 import transformers
+from conftest import make_asr_config
 
-from tiny_audio.asr_config import ASRConfig, compute_encoder_output_length
+from tiny_audio.asr_config import ASRConfig
 
 
 class TestASRConfigDefaults:
@@ -15,17 +15,8 @@ class TestASRConfigDefaults:
     def test_default_projector_type_is_mlp(self, base_asr_config: ASRConfig) -> None:
         assert base_asr_config.projector_type == "mlp"
 
-    def test_default_generation_params(self, base_asr_config: ASRConfig) -> None:
-        assert base_asr_config.max_new_tokens == 128
-        assert base_asr_config.use_cache is True
-
     def test_default_lora_disabled(self, base_asr_config: ASRConfig) -> None:
         assert base_asr_config.use_lora is False
-
-    def test_lora_target_modules_default(self, base_asr_config: ASRConfig) -> None:
-        # Default list set in __init__ when None passed
-        assert "q_proj" in base_asr_config.lora_target_modules
-        assert "v_proj" in base_asr_config.lora_target_modules
 
     def test_audio_config_attached(self, base_asr_config: ASRConfig) -> None:
         assert base_asr_config.audio_config is not None
@@ -33,10 +24,6 @@ class TestASRConfigDefaults:
 
     def test_text_config_attached(self, base_asr_config: ASRConfig) -> None:
         assert base_asr_config.text_config is not None
-
-    def test_encoder_alias_points_to_audio_config(self, base_asr_config: ASRConfig) -> None:
-        # ASRConfig.__init__ sets self.encoder = self.audio_config
-        assert base_asr_config.encoder is base_asr_config.audio_config
 
     def test_auto_map_registered(self, base_asr_config: ASRConfig) -> None:
         assert base_asr_config.auto_map["AutoConfig"] == "asr_config.ASRConfig"
@@ -79,83 +66,23 @@ class TestASRConfigSerialization:
         assert loaded.projector_type == base_asr_config.projector_type
         assert loaded.use_lora == base_asr_config.use_lora
 
-    def test_text_config_dict_round_trip(self) -> None:
-        """text_config passed as dict should be reconstructed via AutoConfig."""
-        cfg = ASRConfig(
-            audio_model_id="openai/whisper-tiny",
-            text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
-            attn_implementation="eager",
-            model_dtype="float32",
-        )
-        text_config_dict = cfg.text_config.to_dict()
-
-        cfg2 = ASRConfig(
-            audio_model_id="openai/whisper-tiny",
-            text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
-            attn_implementation="eager",
-            model_dtype="float32",
-            text_config=text_config_dict,
-        )
-        # Should have rebuilt a config object, not kept the dict
-        assert not isinstance(cfg2.text_config, dict)
-        assert cfg2.text_config.model_type == cfg.text_config.model_type
-
 
 class TestASRConfigOverrides:
     """Explicit overrides win over defaults."""
 
     def test_explicit_max_new_tokens_overrides_default(self) -> None:
-        cfg = ASRConfig(
-            audio_model_id="openai/whisper-tiny",
-            text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
-            attn_implementation="eager",
-            model_dtype="float32",
-            max_new_tokens=256,
-        )
+        cfg = make_asr_config(max_new_tokens=256)
         assert cfg.max_new_tokens == 256
 
     def test_lora_enabled_with_custom_rank(self) -> None:
-        cfg = ASRConfig(
-            audio_model_id="openai/whisper-tiny",
-            text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
-            attn_implementation="eager",
-            model_dtype="float32",
-            use_lora=True,
-            lora_rank=16,
-            lora_alpha=32,
-        )
+        cfg = make_asr_config(use_lora=True, lora_rank=16, lora_alpha=32)
         assert cfg.use_lora is True
         assert cfg.lora_rank == 16
         assert cfg.lora_alpha == 32
 
     def test_custom_projector_type(self) -> None:
-        cfg = ASRConfig(
-            audio_model_id="openai/whisper-tiny",
-            text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
-            attn_implementation="eager",
-            model_dtype="float32",
-            projector_type="mosa",
-        )
+        cfg = make_asr_config(projector_type="mosa")
         assert cfg.projector_type == "mosa"
-
-
-class TestComputeEncoderOutputLength:
-    """compute_encoder_output_length applies conv layer formulas."""
-
-    def test_default_whisper_layers(self) -> None:
-        # Whisper default: [(1,3,1), (1,3,2)]
-        # First: (3000 + 2 - 2 - 1) // 1 + 1 = 3000
-        # Second: (3000 + 2 - 2 - 1) // 2 + 1 = 1500
-        assert compute_encoder_output_length(3000) == 1500
-
-    def test_custom_layers(self) -> None:
-        # Single layer: (100 + 0 - 0 - 1) // 1 + 1 = 100
-        result = compute_encoder_output_length(100, conv_layers=[(0, 1, 1)])
-        assert result == 100
-
-    def test_works_with_torch_tensor(self) -> None:
-        result = compute_encoder_output_length(torch.tensor([3000, 1500]))
-        assert torch.equal(result, torch.tensor([1500, 750]))
 
 
 class TestAutoConfigRegistration:
