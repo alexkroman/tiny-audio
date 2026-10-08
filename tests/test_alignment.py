@@ -54,12 +54,12 @@ def fake_pair(monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, FakeProcessor
 
 class TestTo16k:
     def test_flattens_and_casts(self) -> None:
-        out = QwenForcedAligner._to_16k(np.ones((2, 8), dtype=np.float64), 16000)
+        out = alignment.to_16k(np.ones((2, 8), dtype=np.float64), 16000)
         assert out.dtype == np.float32
         assert out.shape == (16,)
 
     def test_accepts_tensor_and_resamples(self) -> None:
-        out = QwenForcedAligner._to_16k(torch.zeros(8000), 8000)
+        out = alignment.to_16k(torch.zeros(8000), 8000)
         assert out.dtype == np.float32
         assert out.shape == (16000,)
 
@@ -132,7 +132,7 @@ class TestGetInstance:
         model_cls, processor_cls = MagicMock(), MagicMock()
         monkeypatch.setattr(alignment, "Qwen3ASRForTokenClassification", model_cls)
         monkeypatch.setattr(alignment, "Qwen3ASRProcessor", processor_cls)
-        monkeypatch.setattr(alignment, "_get_device", lambda: device)
+        monkeypatch.setattr(alignment, "get_device", lambda: torch.device(device))
 
         first = QwenForcedAligner.get_instance()
         second = QwenForcedAligner.get_instance()
@@ -142,7 +142,7 @@ class TestGetInstance:
             QwenForcedAligner.MODEL_ID, dtype=torch.bfloat16, attn_implementation=attn
         )
         model = model_cls.from_pretrained.return_value
-        model.to.assert_called_once_with(device)
+        model.to.assert_called_once_with(torch.device(device))
         model.eval.assert_called_once()
         processor_cls.from_pretrained.assert_called_once_with(QwenForcedAligner.MODEL_ID)
 

@@ -9,6 +9,7 @@ requested implementation otherwise.
 import functools
 import importlib
 import logging
+from typing import Any
 
 import torch
 from transformers import AutoConfig
@@ -42,6 +43,13 @@ def _max_attention_head_dim(text_config: object) -> int | None:
 
 
 @functools.lru_cache(maxsize=16)
+def _text_config(model_id: str) -> Any:
+    """`model_id`'s decoder config: the text sub-config of a composite config, else itself."""
+    probe = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+    return probe.get_text_config() if hasattr(probe, "get_text_config") else probe
+
+
+@functools.lru_cache(maxsize=16)
 def _has_sliding_window_attention(model_id: str) -> bool:
     """Whether `model_id`'s text stack has any sliding-window attention layer.
 
@@ -58,8 +66,7 @@ def _has_sliding_window_attention(model_id: str) -> bool:
     keeps the conservative eager path on MPS.
     """
     try:
-        probe = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
-        text_config = probe.get_text_config() if hasattr(probe, "get_text_config") else probe
+        text_config = _text_config(model_id)
     except Exception:
         logger.warning(
             "Could not read the config for %s to check for sliding-window "
@@ -156,9 +163,7 @@ def resolve_decoder_attn_implementation(requested: str | None, model_id: str) ->
     """
     attn_implementation = resolve_attn_implementation(requested, model_id)
     if attn_implementation == "flash_attention_2":
-        probe = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
-        text_probe = probe.get_text_config() if hasattr(probe, "get_text_config") else probe
-        head_dim = _max_attention_head_dim(text_probe)
+        head_dim = _max_attention_head_dim(_text_config(model_id))
         if head_dim is not None and head_dim > FLASH_ATTENTION_MAX_HEAD_DIM:
             logger.warning(
                 "%s has max head_dim=%d, above FlashAttention's limit of %d; "

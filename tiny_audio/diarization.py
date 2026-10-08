@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any, TypedDict
 import numpy as np
 import numpy.typing as npt
 import torch
-import torchaudio
 from transformers import AutoModelForAudioFrameClassification, AutoProcessor
 
 if TYPE_CHECKING:
@@ -18,7 +17,12 @@ if TYPE_CHECKING:
         Nemotron3DiarizationProcessor,
     )
 
-    from .alignment import AlignedWord
+    from .alignment import AlignedWord, get_device, to_16k
+else:
+    try:
+        from .alignment import get_device, to_16k
+    except ImportError:  # flat layout on the Hub: sibling modules, no package
+        from alignment import get_device, to_16k
 
 
 class SpeakerSegment(TypedDict):
@@ -27,15 +31,6 @@ class SpeakerSegment(TypedDict):
     speaker: str
     start: float
     end: float
-
-
-def get_device() -> torch.device:
-    """Get best available device for inference."""
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
 
 
 def _label_runs(labels: npt.NDArray[np.generic]) -> list[tuple[int, int, int]]:
@@ -161,15 +156,8 @@ class NemotronDiarizer:
     @torch.inference_mode()
     def activity(cls, audio: npt.ArrayLike, sample_rate: int = 16000) -> npt.NDArray[np.float32]:
         """(frames, 8) speech probabilities at 10 ms; columns in arrival order."""
-        if sample_rate != 16000:
-            audio = np.asarray(
-                torchaudio.functional.resample(
-                    torch.as_tensor(audio, dtype=torch.float32), sample_rate, 16000
-                ),
-                dtype=np.float32,
-            )
         model, processor = cls.get_instance()
-        inputs = processor(np.asarray(audio, dtype=np.float32), sampling_rate=16000)
+        inputs = processor(to_16k(audio, sample_rate), sampling_rate=16000)
         inputs = inputs.to(model.device, dtype=model.dtype)
         probs: npt.NDArray[np.float32] = model(**inputs).logits[0].float().sigmoid().cpu().numpy()
         return probs
@@ -196,10 +184,15 @@ class NemotronDiarizer:
             active = sorted(sorted(active, key=lambda c: -mass[c])[:cap])
         return active or [0]
 
+    @staticmethod
+    def speaker_names(keep: list[int]) -> dict[int, str]:
+        """Column -> label: `SPEAKER_i` for the column's position in `keep`."""
+        return {c: f"SPEAKER_{i}" for i, c in enumerate(keep)}
+
     @classmethod
     def segments(cls, activity: npt.NDArray[np.float32], keep: list[int]) -> list[SpeakerSegment]:
         """Speaker turns `{"speaker", "start", "end"}` by start time; overlaps allowed."""
-        names = {c: f"SPEAKER_{i}" for i, c in enumerate(keep)}
+        names = cls.speaker_names(keep)
         out: list[SpeakerSegment] = []
         for c in keep:
             for on, s, e in _label_runs(activity[:, c] > cls.SEGMENT_THRESHOLD):
@@ -257,7 +250,7 @@ class NemotronDiarizer:
         A word placed wholly in its own speaker's silenced audio (`masks`) is a
         hallucination on silence and is dropped.
         """
-        names = {c: f"SPEAKER_{i}" for i, c in enumerate(keep)}
+        names = cls.speaker_names(keep)
         words: list[dict[str, Any]] = []
         for ch, chunk_words in zip(chunks, aligned, strict=True):
             offset = ch["start"] / sample_rate
@@ -287,7 +280,8 @@ class NemotronDiarizer:
         leaked into both masks: the copy whose speaker is more active over its
         span stays, the earlier word on a tie.
         """
-        cols = {f"SPEAKER_{i}": c for i, c in enumerate(keep)}
+        cols = {name: c for c, name in cls.speaker_names(keep).items()}
+        norms = [_norm_word(w["word"]) for w in words]
         dropped: set[int] = set()
         for i, a in enumerate(words):
             for j in range(i + 1, len(words)):
@@ -296,7 +290,7 @@ class NemotronDiarizer:
                     break
                 if i in dropped or j in dropped or a["speaker"] == b["speaker"]:
                     continue
-                if not _norm_word(a["word"]) or _norm_word(a["word"]) != _norm_word(b["word"]):
+                if not norms[i] or norms[i] != norms[j]:
                     continue
                 score_a = cls._span_activity(activity, cols[a["speaker"]], a["start"], a["end"])
                 score_b = cls._span_activity(activity, cols[b["speaker"]], b["start"], b["end"])
