@@ -21,7 +21,7 @@ console = Console()
 
 # Every Python tree in the repo: the package, its CLI, the tests, the Space
 # demo and the course examples. Linters and type checkers all run over this.
-CODE_PATHS = ["tiny_audio", "scripts", "tests", "demo", "docs"]
+CODE_PATHS = ["tiny_audio", "scripts", "tests", "demo", "docs", "typings"]
 LIB_PATH = "tiny_audio"
 
 # Every threshold below is a ratchet: raise it when the codebase clears the
@@ -147,10 +147,6 @@ def build_and_check() -> int:
     return run(*BUILD_COMMAND) or run_all(*dist_check_commands())
 
 
-# YAML front matter, which mdformat mangles (also excluded in [tool.mdformat]).
-MARKDOWN_SKIP = {"MODEL_CARD.md", "demo/README.md"}
-
-
 def markdown_files() -> list[str]:
     """Tracked Markdown that `ta dev format` rewrites and `ta dev lint` checks.
 
@@ -160,7 +156,7 @@ def markdown_files() -> list[str]:
     tracked = subprocess.run(
         ["git", "ls-files", "*.md"], capture_output=True, text=True, check=True
     )
-    return [f for f in tracked.stdout.splitlines() if f and f not in MARKDOWN_SKIP]
+    return [f for f in tracked.stdout.splitlines() if f]
 
 
 def lint_commands() -> list[list[str]]:

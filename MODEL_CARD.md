@@ -1,27 +1,27 @@
 ---
 license: mit
 language:
-- en
+  - en
 datasets:
-- mythicinfinity/libriheavy
-- MLCommons/peoples_speech
-- fixie-ai/common_voice_17_0
-- speechcolab/gigaspeech
-- kensho/spgispeech
-- facebook/voxpopuli
-- edinburghcstr/ami
-- sanchit-gandhi/tedlium-data
+  - mythicinfinity/libriheavy
+  - MLCommons/peoples_speech
+  - fixie-ai/common_voice_17_0
+  - speechcolab/gigaspeech
+  - kensho/spgispeech
+  - facebook/voxpopuli
+  - edinburghcstr/ami
+  - sanchit-gandhi/tedlium-data
 base_model:
-- ibm-granite/granite-speech-5.0-470m-turboctc
-- Qwen/Qwen3.5-2B
+  - ibm-granite/granite-speech-5.0-470m-turboctc
+  - Qwen/Qwen3.5-2B
 pipeline_tag: automatic-speech-recognition
 tags:
-- asr
-- speech-recognition
-- audio
-- qwen
-- granite-speech
-- lora
+  - asr
+  - speech-recognition
+  - audio
+  - qwen
+  - granite-speech
+  - lora
 library_name: transformers
 ---
 
@@ -178,8 +178,8 @@ Audio (16kHz) → Granite Speech encoder (frozen) → MLP projector (trained) �
 ### How It Works
 
 1. **Audio encoder**: Granite Speech turns 16kHz audio into frame-level embeddings.
-2. **Projector**: A 2-layer MLP maps those embeddings into the decoder's embedding space. Each projected frame replaces an `<audio>` placeholder token in the prompt.
-3. **Language model**: Qwen3.5-2B, adapted with LoRA, generates the transcript conditioned on the projected audio and the prompt *"Transcribe the speech with proper punctuation and capitalization"*.
+1. **Projector**: A 2-layer MLP maps those embeddings into the decoder's embedding space. Each projected frame replaces an `<audio>` placeholder token in the prompt.
+1. **Language model**: Qwen3.5-2B, adapted with LoRA, generates the transcript conditioned on the projected audio and the prompt *"Transcribe the speech with proper punctuation and capitalization"*.
 
 At inference, 0.25s of silence is prepended to each clip (`inference_lead_in_seconds`). This keeps the first word from being dropped on clips that start mid-speech.
 

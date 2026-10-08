@@ -174,11 +174,10 @@ class TestQualityGateContents:
         assert ["ruff", "format", "--check", *dev.CODE_PATHS] in dev.LINT_COMMANDS
         assert ["black", "--check", *dev.CODE_PATHS] in dev.LINT_COMMANDS
 
-    def test_lint_checks_tracked_markdown_except_front_matter_files(self):
+    def test_lint_checks_all_tracked_markdown(self):
         *_, markdown = dev.lint_commands()
         assert markdown[:2] == ["mdformat", "--check"]
-        assert "README.md" in markdown
-        assert not set(markdown) & dev.MARKDOWN_SKIP
+        assert {"README.md", "MODEL_CARD.md", "demo/README.md"} <= set(markdown)
 
     def test_lint_verifies_the_lock_file(self):
         assert ["poetry", "check", "--lock"] in dev.LINT_COMMANDS

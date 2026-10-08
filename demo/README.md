@@ -47,15 +47,15 @@ This Space demonstrates an Automatic Speech Recognition (ASR) model that combine
 The model bridges audio and text with a trained projector and LoRA adapters:
 
 1. **Audio Encoder**: Granite Speech 5.0 470M TurboCTC encoder (frozen)
-2. **Projection Layer**: 2-layer MLP mapping audio features into the decoder's embedding space (~12.6M params)
-3. **Text Decoder**: Qwen3.5-2B (frozen) with rank-64 LoRA adapters (~67M params), trained jointly with the projector
+1. **Projection Layer**: 2-layer MLP mapping audio features into the decoder's embedding space (~12.6M params)
+1. **Text Decoder**: Qwen3.5-2B (frozen) with rank-64 LoRA adapters (~67M params), trained jointly with the projector
 
 ## Usage
 
 1. **Upload an audio file** (WAV, MP3, etc.) or **record directly** using your microphone
-2. Click **"Transcribe"** to convert speech to text
-3. The transcription will appear in the output box
-4. Optionally tick **Word Timestamps** or **Speaker Diarization**. If you know how many people are speaking, set **Number of Speakers**: it caps how many speakers are kept
+1. Click **"Transcribe"** to convert speech to text
+1. The transcription will appear in the output box
+1. Optionally tick **Word Timestamps** or **Speaker Diarization**. If you know how many people are speaking, set **Number of Speakers**: it caps how many speakers are kept
 
 ## Limitations
 

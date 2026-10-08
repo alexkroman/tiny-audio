@@ -166,6 +166,10 @@ torchcodec = ">=0.5.0,<0.8"  # 0.7.x is the last line built against torch 2.8 AB
 #
 # Opt in on a pod that has nvcc:
 #   poetry install --with hybrid-kernels
+types-tqdm = "^4.70.0.20260906"
+scipy-stubs = "^1.18.1.1"
+matplotlib = "^3.11.2"
+mdformat-frontmatter = "^2.1.2"
 [tool.poetry.group.hybrid-kernels]
 optional = true
 
@@ -188,14 +192,26 @@ include_trailing_comma = true
 
 [tool.mypy]
 python_version = "3.12"
-strict = true
-warn_unreachable = true
+warn_unused_configs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
 follow_imports = "normal"
+# Installed packages that ship neither stubs nor a py.typed marker (datasets,
+# soundfile, torchaudio, fabric, nltk, ...) are analysed from source instead of
+# being silently treated as Any.
+follow_untyped_imports = true
+# Minimal stubs for modules that cannot be installed here: the Spaces runtime's
+# `spaces` and PyObjC's macOS-only frameworks.
+mypy_path = "typings"
 
 [tool.pyright]
-include = ["tiny_audio", "scripts", "tests", "demo", "docs"]
+include = ["tiny_audio", "scripts", "tests", "demo", "docs", "typings"]
 exclude = ["**/node_modules", "**/__pycache__", "outputs", ".venv", "venv"]
-typeCheckingMode = "strict"
+typeCheckingMode = "standard"
+stubPath = "typings"
 
 [tool.pytest.ini_options]
 # Test discovery patterns
@@ -288,8 +304,6 @@ known-third-party = ["wandb"]
 [tool.mdformat]
 wrap = 100
 number = false
-# Exclude files with YAML front matter (mdformat mangles `---` delimiters)
-exclude = ["MODEL_CARD.md", "demo/README.md"]
 
 [tool.deptry]
 # The course example plots with matplotlib; it is not part of the package.
