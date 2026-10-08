@@ -160,33 +160,29 @@ def _get(node: DictConfig, key: str, default: Any) -> Any:
     return default if val is None else val
 
 
-def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
-    # Imported lazily: transformers + tiny_audio cost several seconds, which
-    # every `ta runpod` command would otherwise pay because runpod.py imports
-    # this module.
-    auto_config: type[AutoConfig] = importlib.import_module("transformers").AutoConfig
-    asr_config_cls: type[ASRConfig] = importlib.import_module("tiny_audio.asr_config").ASRConfig
-    projector_classes: dict[str, type[MLPAudioProjector]] = importlib.import_module(
-        "tiny_audio.projectors"
-    ).PROJECTOR_CLASSES
+@dataclass
+class _Precision:
+    """Bytes per element for each kind of tensor the VRAM estimate charges."""
 
-    cfg = _load_cfg(experiment, overrides)
-    plan = Plan()
+    weights: int  # frozen master weights (model_dtype)
+    trainable: int  # trainable weights, grads and AdamW state (projector_dtype)
+    activations: int  # the autocast dtype the activation tape is stored in
 
-    model_dtype = str(_get(cfg.model, "model_dtype", "bfloat16"))
-    bytes_per = DTYPE_BYTES.get(model_dtype, 2)
-    train = cfg.training
 
-    audio_id = str(cfg.model.audio_model_id)
-    text_id = str(cfg.model.text_model_id)
+def _encoder_trainable_blocks(train: DictConfig, depth: int) -> int:
+    """How many encoder blocks receive gradients (all of them, the top N, or none)."""
+    if not bool(_get(train, "freeze_audio_encoder", True)):
+        return depth
+    top_n = int(_get(train, "encoder_trainable_top_layers", 0) or 0)
+    return min(top_n, depth)
 
-    # ---- encoder -----------------------------------------------------------
+
+def _add_encoder(plan: Plan, train: DictConfig, audio_id: str, enc_inner: Any) -> int:
+    """Append the encoder's frozen/trainable split; return its trainable block count."""
     enc_params, enc_dtype = safetensors_params(audio_id)
-    enc_cfg_probe = auto_config.from_pretrained(audio_id)
-    enc_probe_inner = getattr(enc_cfg_probe, "encoder_config", None) or enc_cfg_probe
-    enc_depth = int(getattr(enc_probe_inner, "num_hidden_layers", 0) or 0)
-    enc_top_n = int(_get(train, "encoder_trainable_top_layers", 0) or 0)
+    enc_depth = int(getattr(enc_inner, "num_hidden_layers", 0) or 0)
     enc_frozen_flag = bool(_get(train, "freeze_audio_encoder", True))
+    trainable_blocks = _encoder_trainable_blocks(train, enc_depth)
 
     # A partial unfreeze is trainable too. `freeze_audio_encoder: true` PLUS
     # `encoder_trainable_top_layers: N` is the documented idiom, so reading the
@@ -195,12 +191,12 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
     # Split it the way the decoder's frozen vocabulary table is split.
     if not enc_frozen_flag:
         enc_trainable_params = enc_params
-    elif enc_top_n and enc_depth:
+    elif trainable_blocks and enc_depth:
         # Pro-rata by block. Approximate -- it charges the pre/post-stack
         # projections at the same rate as a block, so for Granite's top-4 it
         # says 118.2M against an actual 109.76M. Errs high, which is the safe
         # direction for sizing a card.
-        enc_trainable_params = int(enc_params * min(enc_top_n, enc_depth) / enc_depth)
+        enc_trainable_params = int(enc_params * trainable_blocks / enc_depth)
     else:
         enc_trainable_params = 0
 
@@ -214,16 +210,48 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
         )
     )
     if enc_trainable_params:
+        enc_top_n = int(_get(train, "encoder_trainable_top_layers", 0) or 0)
         label = "all blocks" if not enc_frozen_flag else f"top {enc_top_n} of {enc_depth} blocks"
         plan.components.append(
             Component(f"  encoder trainable ({label})", enc_trainable_params, 0, True, "")
         )
+    return trainable_blocks
 
-    # ---- decoder -----------------------------------------------------------
+
+def _add_lora(plan: Plan, model: DictConfig, text_id: str) -> None:
+    """Append the LoRA adapters' trainable params when `use_lora` is on."""
+    # Without this the plan reports a frozen decoder as contributing zero
+    # trainable params, which is wrong whenever `use_lora` is on -- it
+    # understated the granite_qwen_lora recipe by 67.28M and made AdamW state
+    # look 6x smaller than it is. The adapters are freshly initialised, so
+    # they add optimizer state but nothing to download.
+    if not _get(model, "use_lora", False):
+        return
+    lora_params = lora_trainable_params(
+        text_id,
+        int(_get(model, "lora_rank", 8)),
+        model.get("lora_target_modules") or ["q_proj", "v_proj"],
+    )
+    if not lora_params:
+        return
+    targets = model.get("lora_target_modules")
+    label = targets if isinstance(targets, str) else "custom targets"
+    plan.components.append(
+        Component(
+            f"  LoRA adapters (r={_get(model, 'lora_rank', 8)}, {label})",
+            lora_params,
+            0,  # fresh init, nothing to fetch
+            True,
+            "trainable; base decoder frozen",
+        )
+    )
+
+
+def _add_decoder(plan: Plan, cfg: DictConfig, text_id: str, text_cfg: Any) -> bool:
+    """Append the decoder, its LoRA adapters and frozen tables; return whether it trains."""
+    train = cfg.training
     dec_params, dec_dtype = safetensors_params(text_id, NON_LM_TOWER_PREFIXES)
     dec_trainable = not _get(train, "freeze_language_model", True)
-    dec_cfg = auto_config.from_pretrained(text_id)
-    text_cfg = dec_cfg.get_text_config() if hasattr(dec_cfg, "get_text_config") else dec_cfg
     # Split the frozen vocabulary table out of the trainable decoder. The
     # freeze flag acts on an individual tensor inside the language model, so a
     # single all-or-nothing `trainable` on one component would charge AdamW
@@ -244,30 +272,7 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
             f"checkpoint {dec_dtype}",
         )
     )
-    # LoRA adapters. Without this the plan reports a frozen decoder as
-    # contributing zero trainable params, which is wrong whenever `use_lora`
-    # is on -- it understated the granite_qwen_lora recipe by 67.28M and made
-    # AdamW state look 6x smaller than it is. The adapters are freshly
-    # initialised, so they add optimizer state but nothing to download.
-    if _get(cfg.model, "use_lora", False):
-        lora_params = lora_trainable_params(
-            text_id,
-            int(_get(cfg.model, "lora_rank", 8)),
-            cfg.model.get("lora_target_modules") or ["q_proj", "v_proj"],
-        )
-        if lora_params:
-            targets = cfg.model.get("lora_target_modules")
-            label = targets if isinstance(targets, str) else "custom targets"
-            plan.components.append(
-                Component(
-                    f"  LoRA adapters (r={_get(cfg.model, 'lora_rank', 8)}, {label})",
-                    lora_params,
-                    0,  # fresh init, nothing to fetch
-                    True,
-                    "trainable; base decoder frozen",
-                )
-            )
-
+    _add_lora(plan, cfg.model, text_id)
     if frozen_table_params:
         plan.components.append(
             Component(
@@ -278,12 +283,23 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
                 "no optimizer state",
             )
         )
+    return dec_trainable
 
-    # ---- projector ---------------------------------------------------------
-    enc_cfg = auto_config.from_pretrained(audio_id)
-    enc_inner = getattr(enc_cfg, "encoder_config", None) or enc_cfg
-    encoder_dim = hidden_dim(enc_inner)
-    llm_dim = hidden_dim(text_cfg)
+
+def _add_projector(
+    plan: Plan,
+    model: DictConfig,
+    encoder_dim: int | None,
+    llm_dim: int | None,
+    audio_id: str,
+    text_id: str,
+) -> None:
+    """Append the projector, sized by instantiating the real PROJECTOR_CLASSES entry."""
+    # Lazy, like the transformers import in build_plan.
+    asr_config_cls: type[ASRConfig] = importlib.import_module("tiny_audio.asr_config").ASRConfig
+    projector_classes: dict[str, type[MLPAudioProjector]] = importlib.import_module(
+        "tiny_audio.projectors"
+    ).PROJECTOR_CLASSES
     proj_params = 0
     if encoder_dim and llm_dim:
         shim = asr_config_cls(
@@ -291,9 +307,9 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
             text_model_id=text_id,
             encoder_dim=encoder_dim,
             llm_dim=llm_dim,
-            projector_type=str(_get(cfg.model, "projector_type", "mlp")),
-            projector_pool_stride=int(_get(cfg.model, "projector_pool_stride", 4)),
-            projector_hidden_dim=cfg.model.get("projector_hidden_dim"),
+            projector_type=str(_get(model, "projector_type", "mlp")),
+            projector_pool_stride=int(_get(model, "projector_pool_stride", 4)),
+            projector_hidden_dim=model.get("projector_hidden_dim"),
         )
         cls = projector_classes[shim.projector_type]
         proj_params = sum(p.numel() for p in cls(shim).parameters())
@@ -303,8 +319,10 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
         Component("projector (fresh init)", proj_params, 0, True, f"{encoder_dim}->{llm_dim}")
     )
 
-    # ---- datasets ----------------------------------------------------------
-    entries: Iterable[DictConfig] = cfg.data.get("datasets", []) or []
+
+def _add_datasets(plan: Plan, data: DictConfig) -> None:
+    """Record the Hub download size of every dataset the run trains or evals on."""
+    entries: Iterable[DictConfig] = data.get("datasets", []) or []
     for entry in entries:
         path = str(entry.get("path"))
         name = entry.get("name")
@@ -318,55 +336,33 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
         plan.dataset_bytes += size
         plan.dataset_rows.append((f"{path}" + (f":{name}" if name else ""), size))
 
-    # ---- VRAM --------------------------------------------------------------
-    total_params = sum(c.params for c in plan.components)
-    trainable_params = sum(c.params for c in plan.components if c.trainable)
 
-    # Trainable params may be held at a different (higher) precision than the
-    # frozen stack; see ASRConfig.projector_dtype. Charging everything at the
-    # trainable dtype overstated weights by 10.4 GiB on this recipe.
-    proj_dtype = str(cfg.model.get("projector_dtype") or model_dtype)
-    trainable_bytes_per = DTYPE_BYTES.get(proj_dtype, bytes_per)
-    frozen_params = total_params - trainable_params
-    weights = frozen_params * bytes_per + trainable_params * trainable_bytes_per
-    grads = trainable_params * trainable_bytes_per
-    optim = trainable_params * trainable_bytes_per * OPTIMIZER_STATES
-
+def _decoder_activation_bytes(
+    train: DictConfig, text_cfg: Any, llm_dim: int, seq_len: int, act_bytes_per: int
+) -> float:
+    """Activation tape retained across the decoder stack for one micro-batch."""
     batch = int(_get(train, "per_device_train_batch_size", 1))
     layers = int(getattr(text_cfg, "num_hidden_layers", 0) or 0)
     inter = int(getattr(text_cfg, "intermediate_size", 0) or 0)
-    vocab = int(getattr(text_cfg, "vocab_size", 0) or 0)
-    ckpt = bool(_get(train, "gradient_checkpointing", False))
-
-    # ACTIVATIONS ARE AUTOCAST'S DTYPE, NOT THE MASTER WEIGHTS'. Under
-    # `bf16: true` every matmul emits bf16, so the tape is 2 B/element even
-    # when model_dtype is float32. Charging it at `bytes_per` doubled the term
-    # on every fp32-master recipe, and it also silently contradicted
-    # ACTIVATION_CALIBRATION, which was fitted against a formula written as
-    # `2 * (6*hidden + 3*inter)` -- a hardcoded 2 -- on granite_qwen, itself a
-    # model_dtype: float32 run. Fit and use disagreed by exactly 2x, which is
-    # why this predicted 101.87 GiB for a run that completed on an 80 GB card
-    # and recommended an H200 for granite_qwen_full at ~76% of an H100.
-    act_bytes_per = 2 if (train.get("bf16") or train.get("fp16")) else bytes_per
-
     # Per token per layer: attention q/k/v/o + residual (~6*hidden) and the
     # MLP's gate/up/down (~3*intermediate). Coarse but the right order.
     # Scaled by ACTIVATION_CALIBRATION -- see its definition; unscaled this
     # term is 2.55x under what the granite_qwen run actually used, which is
     # enough to recommend a 48 GB card for a job that needs ~42 GiB.
-    per_tok_layer = act_bytes_per * (6 * (llm_dim or 0) + 3 * inter) * ACTIVATION_CALIBRATION
-    if ckpt:
+    per_tok_layer = act_bytes_per * (6 * llm_dim + 3 * inter) * ACTIVATION_CALIBRATION
+    if bool(_get(train, "gradient_checkpointing", False)):
         # Only layer boundaries are kept; one layer is recomputed at a time.
         # The boundary term is a plain hidden-sized tensor per layer and is
         # NOT subject to the calibration, which corrects the within-layer
         # tape; only the single recomputed layer carries that.
-        acts = (
-            batch * seq_len * (llm_dim or 0) * layers * act_bytes_per
-            + batch * seq_len * per_tok_layer
-        )
-    else:
-        acts = batch * seq_len * layers * per_tok_layer
+        return batch * seq_len * llm_dim * layers * act_bytes_per + batch * seq_len * per_tok_layer
+    return batch * seq_len * layers * per_tok_layer
 
+
+def _encoder_activation_bytes(
+    cfg: DictConfig, trainable_blocks: int, encoder_dim: int, act_bytes_per: int
+) -> float:
+    """Activation tape retained across the encoder's trainable blocks (0 when frozen)."""
     # Encoder activation tape. Zero while the encoder is frozen -- ASRModel.forward
     # runs it under no_grad, so nothing is retained -- and a large term the moment
     # it is not. Missing this is what made granite_qwen_lora plan at 67.94 GiB and
@@ -380,49 +376,64 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
     # feed-forwards (2 x 2 x ff_expansion x d), attention q/k/v/o (4d) plus its
     # score matrix, and the conv module -- the same shape as the decoder term,
     # so it reuses the same empirical calibration.
-    # Fraction of the block stack that keeps its tape. Autograd retains
-    # activations only from the first trainable parameter onward, and the
-    # projector sits AFTER the encoder, so a top-N unfreeze retains the top N
-    # blocks and nothing below them. Gating on `freeze_audio_encoder` alone
+    # Only the trainable blocks count (see _encoder_trainable_blocks). Autograd
+    # retains activations only from the first trainable parameter onward, and
+    # the projector sits AFTER the encoder, so a top-N unfreeze retains the top
+    # N blocks and nothing below them. Gating on `freeze_audio_encoder` alone
     # reported zero for the partial case; measured peaks say otherwise --
     # frozen 55.4 GiB, top-4 60.6, full ~79.4 at batch 48, and 4/16 of the
     # full increment is 6.0 GiB against an observed 5.2.
-    enc_layers = int(getattr(enc_inner, "num_hidden_layers", 0) or 0)
-    if not bool(_get(train, "freeze_audio_encoder", True)):
-        trainable_blocks = enc_layers
-    else:
-        top_n = int(_get(train, "encoder_trainable_top_layers", 0) or 0)
-        trainable_blocks = min(top_n, enc_layers)
-
-    enc_acts = 0.0
-    if trainable_blocks and encoder_dim:
-        enc_layers = trainable_blocks
-        # The encoder's sequence is its own, NOT the decoder's `seq_len`: it is
-        # acoustic frames, and there are far more of them than there are text
-        # tokens. DataCollator caps audio at 19s and Granite's extractor stacks
-        # mel pairs to 50 Hz, so ~950 frames enter the block stack and
-        # encoder_conv_layers halves twice to ~237. Using seq_len here instead
-        # gave 82 and undercounted the tape ~3x.
-        enc_seq = int(MAX_AUDIO_SECONDS * ENCODER_FRAME_RATE_HZ)
-        # Same default as ASRConfig: unset means DEFAULT_ENCODER_CONV_LAYERS,
-        # not "no subsampling".
-        # Lazy, like the transformers/tiny_audio imports in build_plan.
-        asr_config = importlib.import_module("tiny_audio.asr_config")
-        encoder_output_length: Callable[[int, Sequence[ConvLayerSpec] | None], int] = (
-            asr_config.compute_encoder_output_length
+    if not (trainable_blocks and encoder_dim):
+        return 0.0
+    train = cfg.training
+    batch = int(_get(train, "per_device_train_batch_size", 1))
+    # The encoder's sequence is its own, NOT the decoder's `seq_len`: it is
+    # acoustic frames, and there are far more of them than there are text
+    # tokens. DataCollator caps audio at 19s and Granite's extractor stacks
+    # mel pairs to 50 Hz, so ~950 frames enter the block stack and
+    # encoder_conv_layers halves twice to ~237. Using seq_len here instead
+    # gave 82 and undercounted the tape ~3x.
+    enc_seq = int(MAX_AUDIO_SECONDS * ENCODER_FRAME_RATE_HZ)
+    # Same default as ASRConfig: unset means DEFAULT_ENCODER_CONV_LAYERS,
+    # not "no subsampling".
+    # Lazy, like the transformers/tiny_audio imports in build_plan.
+    asr_config = importlib.import_module("tiny_audio.asr_config")
+    encoder_output_length: Callable[[int, Sequence[ConvLayerSpec] | None], int] = (
+        asr_config.compute_encoder_output_length
+    )
+    enc_seq = encoder_output_length(enc_seq, cfg.model.get("encoder_conv_layers") or None)
+    per_tok_enc = act_bytes_per * (6 * encoder_dim + 3 * 4 * encoder_dim) * ACTIVATION_CALIBRATION
+    if bool(_get(train, "gradient_checkpointing", False)):
+        return batch * enc_seq * encoder_dim * trainable_blocks * act_bytes_per + (
+            batch * enc_seq * per_tok_enc
         )
-        enc_seq = encoder_output_length(enc_seq, cfg.model.get("encoder_conv_layers") or None)
-        if enc_layers:
-            per_tok_enc = (
-                act_bytes_per * (6 * encoder_dim + 3 * 4 * encoder_dim) * ACTIVATION_CALIBRATION
-            )
-            enc_acts = batch * enc_seq * enc_layers * per_tok_enc
-            if ckpt:
-                enc_acts = batch * enc_seq * encoder_dim * enc_layers * act_bytes_per + (
-                    batch * enc_seq * per_tok_enc
-                )
-    acts += enc_acts
+    return batch * enc_seq * trainable_blocks * per_tok_enc
 
+
+def _precision(cfg: DictConfig) -> _Precision:
+    """Resolve the byte widths of frozen weights, trainable state and activations."""
+    train = cfg.training
+    model_dtype = str(_get(cfg.model, "model_dtype", "bfloat16"))
+    bytes_per = DTYPE_BYTES.get(model_dtype, 2)
+    # Trainable params may be held at a different (higher) precision than the
+    # frozen stack; see ASRConfig.projector_dtype. Charging everything at the
+    # trainable dtype overstated weights by 10.4 GiB on this recipe.
+    proj_dtype = str(cfg.model.get("projector_dtype") or model_dtype)
+    # ACTIVATIONS ARE AUTOCAST'S DTYPE, NOT THE MASTER WEIGHTS'. Under
+    # `bf16: true` every matmul emits bf16, so the tape is 2 B/element even
+    # when model_dtype is float32. Charging it at `bytes_per` doubled the term
+    # on every fp32-master recipe, and it also silently contradicted
+    # ACTIVATION_CALIBRATION, which was fitted against a formula written as
+    # `2 * (6*hidden + 3*inter)` -- a hardcoded 2 -- on granite_qwen, itself a
+    # model_dtype: float32 run. Fit and use disagreed by exactly 2x, which is
+    # why this predicted 101.87 GiB for a run that completed on an 80 GB card
+    # and recommended an H200 for granite_qwen_full at ~76% of an H100.
+    act_bytes_per = 2 if (train.get("bf16") or train.get("fp16")) else bytes_per
+    return _Precision(bytes_per, DTYPE_BYTES.get(proj_dtype, bytes_per), act_bytes_per)
+
+
+def _cross_entropy_bytes(train: DictConfig, text_cfg: Any, seq_len: int) -> int:
+    """Logits memory for the loss; zero when liger fuses lm_head+CE."""
     # Cross-entropy. liger fuses lm_head+softmax+CE into O(B*T*D); without it
     # the (B, T, V) fp32 logits plus a log_softmax copy dominate everything.
     #
@@ -434,8 +445,21 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
     # GiB and then OOMed on a 12.37 GiB logits gradient. The term is still
     # optimistic if liger has no patcher for the architecture -- train.py
     # warns in that case, and so does ASRModel.__init__.
-    fused = bool(_get(train, "use_liger", True))
-    logits = 0 if fused else batch * seq_len * vocab * 4 * 2
+    if bool(_get(train, "use_liger", True)):
+        return 0
+    batch = int(_get(train, "per_device_train_batch_size", 1))
+    vocab = int(getattr(text_cfg, "vocab_size", 0) or 0)
+    return batch * seq_len * vocab * 4 * 2
+
+
+def _estimate_vram(plan: Plan, prec: _Precision, acts: float, enc_acts: float, logits: int) -> None:
+    """Fill `plan.vram` with the static + activation breakdown and the overhead-padded total."""
+    total_params = sum(c.params for c in plan.components)
+    trainable_params = sum(c.params for c in plan.components if c.trainable)
+    frozen_params = total_params - trainable_params
+    weights = frozen_params * prec.weights + trainable_params * prec.trainable
+    grads = trainable_params * prec.trainable
+    optim = trainable_params * prec.trainable * OPTIMIZER_STATES
 
     # Autocast's bf16 copy of every fp32 weight. torch.autocast caches its
     # casts for the lifetime of the autocast region, and that region ends when
@@ -443,7 +467,7 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
     # so this stacks onto the peak rather than the trough. Zero when the master
     # weights are already 2 bytes (nothing to cast) or when autocast is off.
     # Worth 4.41 GiB on granite_qwen_full, and it was simply missing here.
-    autocast_cache = total_params * 2 if (act_bytes_per == 2 and bytes_per != 2) else 0
+    autocast_cache = total_params * 2 if (prec.activations == 2 and prec.weights != 2) else 0
 
     subtotal = weights + grads + optim + acts + logits + autocast_cache
     plan.vram = {
@@ -458,6 +482,11 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
         "recommended (x1.25)": subtotal * OVERHEAD_FACTOR / GIB,
     }
 
+
+def _add_vram_warnings(
+    plan: Plan, train: DictConfig, dec_trainable: bool, logits: int, seq_len: int, text_cfg: Any
+) -> None:
+    """Warn about known over-counts and about the levers that would shrink the estimate."""
     # Gradients must reach the projector, which sits at the *input* of the
     # decoder, so every decoder layer's activations are retained even though
     # the decoder itself is frozen. Freezing saves optimizer state, not
@@ -475,18 +504,25 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
             "audio_tower. -- are no longer counted; see NON_LM_TOWER_PREFIXES.)"
         )
 
+    trainable_params = sum(c.params for c in plan.components if c.trainable)
+    ckpt = bool(_get(train, "gradient_checkpointing", False))
     if not dec_trainable and trainable_params and not ckpt:
         plan.warnings.append(
             "Decoder is frozen but the projector feeds its input, so activations "
             "are still held for every decoder layer. gradient_checkpointing=true "
             "is the lever if activations dominate."
         )
-    if not fused:
+    if not bool(_get(train, "use_liger", True)):
+        batch = int(_get(train, "per_device_train_batch_size", 1))
+        vocab = int(getattr(text_cfg, "vocab_size", 0) or 0)
         plan.warnings.append(
             f"use_liger is off: unfused CE over vocab={vocab:,} adds "
             f"{logits / GIB:.1f} GiB at batch={batch}, seq={seq_len}."
         )
 
+
+def _estimate_disk(plan: Plan, train: DictConfig, trainable_bytes_per: int) -> None:
+    """Fill `plan.disk` with weights, datasets, env and retained checkpoints."""
     # A checkpoint is model.safetensors + optimizer.pt, and both scale with the
     # whole *trainable* stack rather than the projector: ASRModel.state_dict
     # serializes the language model too whenever freeze_language_model is false
@@ -494,6 +530,7 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
     # param. save_total_limit copies sit on disk simultaneously, so retention
     # multiplies -- charging one projector-sized checkpoint understated a joint
     # fine-tune by ~500x.
+    trainable_params = sum(c.params for c in plan.components if c.trainable)
     keep = max(int(_get(train, "save_total_limit", 1) or 1), 1)
     ckpt_each = trainable_params * trainable_bytes_per * (1 + OPTIMIZER_STATES)
     ckpt_bytes = ckpt_each * keep
@@ -518,11 +555,216 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
             "container disk. Attach a network volume (--network-volume-id) or cut the "
             "dataset mix; `datasets` needs room for parquet AND arrow at once."
         )
+
+
+def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
+    """Resolve a training config and measure its parameter, VRAM and disk footprint."""
+    # Imported lazily: transformers + tiny_audio cost several seconds, which
+    # every `ta runpod` command would otherwise pay because runpod.py imports
+    # this module.
+    auto_config: type[AutoConfig] = importlib.import_module("transformers").AutoConfig
+
+    cfg = _load_cfg(experiment, overrides)
+    plan = Plan()
+    train = cfg.training
+
+    audio_id = str(cfg.model.audio_model_id)
+    text_id = str(cfg.model.text_model_id)
+    enc_cfg = auto_config.from_pretrained(audio_id)
+    enc_inner = getattr(enc_cfg, "encoder_config", None) or enc_cfg
+    dec_cfg = auto_config.from_pretrained(text_id)
+    text_cfg = dec_cfg.get_text_config() if hasattr(dec_cfg, "get_text_config") else dec_cfg
+    encoder_dim = hidden_dim(enc_inner)
+    llm_dim = hidden_dim(text_cfg)
+
+    trainable_blocks = _add_encoder(plan, train, audio_id, enc_inner)
+    dec_trainable = _add_decoder(plan, cfg, text_id, text_cfg)
+    _add_projector(plan, cfg.model, encoder_dim, llm_dim, audio_id, text_id)
+    _add_datasets(plan, cfg.data)
+
+    prec = _precision(cfg)
+    enc_acts = _encoder_activation_bytes(cfg, trainable_blocks, encoder_dim or 0, prec.activations)
+    acts = _decoder_activation_bytes(train, text_cfg, llm_dim or 0, seq_len, prec.activations)
+    acts += enc_acts
+    logits = _cross_entropy_bytes(train, text_cfg, seq_len)
+    _estimate_vram(plan, prec, acts, enc_acts, logits)
+    _add_vram_warnings(plan, train, dec_trainable, logits, seq_len, text_cfg)
+    _estimate_disk(plan, train, prec.trainable)
     return plan
 
 
 def _fmt(n: float) -> str:
     return f"{n:,.2f} GiB"
+
+
+def _print_plan_json(plan: Plan, experiment: str) -> None:
+    """Print the plan as machine-readable JSON (`--json`)."""
+    print(
+        json.dumps(
+            {
+                "experiment": experiment,
+                "vram_gib": plan.vram,
+                "disk_gib": plan.disk,
+                "components": [
+                    {
+                        "name": c.name,
+                        "params": c.params,
+                        "download_gib": c.download_bytes / GIB,
+                        "trainable": c.trainable,
+                    }
+                    for c in plan.components
+                ],
+                "warnings": plan.warnings,
+            },
+            indent=2,
+        )
+    )
+
+
+def _print_plan_tables(plan: Plan, experiment: str, seq_len: int) -> None:
+    """Print the component, dataset, GPU-memory and disk tables plus any warnings."""
+    print(f"\n=== Resource plan: +experiments={experiment} (seq_len={seq_len}) ===\n")
+    print(f"{'component':<52} {'params':>14} {'download':>11}  train")
+    for c in plan.components:
+        print(
+            f"{c.name[:52]:<52} {c.params:>14,} "
+            f"{c.download_bytes / GIB:>10.2f}G  {'yes' if c.trainable else 'no'}"
+        )
+
+    if plan.dataset_rows:
+        print(f"\n{'dataset':<52} {'download':>11}")
+        for name, size in sorted(plan.dataset_rows, key=lambda r: -r[1]):
+            print(f"{name[:52]:<52} {size / GIB:>10.2f}G")
+
+    print("\n--- GPU memory ---")
+    for k, v in plan.vram.items():
+        print(f"  {k:<38} {_fmt(v)}")
+    print("\n--- Disk ---")
+    for k, v in plan.disk.items():
+        print(f"  {k:<38} {_fmt(v)}")
+
+    for w in plan.warnings:
+        print(f"\n  ! {w}")
+
+
+def _print_gpu_choice(
+    need_gib: float,
+    placeable: list[tuple[int, str]],
+    fitting: list[tuple[int, str]],
+    needs_volume: bool,
+) -> None:
+    """Report the chosen GPU, the runners-up, and any excluded for lack of volumes."""
+    vram_gib, gpu = placeable[0]
+    why = " with network-volume support" if needs_volume else ""
+    print(f"  Cheapest listed GPU that fits {need_gib:.0f} GiB{why}: {gpu} ({vram_gib} GB)")
+    others = ", ".join(f"{g} ({v} GB)" for v, g in placeable[1:6])
+    if others:
+        print(f"  Also fit (--gpu to override): {others}")
+    skipped = [g for v, g in fitting if (v, g) not in placeable]
+    if skipped:
+        print(f"  Fit on VRAM but have no volume-capable datacenter: {', '.join(skipped[:6])}")
+    print()
+
+
+def _pick_gpu(plan: Plan, needs_volume: bool) -> str:
+    """Choose the cheapest listed GPU that fits the VRAM estimate (and volume needs)."""
+    # Pick the GPU from the VRAM estimate rather than defaulting to an H100.
+    # This recipe needs ~36 GiB; an 80 GB H100 is roughly 2x the card and
+    # several times the price of the smallest part that fits. `gpu_catalog.available_gpus`
+    # returns fitting types smallest-first, which approximates cheapest-first
+    # (the catalog exposes no price field).
+    #
+    # When the run needs a network volume, the choice is JOINTLY constrained:
+    # the GPU has to exist in a datacenter that also supports volumes. Picking
+    # on VRAM alone selects e.g. an A40, whose datacenters have no volume
+    # support, and then there is nowhere to put 1.5 TiB.
+    need_gib = plan.vram["recommended (x1.25)"]
+    fitting = gpu_catalog.available_gpus(need_gib)
+    placeable = [
+        (vram_gib, gpu_id)
+        for vram_gib, gpu_id in fitting
+        if not needs_volume or gpu_catalog.datacenters_for_gpu(gpu_id, require_network_volume=True)
+    ]
+    if placeable:
+        _print_gpu_choice(need_gib, placeable, fitting, needs_volume)
+        return placeable[0][1]
+    if fitting:
+        vram_gib, gpu = fitting[0]
+        print(
+            f"  {gpu} ({vram_gib} GB) fits, but no datacenter offering it also\n"
+            f"  supports network volumes. Either cut the dataset mix below\n"
+            f"  {NETWORK_VOLUME_THRESHOLD_GB} GB, or override --gpu.\n"
+        )
+        return gpu
+    gpu = "NVIDIA H100 80GB HBM3"
+    print(f"  No listed GPU reports enough VRAM for {need_gib:.0f} GiB; falling back to {gpu}.\n")
+    return gpu
+
+
+def _volume_datacenter(gpu: str) -> str:
+    """List the datacenters offering `gpu` with volume support; return the one to use."""
+    dcs = gpu_catalog.datacenters_for_gpu(gpu, require_network_volume=True)
+    excluded = [
+        d
+        for d, _, _ in gpu_catalog.datacenters_for_gpu(gpu)
+        if d not in gpu_catalog.NETWORK_VOLUME_DATACENTERS
+    ]
+    if not dcs:
+        print(
+            "  No datacenter both offers this GPU and supports network volumes\n"
+            "  (or `runpodctl datacenter list` could not be read). Substitute a\n"
+            "  datacenter id below after checking `runpodctl datacenter list`.\n"
+        )
+        return "<DC_ID>"
+    print(f"  Datacenters with {gpu} AND network-volume support:")
+    for dc_id, loc, stock in dcs:
+        print(f"    {dc_id:<12} {loc:<22} stock: {stock or 'unreported'}")
+    if excluded:
+        print(f"\n  Has the GPU but NO network-volume support, so excluded: {', '.join(excluded)}")
+    print(
+        "\n  A network volume is pinned to one datacenter and a pod can only\n"
+        "  mount a volume in its own, so both commands below use the same id.\n"
+        "  If creation is refused, the error lists the currently supported\n"
+        "  datacenters -- refresh NETWORK_VOLUME_DATACENTERS in gpu_catalog.py.\n"
+    )
+    return dcs[0][0]
+
+
+def _print_volume_provision(plan: Plan, experiment: str, gpu: str, image: str) -> None:
+    """Print the network-volume + pod commands for a run too big for a container disk."""
+    # Everything that grows lives on /workspace (HF_HOME and
+    # HF_DATASETS_CACHE both point there), so a network volume absorbs the
+    # whole figure and the container disk only has to hold the image plus
+    # the python env. Asking for a >1 TB container disk is the usual cause
+    # of "no instances available" on every GPU type -- container disks come
+    # from host-local storage.
+    vol_gb = min(int(plan.disk["recommended"] * 1.15) + 5, NETWORK_VOLUME_MAX_GB)
+    vol_name = f"tiny-audio-{experiment}"
+    capped = vol_gb >= NETWORK_VOLUME_MAX_GB
+    dc_id = _volume_datacenter(gpu)
+
+    print(
+        f"  # 1. create the volume (size in GB; max {NETWORK_VOLUME_MAX_GB}):\n"
+        f"  runpodctl network-volume create --name {vol_name} \\\n"
+        f"    --size {vol_gb} --data-center-id {dc_id}\n\n"
+        f"  # 2. create the pod in that SAME datacenter, attaching the volume:\n"
+        f"  runpodctl pod create --name tiny-audio-{experiment} \\\n"
+        f'    --gpu-id "{gpu}" --image {image} \\\n'
+        f"    --network-volume-id <VOLUME_ID> --data-center-ids {dc_id} \\\n"
+        f"    --container-disk-in-gb {CONTAINER_DISK_WITH_VOLUME_GB} --ports '22/tcp' \\\n"
+        f'    --env "{{\\"SSH_PUBLIC_KEY\\":\\"$(cat ~/.ssh/id_ed25519.pub)\\"}}"\n'
+    )
+    if capped:
+        print(
+            f"  ! {plan.disk['recommended'] / 1024:.2f} TiB needed but a RunPod network "
+            f"volume\n    caps at {NETWORK_VOLUME_MAX_GB} GB. Cut the dataset mix, or stage "
+            "sources\n    across runs -- this will not fit on one volume.\n"
+        )
+    print(
+        f"  Container disk stays at {CONTAINER_DISK_WITH_VOLUME_GB} GB on purpose: with the\n"
+        f"  volume mounted at /workspace, weights and datasets land there, and the\n"
+        f"  container disk only holds the image and the python env.\n"
+    )
 
 
 def plan_command(
@@ -549,166 +791,19 @@ def plan_command(
     plan = build_plan(experiment, list(overrides or []), seq_len)
 
     if as_json:
-        print(
-            json.dumps(
-                {
-                    "experiment": experiment,
-                    "vram_gib": plan.vram,
-                    "disk_gib": plan.disk,
-                    "components": [
-                        {
-                            "name": c.name,
-                            "params": c.params,
-                            "download_gib": c.download_bytes / GIB,
-                            "trainable": c.trainable,
-                        }
-                        for c in plan.components
-                    ],
-                    "warnings": plan.warnings,
-                },
-                indent=2,
-            )
-        )
+        _print_plan_json(plan, experiment)
         return None
 
-    print(f"\n=== Resource plan: +experiments={experiment} (seq_len={seq_len}) ===\n")
-    print(f"{'component':<52} {'params':>14} {'download':>11}  train")
-    for c in plan.components:
-        print(
-            f"{c.name[:52]:<52} {c.params:>14,} "
-            f"{c.download_bytes / GIB:>10.2f}G  {'yes' if c.trainable else 'no'}"
-        )
-
-    if plan.dataset_rows:
-        print(f"\n{'dataset':<52} {'download':>11}")
-        for name, size in sorted(plan.dataset_rows, key=lambda r: -r[1]):
-            print(f"{name[:52]:<52} {size / GIB:>10.2f}G")
-
-    print("\n--- GPU memory ---")
-    for k, v in plan.vram.items():
-        print(f"  {k:<38} {_fmt(v)}")
-    print("\n--- Disk ---")
-    for k, v in plan.disk.items():
-        print(f"  {k:<38} {_fmt(v)}")
-
-    for w in plan.warnings:
-        print(f"\n  ! {w}")
+    _print_plan_tables(plan, experiment, seq_len)
 
     disk_gb = int(plan.disk["recommended"] * 1.15) + 5
     print("\n--- Provision ---")
-
-    # Pick the GPU from the VRAM estimate rather than defaulting to an H100.
-    # This recipe needs ~36 GiB; an 80 GB H100 is roughly 2x the card and
-    # several times the price of the smallest part that fits. `gpu_catalog.available_gpus`
-    # returns fitting types smallest-first, which approximates cheapest-first
-    # (the catalog exposes no price field).
-    #
-    # When the run needs a network volume, the choice is JOINTLY constrained:
-    # the GPU has to exist in a datacenter that also supports volumes. Picking
-    # on VRAM alone selects e.g. an A40, whose datacenters have no volume
-    # support, and then there is nowhere to put 1.5 TiB.
     needs_volume = disk_gb > NETWORK_VOLUME_THRESHOLD_GB
     if gpu is None:
-        fitting = gpu_catalog.available_gpus(plan.vram["recommended (x1.25)"])
-        placeable = [
-            (vram_gib, gpu_id)
-            for vram_gib, gpu_id in fitting
-            if not needs_volume
-            or gpu_catalog.datacenters_for_gpu(gpu_id, require_network_volume=True)
-        ]
-        if placeable:
-            vram_gib, gpu = placeable[0]
-            why = " with network-volume support" if needs_volume else ""
-            print(
-                f"  Cheapest listed GPU that fits "
-                f"{plan.vram['recommended (x1.25)']:.0f} GiB{why}: {gpu} ({vram_gib} GB)"
-            )
-            others = ", ".join(f"{g} ({v} GB)" for v, g in placeable[1:6])
-            if others:
-                print(f"  Also fit (--gpu to override): {others}")
-            skipped = [g for v, g in fitting if (v, g) not in placeable]
-            if skipped:
-                print(
-                    f"  Fit on VRAM but have no volume-capable datacenter: {', '.join(skipped[:6])}"
-                )
-            print()
-        elif fitting:
-            vram_gib, gpu = fitting[0]
-            print(
-                f"  {gpu} ({vram_gib} GB) fits, but no datacenter offering it also\n"
-                f"  supports network volumes. Either cut the dataset mix below\n"
-                f"  {NETWORK_VOLUME_THRESHOLD_GB} GB, or override --gpu.\n"
-            )
-        else:
-            gpu = "NVIDIA H100 80GB HBM3"
-            print(
-                f"  No listed GPU reports enough VRAM for "
-                f"{plan.vram['recommended (x1.25)']:.0f} GiB; falling back to {gpu}.\n"
-            )
+        gpu = _pick_gpu(plan, needs_volume)
 
-    if disk_gb > NETWORK_VOLUME_THRESHOLD_GB:
-        # Everything that grows lives on /workspace (HF_HOME and
-        # HF_DATASETS_CACHE both point there), so a network volume absorbs the
-        # whole figure and the container disk only has to hold the image plus
-        # the python env. Asking for a >1 TB container disk is the usual cause
-        # of "no instances available" on every GPU type -- container disks come
-        # from host-local storage.
-        vol_gb = min(int(plan.disk["recommended"] * 1.15) + 5, NETWORK_VOLUME_MAX_GB)
-        vol_name = f"tiny-audio-{experiment}"
-        capped = vol_gb >= NETWORK_VOLUME_MAX_GB
-
-        dcs = gpu_catalog.datacenters_for_gpu(gpu, require_network_volume=True)
-        excluded = [
-            d
-            for d, _, _ in gpu_catalog.datacenters_for_gpu(gpu)
-            if d not in gpu_catalog.NETWORK_VOLUME_DATACENTERS
-        ]
-        if dcs:
-            print(f"  Datacenters with {gpu} AND network-volume support:")
-            for dc_id, loc, stock in dcs:
-                print(f"    {dc_id:<12} {loc:<22} stock: {stock or 'unreported'}")
-            if excluded:
-                print(
-                    f"\n  Has the GPU but NO network-volume support, so excluded: "
-                    f"{', '.join(excluded)}"
-                )
-            print(
-                "\n  A network volume is pinned to one datacenter and a pod can only\n"
-                "  mount a volume in its own, so both commands below use the same id.\n"
-                "  If creation is refused, the error lists the currently supported\n"
-                "  datacenters -- refresh NETWORK_VOLUME_DATACENTERS in gpu_catalog.py.\n"
-            )
-            dc_id = dcs[0][0]
-        else:
-            print(
-                "  No datacenter both offers this GPU and supports network volumes\n"
-                "  (or `runpodctl datacenter list` could not be read). Substitute a\n"
-                "  datacenter id below after checking `runpodctl datacenter list`.\n"
-            )
-            dc_id = "<DC_ID>"
-
-        print(
-            f"  # 1. create the volume (size in GB; max {NETWORK_VOLUME_MAX_GB}):\n"
-            f"  runpodctl network-volume create --name {vol_name} \\\n"
-            f"    --size {vol_gb} --data-center-id {dc_id}\n\n"
-            f"  # 2. create the pod in that SAME datacenter, attaching the volume:\n"
-            f"  runpodctl pod create --name tiny-audio-{experiment} \\\n"
-            f'    --gpu-id "{gpu}" --image {image} \\\n'
-            f"    --network-volume-id <VOLUME_ID> --data-center-ids {dc_id} \\\n"
-            f"    --container-disk-in-gb {CONTAINER_DISK_WITH_VOLUME_GB} --ports '22/tcp' \\\n"
-            f'    --env "{{\\"SSH_PUBLIC_KEY\\":\\"$(cat ~/.ssh/id_ed25519.pub)\\"}}"\n'
-        )
-        if capped:
-            print(
-                f"  ! {plan.disk['recommended'] / 1024:.2f} TiB needed but a RunPod network "
-                f"volume\n    caps at {NETWORK_VOLUME_MAX_GB} GB. Cut the dataset mix, or stage "
-                "sources\n    across runs -- this will not fit on one volume.\n"
-            )
-        print(
-            f"  Container disk stays at {CONTAINER_DISK_WITH_VOLUME_GB} GB on purpose: with the\n"
-            f"  volume mounted at /workspace, weights and datasets land there, and the\n"
-            f"  container disk only holds the image and the python env.\n"
-        )
+    if needs_volume:
+        _print_volume_provision(plan, experiment, gpu, image)
     else:
         print(
             f"  runpodctl pod create --name tiny-audio-{experiment} \\\n"

@@ -18,6 +18,118 @@ from scripts.eval.audio import LazyAudioDecoder, is_str_dict
 from .base import Evaluator, EvaluatorOptions, Transcription, console
 
 
+def _swift_package_dir() -> Path:
+    """Locate the tiny-audio-swift package root (TINY_AUDIO_SWIFT_DIR or the default)."""
+    swift_dir = Path(
+        os.environ.get(
+            "TINY_AUDIO_SWIFT_DIR",
+            Path.home() / "Code" / "ios" / "tiny-audio-swift" / "swift",
+        )
+    ).expanduser()
+    if not (swift_dir / "Package.swift").exists():
+        msg = (
+            f"Swift package not found at {swift_dir}. Set TINY_AUDIO_SWIFT_DIR "
+            f"to the path containing Package.swift (the tiny-audio-swift "
+            f"checkout's swift/ directory)."
+        )
+        raise RuntimeError(msg)
+    return swift_dir
+
+
+def _run_swift_build(args: list[str], failure: str) -> None:
+    """Run a `swift build` invocation, raising with its output if it fails."""
+    result = subprocess.run(
+        check=False,
+        args=args,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        msg = f"{failure}:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        raise RuntimeError(msg)
+
+
+def _build_eval_binary(swift_dir: Path) -> Path:
+    """Build the test bundle (for mlx.metallib) and the release eval binary; return it."""
+    # Build the debug test bundle first: SwiftPM only emits `mlx.metallib`
+    # for XCTest targets, not standalone executables. Cheap when up-to-date.
+    console.print("[bold cyan]Building Swift tests (for mlx.metallib)...[/bold cyan]")
+    _run_swift_build(
+        ["swift", "build", "--package-path", str(swift_dir), "--build-tests"],
+        "swift build --build-tests failed",
+    )
+
+    # Always rebuild release before running. Cheap when up-to-date.
+    console.print("[bold cyan]Building tiny-audio-swift-eval (release)...[/bold cyan]")
+    _run_swift_build(
+        [
+            "swift",
+            "build",
+            "--package-path",
+            str(swift_dir),
+            "-c",
+            "release",
+            "--product",
+            "tiny-audio-swift-eval",
+        ],
+        "swift build failed",
+    )
+
+    binary = swift_dir / ".build" / "release" / "tiny-audio-swift-eval"
+    if not binary.exists():
+        msg = f"tiny-audio-swift-eval binary missing after build: {binary}"
+        raise RuntimeError(msg)
+    return binary
+
+
+def _fallback_metallib(arch: str) -> Path | None:
+    """Find a same-layout mlx.metallib in another tiny-audio-swift checkout on disk."""
+    xctest_subpath = (
+        f"swift/.build/{arch}-apple-macosx/debug/"
+        "TinyAudioPackageTests.xctest/Contents/MacOS/mlx.metallib"
+    )
+    # Search siblings + worktrees, e.g. ~/Code/tiny-audio*/swift/.build/...
+    for pattern in (f"*/{xctest_subpath}", f"*/.claude/worktrees/*/{xctest_subpath}"):
+        for candidate in (Path.home() / "Code").glob(pattern):
+            return candidate
+    return None
+
+
+def _ensure_metallib(binary: Path, swift_dir: Path) -> None:
+    """Copy mlx.metallib next to the release binary if it is not already there."""
+    # Copy mlx.metallib next to the release binary so MLX can find it at
+    # runtime. The metallib should land in the debug test bundle after
+    # `swift build --build-tests`, but mlx-swift's build process is flaky
+    # about generating it in fresh checkouts. Fall back to scanning other
+    # tiny-audio-swift checkouts on disk for a same-version metallib.
+    metallib_dst = binary.parent / "mlx.metallib"
+    if metallib_dst.exists():
+        return
+    arch = platform.machine()  # "arm64" on Apple Silicon, "x86_64" on Intel
+    primary_src = (
+        swift_dir
+        / ".build"
+        / f"{arch}-apple-macosx"
+        / "debug"
+        / "TinyAudioPackageTests.xctest"
+        / "Contents"
+        / "MacOS"
+        / "mlx.metallib"
+    )
+    metallib_src = primary_src if primary_src.exists() else _fallback_metallib(arch)
+    if metallib_src is None:
+        msg = (
+            f"mlx.metallib not found at {primary_src} and no fallback "
+            "metallib located on disk. mlx-swift's build process did not "
+            "emit one. Workaround: copy a working `mlx.metallib` from "
+            "another tiny-audio-swift checkout's debug test bundle into "
+            f"{primary_src}, then re-run."
+        )
+        raise RuntimeError(msg)
+    shutil.copy2(str(metallib_src), str(metallib_dst))
+    console.print(f"[dim]Copied mlx.metallib from {metallib_src} to binary directory[/dim]")
+
+
 class SwiftSDKEvaluator(Evaluator):
     """Evaluator for the TinyAudio Swift SDK on Apple Silicon.
 
@@ -61,114 +173,13 @@ class SwiftSDKEvaluator(Evaluator):
                 "(loads bundled HF weights — pass swift://<path> to override)[/dim]"
             )
 
-        swift_dir = Path(
-            os.environ.get(
-                "TINY_AUDIO_SWIFT_DIR",
-                Path.home() / "Code" / "ios" / "tiny-audio-swift" / "swift",
-            )
-        ).expanduser()
-        if not (swift_dir / "Package.swift").exists():
-            msg = (
-                f"Swift package not found at {swift_dir}. Set TINY_AUDIO_SWIFT_DIR "
-                f"to the path containing Package.swift (the tiny-audio-swift "
-                f"checkout's swift/ directory)."
-            )
-            raise RuntimeError(msg)
-        swift_build = swift_dir / ".build"
+        swift_dir = _swift_package_dir()
+        binary = _build_eval_binary(swift_dir)
+        _ensure_metallib(binary, swift_dir)
+        self._spawn(binary)
 
-        # Build the debug test bundle first: SwiftPM only emits `mlx.metallib`
-        # for XCTest targets, not standalone executables. Cheap when up-to-date.
-        console.print("[bold cyan]Building Swift tests (for mlx.metallib)...[/bold cyan]")
-        test_build_result = subprocess.run(
-            ["swift", "build", "--package-path", str(swift_dir), "--build-tests"],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if test_build_result.returncode != 0:
-            msg = (
-                "swift build --build-tests failed:\n"
-                f"stdout:\n{test_build_result.stdout}\n"
-                f"stderr:\n{test_build_result.stderr}"
-            )
-            raise RuntimeError(msg)
-
-        # Always rebuild release before running. Cheap when up-to-date.
-        console.print("[bold cyan]Building tiny-audio-swift-eval (release)...[/bold cyan]")
-        build_result = subprocess.run(
-            check=False,
-            args=[
-                "swift",
-                "build",
-                "--package-path",
-                str(swift_dir),
-                "-c",
-                "release",
-                "--product",
-                "tiny-audio-swift-eval",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        if build_result.returncode != 0:
-            msg = (
-                "swift build failed:\n"
-                f"stdout:\n{build_result.stdout}\n"
-                f"stderr:\n{build_result.stderr}"
-            )
-            raise RuntimeError(msg)
-
-        binary = swift_build / "release" / "tiny-audio-swift-eval"
-        if not binary.exists():
-            msg = f"tiny-audio-swift-eval binary missing after build: {binary}"
-            raise RuntimeError(msg)
-
-        # Copy mlx.metallib next to the release binary so MLX can find it at
-        # runtime. The metallib should land in the debug test bundle after
-        # `swift build --build-tests`, but mlx-swift's build process is flaky
-        # about generating it in fresh checkouts. Fall back to scanning other
-        # tiny-audio-swift checkouts on disk for a same-version metallib.
-        binary_dir = binary.parent
-        metallib_dst = binary_dir / "mlx.metallib"
-        if not metallib_dst.exists():
-            arch = platform.machine()  # "arm64" on Apple Silicon, "x86_64" on Intel
-            primary_src = (
-                swift_build
-                / f"{arch}-apple-macosx"
-                / "debug"
-                / "TinyAudioPackageTests.xctest"
-                / "Contents"
-                / "MacOS"
-                / "mlx.metallib"
-            )
-            metallib_src: Path | None = primary_src if primary_src.exists() else None
-            if metallib_src is None:
-                xctest_subpath = (
-                    f"swift/.build/{arch}-apple-macosx/debug/"
-                    "TinyAudioPackageTests.xctest/Contents/MacOS/mlx.metallib"
-                )
-                # Search siblings + worktrees, e.g. ~/Code/tiny-audio*/swift/.build/...
-                for candidate in (Path.home() / "Code").glob(f"*/{xctest_subpath}"):
-                    metallib_src = candidate
-                    break
-                if metallib_src is None:
-                    for candidate in (Path.home() / "Code").glob(
-                        f"*/.claude/worktrees/*/{xctest_subpath}"
-                    ):
-                        metallib_src = candidate
-                        break
-            if metallib_src is None:
-                msg = (
-                    f"mlx.metallib not found at {primary_src} and no fallback "
-                    "metallib located on disk. mlx-swift's build process did not "
-                    "emit one. Workaround: copy a working `mlx.metallib` from "
-                    "another tiny-audio-swift checkout's debug test bundle into "
-                    f"{primary_src}, then re-run."
-                )
-                raise RuntimeError(msg)
-            shutil.copy2(str(metallib_src), str(metallib_dst))
-            console.print(f"[dim]Copied mlx.metallib from {metallib_src} to binary directory[/dim]")
-
+    def _spawn(self, binary: Path) -> None:
+        """Start the persistent eval binary and wait for its ready handshake."""
         cmd = [str(binary)]
         console.print(f"[bold cyan]Spawning Swift SDK eval subprocess:[/bold cyan] {' '.join(cmd)}")
 

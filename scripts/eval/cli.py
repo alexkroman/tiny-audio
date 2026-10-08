@@ -2,10 +2,11 @@
 
 import re
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, NamedTuple
 from urllib.parse import urlparse
 
 import typer
@@ -221,6 +222,131 @@ _NON_LOCAL_MODELS = frozenset(
 )
 
 
+class _HostedBackend(NamedTuple):
+    """A hosted-API backend that needs only an API key and a worker count."""
+
+    model_id: str
+    evaluator_cls: Callable[..., Evaluator]
+    option: str
+    env_var: str
+
+
+_HOSTED_BACKENDS: dict[str, _HostedBackend] = {
+    "deepgram": _HostedBackend(
+        "nova-3", DeepgramEvaluator, "--deepgram-api-key", "DEEPGRAM_API_KEY"
+    ),
+    "elevenlabs": _HostedBackend(
+        "scribe-v2", ElevenLabsEvaluator, "--elevenlabs-api-key", "ELEVENLABS_API_KEY"
+    ),
+    "smallest": _HostedBackend(
+        "smallest-pulse", SmallestEvaluator, "--smallest-api-key", "SMALLEST_API_KEY"
+    ),
+}
+
+
+def _reject_local_code(model: str, endpoint: bool) -> None:
+    """Fail on --local-code for a backend that runs no tiny_audio code."""
+    if endpoint or model in _NON_LOCAL_MODELS or model.startswith("swift://"):
+        msg = (
+            f"--local-code has no meaning for --model {model!r}: it swaps the "
+            "modeling code bundled with a checkpoint for this checkout's, and "
+            "this backend runs no tiny_audio code. Drop the flag."
+        )
+        raise typer.BadParameter(msg)
+
+
+def _build_assemblyai_evaluator(
+    *,
+    streaming: bool,
+    assemblyai_model: AssemblyAIModel,
+    api_key: str | None,
+    base_url: str | None,
+    num_workers: int,
+) -> tuple[str, Evaluator]:
+    """Build the AssemblyAI batch or streaming evaluator."""
+    key = _require_api_key(api_key, "--assemblyai-api-key", "ASSEMBLYAI_API_KEY")
+    if streaming:
+        return "universal-streaming", AssemblyAIStreamingEvaluator(
+            api_key=key,
+            num_workers=num_workers,
+        )
+    return assemblyai_model.value, AssemblyAIEvaluator(
+        api_key=key,
+        model=assemblyai_model.value,
+        base_url=base_url,
+        num_workers=num_workers,
+    )
+
+
+def _build_swift_evaluator(model: str) -> tuple[str, Evaluator]:
+    """Build the Swift SDK evaluator for `swift` or `swift://<local bundle dir>`."""
+    suffix = model[len("swift://") :] if model.startswith("swift://") else ""
+    # Path-like suffix → load that local bundle (TINY_AUDIO_LOCAL_MODEL_DIR
+    # path: the Swift binary actually honors this).
+    # Empty suffix → load the Swift SDK's pinned default bundle.
+    # Anything else (a repo id) is rejected — the Swift binary ignores
+    # `repo_id`, which previously produced output dirs labeled with a
+    # model that was never actually evaluated.
+    if suffix.startswith(("/", "~", "./", "../")):
+        model_dir = Path(suffix).expanduser().resolve()
+        if not model_dir.is_dir():
+            msg = f"swift:// path does not resolve to a directory: {model_dir}"
+            raise typer.BadParameter(msg)
+        return f"swift-local-{model_dir.name}", SwiftSDKEvaluator(
+            model_dir=model_dir,
+        )
+    if suffix == "":
+        return "swift-default-bundle", SwiftSDKEvaluator()
+    msg = (
+        f"swift://{suffix!r} is not supported — the Swift binary loads "
+        "the SDK-pinned bundle and ignores arbitrary repo ids, so this "
+        "form would silently evaluate the default bundle while labeling "
+        "outputs with your repo id (see asr_pipeline.py docstring).\n\n"
+        "To evaluate that model via the Swift SDK, build a local bundle "
+        "from it first:\n"
+        "  cd ~/Code/ios/tiny-audio-swift\n"
+        f"  poetry run python -m scripts.bundle.cli build-bundle --projector {suffix}\n"
+        "  cd -\n"
+        "  ta eval -m "
+        "swift://~/Code/ios/tiny-audio-swift/swift/Sources/TinyAudio/Resources/Model "
+        "-d ...\n\n"
+        "Or evaluate the HF checkpoint directly (PyTorch path, no Swift):\n"
+        f"  ta eval -m {suffix} -d ..."
+    )
+    raise typer.BadParameter(msg)
+
+
+def _build_tiny_audio_evaluator(
+    *,
+    model: str,
+    endpoint: bool,
+    streaming: bool,
+    num_workers: int,
+    user_prompt: str | None,
+    local_code: bool,
+) -> tuple[str, Evaluator]:
+    """Build an evaluator for a tiny_audio checkpoint: HF endpoint, streaming or local."""
+    model_id = get_model_name(model)
+    if endpoint:
+        return model_id, EndpointEvaluator(
+            endpoint_url=model,
+        )
+    if streaming:
+        return model_id, LocalStreamingEvaluator(
+            model_path=model,
+            user_prompt=user_prompt,
+            local_code=local_code,
+        )
+    # Threads share one model, each making batch-1 calls. LocalEvaluator
+    # clamps this to 1 on MPS, where concurrent Metal encoding segfaults.
+    return model_id, LocalEvaluator(
+        model_path=model,
+        user_prompt=user_prompt,
+        local_code=local_code,
+        num_workers=num_workers,
+    )
+
+
 def _build_evaluator(
     *,
     model: str,
@@ -252,125 +378,45 @@ def _build_evaluator(
     instance serves every dataset. Anything an evaluator accumulates across
     `transcribe` calls must be cleared in `_reset_run_state`.
     """
-    evaluator: Evaluator
     # Checked before anything is constructed, so the error lands before an API
     # client, a Swift build or an SFSpeechRecognizer authorization. A silent
     # no-op would be the worse failure: --local-code exists to make a working
     # tree edit visible in the WER, and ignoring it on a backend that has no
     # local code at all would read as "my change did nothing".
-    if local_code and (endpoint or model in _NON_LOCAL_MODELS or model.startswith("swift://")):
-        msg = (
-            f"--local-code has no meaning for --model {model!r}: it swaps the "
-            "modeling code bundled with a checkpoint for this checkout's, and "
-            "this backend runs no tiny_audio code. Drop the flag."
-        )
-        raise typer.BadParameter(msg)
+    if local_code:
+        _reject_local_code(model, endpoint)
 
     if model == "assemblyai":
-        api_key = _require_api_key(assemblyai_api_key, "--assemblyai-api-key", "ASSEMBLYAI_API_KEY")
-
-        if streaming:
-            model_id = "universal-streaming"
-            evaluator = AssemblyAIStreamingEvaluator(
-                api_key=api_key,
-                num_workers=num_workers,
-            )
-        else:
-            model_id = assemblyai_model.value
-            evaluator = AssemblyAIEvaluator(
-                api_key=api_key,
-                model=assemblyai_model.value,
-                base_url=base_url,
-                num_workers=num_workers,
-            )
-    elif model == "deepgram":
-        api_key = _require_api_key(deepgram_api_key, "--deepgram-api-key", "DEEPGRAM_API_KEY")
-        model_id = "nova-3"
-        evaluator = DeepgramEvaluator(
-            api_key=api_key,
+        return _build_assemblyai_evaluator(
+            streaming=streaming,
+            assemblyai_model=assemblyai_model,
+            api_key=assemblyai_api_key,
+            base_url=base_url,
             num_workers=num_workers,
         )
-    elif model == "elevenlabs":
-        api_key = _require_api_key(elevenlabs_api_key, "--elevenlabs-api-key", "ELEVENLABS_API_KEY")
-        model_id = "scribe-v2"
-        evaluator = ElevenLabsEvaluator(
-            api_key=api_key,
-            num_workers=num_workers,
-        )
-    elif model == "smallest":
-        api_key = _require_api_key(smallest_api_key, "--smallest-api-key", "SMALLEST_API_KEY")
-        model_id = "smallest-pulse"
-        evaluator = SmallestEvaluator(
-            api_key=api_key,
-            num_workers=num_workers,
-        )
-    elif model == "apple-speech":
-        model_id = "apple-speech"
-        evaluator = AppleSpeechEvaluator(
+    hosted = _HOSTED_BACKENDS.get(model)
+    if hosted is not None:
+        api_keys = {
+            "deepgram": deepgram_api_key,
+            "elevenlabs": elevenlabs_api_key,
+            "smallest": smallest_api_key,
+        }
+        api_key = _require_api_key(api_keys[model], hosted.option, hosted.env_var)
+        return hosted.model_id, hosted.evaluator_cls(api_key=api_key, num_workers=num_workers)
+    if model == "apple-speech":
+        return "apple-speech", AppleSpeechEvaluator(
             locale=locale,
         )
-    elif model == "swift" or model.startswith("swift://"):
-        suffix = model[len("swift://") :] if model.startswith("swift://") else ""
-        # Path-like suffix → load that local bundle (TINY_AUDIO_LOCAL_MODEL_DIR
-        # path: the Swift binary actually honors this).
-        # Empty suffix → load the Swift SDK's pinned default bundle.
-        # Anything else (a repo id) is rejected — the Swift binary ignores
-        # `repo_id`, which previously produced output dirs labeled with a
-        # model that was never actually evaluated.
-        if suffix.startswith(("/", "~", "./", "../")):
-            model_dir = Path(suffix).expanduser().resolve()
-            if not model_dir.is_dir():
-                msg = f"swift:// path does not resolve to a directory: {model_dir}"
-                raise typer.BadParameter(msg)
-            model_id = f"swift-local-{model_dir.name}"
-            evaluator = SwiftSDKEvaluator(
-                model_dir=model_dir,
-            )
-        elif suffix == "":
-            model_id = "swift-default-bundle"
-            evaluator = SwiftSDKEvaluator()
-        else:
-            msg = (
-                f"swift://{suffix!r} is not supported — the Swift binary loads "
-                "the SDK-pinned bundle and ignores arbitrary repo ids, so this "
-                "form would silently evaluate the default bundle while labeling "
-                "outputs with your repo id (see asr_pipeline.py docstring).\n\n"
-                "To evaluate that model via the Swift SDK, build a local bundle "
-                "from it first:\n"
-                "  cd ~/Code/ios/tiny-audio-swift\n"
-                f"  poetry run python -m scripts.bundle.cli build-bundle --projector {suffix}\n"
-                "  cd -\n"
-                "  ta eval -m "
-                "swift://~/Code/ios/tiny-audio-swift/swift/Sources/TinyAudio/Resources/Model "
-                "-d ...\n\n"
-                "Or evaluate the HF checkpoint directly (PyTorch path, no Swift):\n"
-                f"  ta eval -m {suffix} -d ..."
-            )
-            raise typer.BadParameter(msg)
-    elif endpoint:
-        model_id = get_model_name(model)
-        evaluator = EndpointEvaluator(
-            endpoint_url=model,
-        )
-    elif streaming:
-        model_id = get_model_name(model)
-        evaluator = LocalStreamingEvaluator(
-            model_path=model,
-            user_prompt=user_prompt,
-            local_code=local_code,
-        )
-    else:
-        model_id = get_model_name(model)
-        # Threads share one model, each making batch-1 calls. LocalEvaluator
-        # clamps this to 1 on MPS, where concurrent Metal encoding segfaults.
-        evaluator = LocalEvaluator(
-            model_path=model,
-            user_prompt=user_prompt,
-            local_code=local_code,
-            num_workers=num_workers,
-        )
-
-    return model_id, evaluator
+    if model == "swift" or model.startswith("swift://"):
+        return _build_swift_evaluator(model)
+    return _build_tiny_audio_evaluator(
+        model=model,
+        endpoint=endpoint,
+        streaming=streaming,
+        num_workers=num_workers,
+        user_prompt=user_prompt,
+        local_code=local_code,
+    )
 
 
 @app.command()
