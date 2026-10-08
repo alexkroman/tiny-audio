@@ -27,42 +27,19 @@ from scripts.speaker_asr.longform import SAMPLE_RATE, LongFormResult, Turn, chun
 from tiny_audio.alignment import QwenForcedAligner
 from tiny_audio.diarization import NemotronDiarizer
 
-FRAME_S = 0.01  # Nemotron emits one activity row per 10 ms
-
 
 def assign_speakers(
     words: list[tuple[float | None, float | None]],
     activity: np.ndarray,
-    min_activity: float = 0.1,
-) -> list[int | None]:
-    """Speaker column per word: the one with the highest mean activity over its span.
+) -> list[int]:
+    """Speaker column per `(start_s, end_s)` word, by the shipped pipeline's own code.
 
-    A word with no time, or whose best speaker never reaches `min_activity`
-    (Nemotron heard nobody there), is left None for `fill_gaps`.
+    Kept speakers and the word rule are `NemotronDiarizer.top_speakers` and
+    `NemotronDiarizer.speaker_columns` -- exactly what `return_speakers=True`
+    runs in the model's pipeline -- so the eval cannot drift from it.
     """
-    out: list[int | None] = []
-    for start, end in words:
-        if start is None or end is None:
-            out.append(None)
-            continue
-        lo = min(int(start / FRAME_S), len(activity) - 1)
-        hi = max(lo + 1, min(int(np.ceil(end / FRAME_S)), len(activity)))
-        mean = activity[lo:hi].mean(axis=0)
-        best = int(mean.argmax())
-        out.append(best if mean[best] >= min_activity else None)
-    return out
-
-
-def fill_gaps(speakers: list[int | None]) -> list[int]:
-    """Unassigned words join the previous speaker (the next one at the start)."""
-    known = [s for s in speakers if s is not None]
-    if not known:
-        return [0] * len(speakers)
-    filled, last = [], known[0]
-    for s in speakers:
-        last = s if s is not None else last
-        filled.append(last)
-    return filled
+    keep = NemotronDiarizer.top_speakers(activity)
+    return NemotronDiarizer.speaker_columns(words, activity, keep)
 
 
 def time_all_words(text: str, aligned: list[dict], offset: float) -> list[tuple]:
@@ -112,7 +89,6 @@ def transcribe_diarized(
     diarizer=NemotronDiarizer,
     chunk_s: float = 25.0,
     min_chunk_s: float = 10.0,
-    min_activity: float = 0.1,
     align=None,
 ) -> LongFormResult:
     """Speaker-attributed transcript of 16 kHz mono `audio` of any length.
@@ -132,7 +108,62 @@ def transcribe_diarized(
         if text.strip():
             words += time_all_words(text, align(live, text), s / SAMPLE_RATE)
 
-    speakers = fill_gaps(assign_speakers([(a, b) for _, a, b in words], activity, min_activity))
+    speakers = assign_speakers([(a, b) for _, a, b in words], activity)
     return LongFormResult(
         group_turns(words, speakers), [(s / SAMPLE_RATE, e / SAMPLE_RATE) for s, e in bounds]
+    )
+
+
+def diarize_transcript(
+    timed_words: list[tuple[str, float, float]],
+    audio: np.ndarray,
+    diarizer=NemotronDiarizer,
+    chunk_s: float = 25.0,
+    min_chunk_s: float = 10.0,
+    align=None,
+    realign: bool = True,
+) -> LongFormResult:
+    """Nemotron speakers for a whole-recording transcript made elsewhere (a hosted API).
+
+    `timed_words` are the transcript's `(word, start_s, end_s)`. Their times
+    only place each word in a chunk (by midpoint); Qwen3-ForcedAligner then
+    re-times every chunk's words, so word timing and speaker assignment are
+    exactly `transcribe_diarized`'s and only the words differ. The transcript
+    itself is never re-chunked, so WER is the API's own.
+
+    `realign=False` skips the aligner and assigns speakers on the API's own
+    word times: the ablation that says whether re-timing helps.
+
+    """
+    import bisect
+
+    align = align or QwenForcedAligner.align
+    audio = np.asarray(audio, dtype=np.float32)
+    activity = diarizer.activity(audio)
+
+    def speakers_for(words: list[tuple]) -> list[int]:
+        return assign_speakers([(a, b) for _, a, b in words], activity)
+
+    if not realign:
+        words = list(timed_words)
+        return LongFormResult(
+            group_turns(words, speakers_for(words)), [(0.0, len(audio) / SAMPLE_RATE)]
+        )
+
+    bounds = chunk_bounds(audio, chunk_s, min_chunk_s)
+    ends = [e / SAMPLE_RATE for _, e in bounds]
+    groups: list[list[str]] = [[] for _ in bounds]
+    for word, start, end in timed_words:
+        k = min(bisect.bisect_right(ends, (start + end) / 2), len(bounds) - 1)
+        groups[k].append(word)
+
+    words: list[tuple] = []
+    for (s, e), group in zip(bounds, groups, strict=True):
+        if group:
+            text = " ".join(group)
+            words += time_all_words(text, align(audio[s:e], text), s / SAMPLE_RATE)
+
+    return LongFormResult(
+        group_turns(words, speakers_for(words)),
+        [(s / SAMPLE_RATE, e / SAMPLE_RATE) for s, e in bounds],
     )

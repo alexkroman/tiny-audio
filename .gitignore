@@ -210,3 +210,5 @@ observations.txt
 /dvc.lock
 # Git worktrees
 .worktrees/
+# Playwright MCP browser artifacts
+.playwright-mcp/

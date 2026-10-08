@@ -166,7 +166,7 @@ class TestCallPromptHandling:
             transformers.AutomaticSpeechRecognitionPipeline, "__call__", failing_call
         )
         with pytest.raises(RuntimeError, match="boom"):
-            pipeline({"array": np.zeros(16)}, user_prompt="custom")
+            pipeline({"array": np.full(16, 0.1)}, user_prompt="custom")
 
         assert seen["prompt_during_call"] == "custom"
         assert pipeline.model.TRANSCRIBE_PROMPT == "default prompt"
