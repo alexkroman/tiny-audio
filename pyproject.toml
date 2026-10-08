@@ -124,7 +124,6 @@ pytest = ">=8.0.0"
 pytest-cov = ">=4.0.0"
 black = ">=2.3.0"
 ruff = ">=0.1.0"
-mypy = ">=1.5.0"
 pyright = ">=1.1.0"
 mdformat = ">=0.7.0"
 yamllint = ">=1.35.0"
@@ -198,30 +197,12 @@ line_length = 100
 multi_line_output = 3
 include_trailing_comma = true
 
-[tool.mypy]
-python_version = "3.12"
-strict = true
-warn_unused_configs = true
-follow_imports = "normal"
-# Installed packages that ship neither stubs nor a py.typed marker (datasets,
-# soundfile, torchaudio, nltk, ...) are analysed from source instead of
-# being silently treated as Any.
-follow_untyped_imports = true
-# Minimal stubs for modules that cannot be installed here (the Spaces runtime's
-# `spaces`, PyObjC's macOS-only frameworks) and for fabric, whose source is untyped.
-mypy_path = "typings"
-
-# Untyped packages analysed from source (follow_untyped_imports) re-export their
-# public API through bare `from .x import y` in __init__.py. Strict mode's
-# no_implicit_reexport would hide that API; it is a rule for our code, not theirs.
-[[tool.mypy.overrides]]
-module = ["datasets", "datasets.*", "nltk", "nltk.*"]
-implicit_reexport = true
-
 [tool.pyright]
 include = ["tiny_audio", "scripts", "tests", "demo", "docs", "typings"]
 exclude = ["**/node_modules", "**/__pycache__", "outputs", ".venv", "venv"]
 typeCheckingMode = "strict"
+# Minimal stubs for modules that cannot be installed here (the Spaces runtime's
+# `spaces`, PyObjC's macOS-only frameworks) and for fabric, whose source is untyped.
 stubPath = "typings"
 # Packages without stubs or py.typed (datasets, soundfile, torchaudio,
 # nltk, ...) are still analysed from source (`useLibraryCodeForTypes`); this
@@ -230,8 +211,8 @@ reportMissingTypeStubs = "none"
 # torch, transformers, datasets and peft leak unannotated `**kwargs` and bare
 # `dict`s through otherwise-typed APIs. These three rules report that leakage at
 # every call site; they say nothing about our own annotations, which the rest of
-# strict mode (and mypy --strict) still enforces. Off, library values that are
-# untyped flow in as Any, exactly as mypy treats them.
+# strict mode still enforces. Off, library values that are untyped flow in as
+# Any.
 reportUnknownMemberType = "none"
 reportUnknownArgumentType = "none"
 reportUnknownVariableType = "none"

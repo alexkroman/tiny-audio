@@ -85,9 +85,9 @@ class TestCommandWiring:
         assert runner.invoke(dev.app, ["lint"]).exit_code == 0
         assert recorded_runs == [tuple(cmd) for cmd in dev.lint_commands()]
 
-    def test_type_check_runs_both_checkers(self, recorded_runs: list[tuple[str, ...]]) -> None:
+    def test_type_check_runs_pyright(self, recorded_runs: list[tuple[str, ...]]) -> None:
         assert runner.invoke(dev.app, ["type-check"]).exit_code == 0
-        assert [c[0] for c in recorded_runs] == ["mypy", "pyright"]
+        assert [c[0] for c in recorded_runs] == ["pyright"]
 
     def test_test_enforces_coverage(self, recorded_runs: list[tuple[str, ...]]) -> None:
         assert runner.invoke(dev.app, ["test"]).exit_code == 0

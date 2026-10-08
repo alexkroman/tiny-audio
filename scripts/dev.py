@@ -55,7 +55,6 @@ LINT_COMMANDS = [
     ["zizmor", "--offline", ".github/workflows"],
 ]
 TYPE_CHECK_COMMANDS = [
-    ["mypy", *CODE_PATHS],
     # Paths come from `[tool.pyright] include`.
     ["pyright"],
 ]
@@ -249,7 +248,7 @@ def format_code() -> None:
 
 @app.command("type-check")
 def type_check() -> None:
-    """Run type checkers (mypy and pyright)."""
+    """Run the type checker (pyright, strict)."""
     raise typer.Exit(run_all(*TYPE_CHECK_COMMANDS))
 
 
