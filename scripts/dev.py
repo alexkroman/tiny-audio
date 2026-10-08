@@ -36,6 +36,11 @@ LINT_COMMANDS = [
     ["black", "--check", *CODE_PATHS],
     ["yamllint", "configs/", ".github/"],
     ["taplo", "check", "pyproject.toml"],
+    # Workflow syntax/expressions, then security shapes (template injection,
+    # unpinned actions, persisted checkout credentials). `--offline` keeps
+    # zizmor off the GitHub API so a local token can't change the verdict.
+    ["actionlint"],
+    ["zizmor", "--offline", ".github/workflows"],
 ]
 TYPE_CHECK_COMMANDS = [
     ["mypy", LIB_PATH],
@@ -93,7 +98,7 @@ def run_all(*commands: list[str]) -> int:
 
 @app.command()
 def lint():
-    """Run linters (Poetry + Python + YAML + TOML)."""
+    """Run linters (Poetry + Python + YAML + TOML + GitHub Actions)."""
     raise typer.Exit(run_all(*LINT_COMMANDS))
 
 
