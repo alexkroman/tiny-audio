@@ -8,6 +8,7 @@ speaker-labelled output (AssemblyAI's utterances, the tiny-audio pipeline's
 from __future__ import annotations
 
 import re
+from collections.abc import Callable, Hashable, Iterable, Mapping
 
 import numpy as np
 from rapidfuzz.distance import Levenshtein
@@ -20,12 +21,18 @@ _SPEAKER_RE = re.compile(r"<SPK_(\d+)>")
 CONTEXT_END = "<CONTINUE>"
 
 
+def _identity(s: str) -> str:
+    return s
+
+
 def has_speakers(text: str) -> bool:
     """True when `text` carries at least one speaker token."""
     return bool(_SPEAKER_RE.search(text or ""))
 
 
-def serialize_turns(turns, labels: dict | None = None) -> str:
+def serialize_turns(
+    turns: Iterable[tuple[Hashable, str | None]], labels: Mapping[Hashable, int] | None = None
+) -> str:
     """[(speaker, text), ...] in time order -> '<SPK_1>text<SPK_2>text'.
 
     Speakers (any hashable label, e.g. AssemblyAI's "A"/"B") are renumbered
@@ -34,22 +41,22 @@ def serialize_turns(turns, labels: dict | None = None) -> str:
     already have a number (a context prefix's); others continue after the
     largest pinned number. It is not modified.
     """
-    labels = dict(labels or {})
-    first_new = max(labels.values(), default=0) + 1
-    merged: list[list] = []
+    pinned: dict[Hashable, int] = dict(labels or {})
+    first_new = max(pinned.values(), default=0) + 1
+    merged: list[tuple[int, list[str]]] = []
     for speaker, raw in turns:
         text = (raw or "").strip()
         if not text:
             continue
-        if speaker not in labels:
-            labels[speaker] = first_new
+        if speaker not in pinned:
+            pinned[speaker] = first_new
             first_new += 1
-        label = labels[speaker]
+        label = pinned[speaker]
         if merged and merged[-1][0] == label:
-            merged[-1][1] += " " + text
+            merged[-1][1].append(text)
         else:
-            merged.append([label, text])
-    return "".join(SPEAKER_TOKEN.format(label) + text for label, text in merged)
+            merged.append((label, [text]))
+    return "".join(SPEAKER_TOKEN.format(label) + " ".join(texts) for label, texts in merged)
 
 
 def parse_turns(text: str) -> list[tuple[int, str]]:
@@ -76,14 +83,16 @@ def word_errors(ref: list[str], hyp: list[str]) -> int:
     return Levenshtein.distance(ref, hyp)
 
 
-def _speaker_words(text: str, normalize) -> dict[int, list[str]]:
+def _speaker_words(text: str, normalize: Callable[[str], str]) -> dict[int, list[str]]:
     words: dict[int, list[str]] = {}
     for label, chunk in parse_turns(text):
         words.setdefault(label, []).extend(normalize(chunk).split())
     return words
 
 
-def cp_errors(ref: str, hyp: str, normalize=lambda s: s) -> tuple[int, int]:
+def cp_errors(
+    ref: str, hyp: str, normalize: Callable[[str], str] = _identity
+) -> tuple[int, int]:
     """(errors, reference words) of concatenated minimum-permutation WER.
 
     Each speaker's words are concatenated, and reference and hypothesis
@@ -94,14 +103,17 @@ def cp_errors(ref: str, hyp: str, normalize=lambda s: s) -> tuple[int, int]:
     r = list(_speaker_words(ref, normalize).values())
     h = list(_speaker_words(hyp, normalize).values())
     n = max(len(r), len(h), 1)
-    r += [[]] * (n - len(r))
-    h += [[]] * (n - len(h))
+    empty: list[str] = []
+    r += [empty] * (n - len(r))
+    h += [empty] * (n - len(h))
     cost = np.array([[word_errors(a, b) for b in h] for a in r])
     rows, cols = linear_sum_assignment(cost)
     return int(cost[rows, cols].sum()), sum(len(a) for a in r)
 
 
-def speaker_metrics(refs: list[str], hyps: list[str], normalize=lambda s: s) -> dict:
+def speaker_metrics(
+    refs: list[str], hyps: list[str], normalize: Callable[[str], str] = _identity
+) -> dict[str, float]:
     """WER (speakers ignored), cpWER, their gap, and speaker-count accuracy.
 
     `cpwer - wer` is what speaker attribution costs on top of recognition;
@@ -123,7 +135,7 @@ def speaker_metrics(refs: list[str], hyps: list[str], normalize=lambda s: s) -> 
         bucket[0] += errors
         bucket[1] += words
     n = max(len(refs), 1)
-    out = {
+    out: dict[str, float] = {
         "wer": wer_err / max(n_words, 1),
         "cpwer": cp_err / max(n_words, 1),
         "speaker_count_acc": count_hits / n,

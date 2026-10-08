@@ -164,13 +164,13 @@ def score_punct(reference: str, hypothesis: str) -> tuple[int, int, int]:
     return tp, pred, act
 
 
-def compute_formatting_metrics(pairs: list[tuple[str, str]]) -> dict:
+def compute_formatting_metrics(pairs: list[tuple[str, str]]) -> dict[str, float]:
     """Aggregate formatting metrics over (raw_reference, raw_hypothesis) pairs.
 
     Keys are omitted when nothing in the corpus is scorable for that axis, so a
     mono-case corpus reports no casing number rather than a misleading 0.0.
     """
-    metrics: dict[str, float | int] = {}
+    metrics: dict[str, float] = {}
 
     ortho = [
         (light_normalize(r), light_normalize(h)) for r, h in pairs if is_orthographic_reference(r)

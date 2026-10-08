@@ -7,7 +7,7 @@ import time
 import traceback
 from importlib import resources
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
 
@@ -89,7 +89,7 @@ def run_handler(
     batch_test: Annotated[
         bool, typer.Option("--batch-test", help="Test batch processing with multiple audio files")
     ] = False,
-):
+) -> None:
     """Test the inference endpoint handler locally."""
     # Imported here, not at module scope: it pulls in transformers + torch
     # (~2.8s), which every other `ta dev` command would otherwise pay because
@@ -132,7 +132,7 @@ def run_handler(
     typer.echo(f"\nUsing audio file: {audio_path}")
     typer.echo("\nPreparing inference request...")
 
-    params: dict = {
+    params: dict[str, Any] = {
         "max_new_tokens": max_new_tokens,
         "num_beams": num_beams,
         "do_sample": do_sample,
@@ -141,7 +141,7 @@ def run_handler(
         params["temperature"] = temperature
 
     if not batch_test:
-        data = {"inputs": audio_path, "parameters": params}
+        data: dict[str, Any] = {"inputs": audio_path, "parameters": params}
         typer.echo(f"   Parameters: max_new_tokens={max_new_tokens}, num_beams={num_beams}")
         typer.echo(f"              temperature={temperature}, do_sample={do_sample}")
 
@@ -165,7 +165,7 @@ def run_handler(
     if batch_test:
         typer.echo("\nTesting batch processing...")
         batch_size = 3
-        batch_params = {**params, "batch_size": batch_size}
+        batch_params: dict[str, Any] = {**params, "batch_size": batch_size}
         data = {"inputs": [audio_path] * batch_size, "parameters": batch_params}
         typer.echo(f"   Batch size: {batch_size}")
 

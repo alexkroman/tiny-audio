@@ -21,13 +21,15 @@ from __future__ import annotations
 import importlib
 import json
 import subprocess
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Any, Protocol
 
 import typer
 from huggingface_hub import dataset_info, get_safetensors_metadata, model_info
 from hydra import compose, initialize_config_dir
+from omegaconf import DictConfig
 from tenacity import RetryError, retry, retry_if_result, stop_after_delay, wait_fixed
 
 from scripts.deploy import gpu_catalog
@@ -35,8 +37,6 @@ from scripts.train_config import register_configs
 from scripts.utils import get_project_root
 
 if TYPE_CHECKING:
-    from transformers import AutoConfig
-
     from tiny_audio.asr_config import ASRConfig
     from tiny_audio.projectors import MLPAudioProjector
 
@@ -123,12 +123,20 @@ class Component:
 
 @dataclass
 class Plan:
-    components: list[Component] = field(default_factory=list)
+    components: list[Component] = field(default_factory=list[Component])
     dataset_bytes: int = 0
-    dataset_rows: list[tuple[str, int]] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
-    vram: dict[str, float] = field(default_factory=dict)
-    disk: dict[str, float] = field(default_factory=dict)
+    dataset_rows: list[tuple[str, int]] = field(default_factory=list[tuple[str, int]])
+    warnings: list[str] = field(default_factory=list[str])
+    vram: dict[str, float] = field(default_factory=dict[str, float])
+    disk: dict[str, float] = field(default_factory=dict[str, float])
+
+
+class _HubConfig(Protocol):
+    def get_text_config(self) -> object: ...
+
+
+class _ConfigLoader(Protocol):
+    def from_pretrained(self, pretrained_model_name_or_path: str, /) -> _HubConfig: ...
 
 
 def _safetensors_params(repo_id: str, exclude_prefixes: tuple[str, ...] = ()) -> tuple[int, str]:
@@ -180,7 +188,9 @@ def _safetensors_params(repo_id: str, exclude_prefixes: tuple[str, ...] = ()) ->
 _NON_LM_TOWER_PREFIXES = ("mtp.", "visual.", "audio_tower.", "vision_tower.")
 
 
-def _lora_trainable_params(repo_id: str, rank: int, target_modules) -> int:
+def _lora_trainable_params(
+    repo_id: str, rank: int, target_modules: str | Sequence[str] | None
+) -> int:
     """Exact LoRA parameter count from safetensors headers (no weight download).
 
     A rank-r adapter on a linear of shape (out, in) adds r*(in+out). Reading the
@@ -220,7 +230,7 @@ def _lora_trainable_params(repo_id: str, rank: int, target_modules) -> int:
     return total
 
 
-def _vocab_table_params(text_cfg) -> dict[str, int]:
+def _vocab_table_params(text_cfg: object) -> dict[str, int]:
     """Per-token lookup-table sizes for a decoder, computed from its config.
 
     These can be frozen independently of the rest of the decoder
@@ -259,7 +269,7 @@ def _repo_weight_bytes(repo_id: str, repo_type: str = "model", name: str | None 
     return sum(s.size or 0 for s in siblings)
 
 
-def _load_cfg(experiment: str, overrides: list[str]):
+def _load_cfg(experiment: str, overrides: list[str]) -> DictConfig:
     # Registers the `base_config` structured-config schema the experiment
     # configs compose against (idempotent; train_config also does it on import).
     register_configs()
@@ -268,7 +278,7 @@ def _load_cfg(experiment: str, overrides: list[str]):
         return compose(config_name="config", overrides=[f"+experiments={experiment}", *overrides])
 
 
-def _get(node, key: str, default):
+def _get(node: DictConfig, key: str, default: Any) -> Any:
     """`node.get(key, default)` that also treats an explicit None as unset.
 
     The structured-config schema (scripts/train_config.py) declares optional
@@ -279,10 +289,11 @@ def _get(node, key: str, default):
     return default if val is None else val
 
 
-def _hidden(cfg_obj) -> int | None:
+def _hidden(cfg_obj: object) -> int | None:
     for attr in ("hidden_size", "d_model"):
         if getattr(cfg_obj, attr, None):
-            return getattr(cfg_obj, attr)
+            dim: int = getattr(cfg_obj, attr)
+            return dim
     return None
 
 
@@ -290,7 +301,7 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
     # Imported lazily: transformers + tiny_audio cost several seconds, which
     # every `ta runpod` command would otherwise pay because runpod.py imports
     # this module.
-    auto_config: type[AutoConfig] = importlib.import_module("transformers").AutoConfig
+    auto_config: _ConfigLoader = importlib.import_module("transformers").AutoConfig
     asr_config_cls: type[ASRConfig] = importlib.import_module("tiny_audio.asr_config").ASRConfig
     projector_classes: dict[str, type[MLPAudioProjector]] = importlib.import_module(
         "tiny_audio.projectors"
@@ -430,7 +441,8 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
     )
 
     # ---- datasets ----------------------------------------------------------
-    for entry in cfg.data.get("datasets", []) or []:
+    entries: Iterable[DictConfig] = cfg.data.get("datasets", []) or []
+    for entry in entries:
         path = str(entry.get("path"))
         name = entry.get("name")
         if not entry.get("train_splits") and not entry.get("eval_splits"):
@@ -529,7 +541,8 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
         # encoder_conv_layers halves twice to ~237. Using seq_len here instead
         # gave 82 and undercounted the tape ~3x.
         enc_seq = int(MAX_AUDIO_SECONDS * ENCODER_FRAME_RATE_HZ)
-        for pad, kernel, stride in cfg.model.get("encoder_conv_layers") or []:
+        conv_layers: Iterable[Sequence[int]] = cfg.model.get("encoder_conv_layers") or []
+        for pad, kernel, stride in conv_layers:
             enc_seq = (enc_seq + 2 * pad - (kernel - 1) - 1) // stride + 1
         if enc_layers:
             per_tok_enc = (
@@ -663,7 +676,7 @@ def plan_command(
     image: str = typer.Option("runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404", "--image"),
     as_json: bool = typer.Option(False, "--json", help="Machine-readable output"),
     overrides: Annotated[list[str] | None, typer.Argument(help="Extra Hydra overrides")] = None,
-):
+) -> int | None:
     """Estimate GPU memory and disk for a training config, and emit a pod command."""
     plan = build_plan(experiment, list(overrides or []), seq_len)
 
@@ -859,7 +872,7 @@ def provision_command(
         False, "--dry-run", help="Print the plan and candidates, create nothing"
     ),
     overrides: Annotated[list[str] | None, typer.Argument()] = None,
-):
+) -> str | None:
     """Size a config, then create a pod on the first GPU type that has capacity.
 
     RunPod's catalog reports `available: true` and `stockStatus: Low` for GPU
@@ -925,7 +938,7 @@ def provision_command(
             continue
         try:
             pod = json.loads(blob[blob.index("{") :])
-            pod_id = pod["id"]
+            pod_id: str = pod["id"]
         except Exception:
             print(f"unexpected response:\n{blob[:400]}")
             continue
@@ -947,7 +960,7 @@ def provision_command(
 def wait_command(
     pod_id: str = typer.Argument(..., help="Pod id from `ta runpod up`"),
     timeout_s: int = typer.Option(900, "--timeout", help="Give up after this long"),
-):
+) -> None:
     """Block until a pod exposes SSH, then print `<ip> <port>`.
 
     The endpoint lives at top-level `ssh.ip` / `ssh.port` in the pod JSON.
@@ -963,7 +976,7 @@ def wait_command(
     def poll() -> tuple[str, int] | None:
         out = gpu_catalog.runpodctl_json("pod", "get", pod_id)
         try:
-            ssh = json.loads(out[out.index("{") :]).get("ssh") or {}
+            ssh: dict[str, Any] = json.loads(out[out.index("{") :]).get("ssh") or {}
         except (ValueError, AttributeError):
             # No JSON yet (or a partial write) -- same as "not ready", poll again.
             return None

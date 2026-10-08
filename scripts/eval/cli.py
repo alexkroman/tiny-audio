@@ -31,6 +31,7 @@ from scripts.eval.evaluators import (
     SmallestEvaluator,
     SwiftSDKEvaluator,
 )
+from scripts.eval.evaluators.base import Metrics
 
 app = typer.Typer(add_completion=False)
 console = Console()
@@ -94,7 +95,7 @@ def save_results(
     model_name: str,
     dataset_name: str,
     results: list[EvalResult],
-    metrics: dict,
+    metrics: Metrics,
     output_dir: str = "outputs",
     base_url: str | None = None,
     run_id: str | None = None,
@@ -172,7 +173,7 @@ def save_results(
     return result_dir
 
 
-def print_asr_metrics(dataset_name: str, metrics: dict):
+def print_asr_metrics(dataset_name: str, metrics: Metrics) -> None:
     """Print ASR metrics using rich table."""
     table = Table(title=f"Results: {dataset_name}")
     table.add_column("Metric", style="cyan")
@@ -487,7 +488,7 @@ def main(
             "--model and --max-samples.",
         ),
     ] = None,
-):
+) -> None:
     """Evaluate ASR models on standard datasets."""
     # One id for the whole sweep, written into every dataset's metrics.txt so
     # the datasets of one sweep can be grouped together afterwards.

@@ -14,8 +14,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, cast
+from collections.abc import Callable, Iterable, Mapping
+from typing import IO, TYPE_CHECKING, Any, Unpack, cast
 
+import assemblyai as aai
 import numpy as np
 import soundfile as sf
 import torch
@@ -23,8 +25,11 @@ from assemblyai.streaming.v3 import (
     SpeechModel,
     StreamingClient,
     StreamingClientOptions,
+    StreamingError,
     StreamingEvents,
     StreamingParameters,
+    TerminationEvent,
+    TurnEvent,
 )
 from deepgram import DeepgramClient, ListenV1Response
 from huggingface_hub import InferenceClient
@@ -34,17 +39,27 @@ from rich.table import Table
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential_jitter
 from transformers import TextIteratorStreamer, pipeline
 
-from scripts.eval.audio import as_16k_array, prepare_wav_bytes
+from scripts.eval.audio import LazyAudioDecoder, as_16k_array, is_str_dict, prepare_wav_bytes
 from scripts.eval.speaker_metrics import serialize_turns
 from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel, _resolve_attn_implementation
 from tiny_audio.asr_pipeline import ASRPipeline
 
-from .base import Evaluator, console, setup_assemblyai
+from .base import (
+    Confidence,
+    Evaluator,
+    EvaluatorOptions,
+    Metrics,
+    Transcription,
+    console,
+    setup_assemblyai,
+)
 
 if TYPE_CHECKING:
     from elevenlabs import SpeechToTextChunkResponseModel
     from elevenlabs.client import ElevenLabs
+
+    from tiny_audio.asr_types import GenerativeDecoder
 
     _ELEVENLABS_AVAILABLE: bool
 else:
@@ -58,7 +73,7 @@ else:
         _ELEVENLABS_AVAILABLE = False
 
 
-def print_generation_config(model, model_path: str):
+def print_generation_config(model: ASRModel, model_path: str) -> None:
     """Print generation config in a visible format."""
     gen_config = model.generation_config
     table = Table(title=f"Generation config: {model_path}", show_header=False, title_style="bold")
@@ -174,7 +189,16 @@ def _build_working_tree_pipeline(
     return ASRPipeline(model=model, device=device)
 
 
-def _merge_lora_adapters(model) -> bool:
+def _module_eval(module: torch.nn.Module) -> None:
+    """`module.eval()`, in place.
+
+    transformers leaves `PreTrainedModel.eval` unannotated; typed as
+    `nn.Module` the call resolves. Same method at runtime.
+    """
+    module.eval()
+
+
+def _merge_lora_adapters(model: ASRModel) -> bool:
     """Fold LoRA adapters into the base weights for inference. Returns whether it ran.
 
     `ASRModel.from_pretrained` wraps the decoder in a live `PeftModel` and
@@ -211,11 +235,12 @@ def _merge_lora_adapters(model) -> bool:
         return False
     # A LoRA PeftModel's base_model is its tuner; PeftModel's __getattr__
     # forwards merge_and_unload there, so call it on the tuner directly.
-    model.language_model = cast(BaseTuner, language_model.base_model).merge_and_unload()
+    merged = cast(BaseTuner, language_model.base_model).merge_and_unload()
+    model.language_model = cast("GenerativeDecoder", merged)
     return True
 
 
-def _use_sdpa_where_safe(model) -> None:
+def _use_sdpa_where_safe(model: ASRModel) -> None:
     """Re-apply the MPS attention policy after load, overriding the checkpoint's copy.
 
     This duplicates what `_resolve_attn_implementation` already decided at
@@ -252,7 +277,8 @@ def _use_sdpa_where_safe(model) -> None:
     )
     if resolved is None or resolved == model.language_model.config._attn_implementation:
         return
-    model.language_model.set_attn_implementation(resolved)
+    # transformers leaves the per-submodule dict form unparameterized.
+    model.language_model.set_attn_implementation(resolved)  # pyright: ignore[reportUnknownMemberType]
 
 
 def _build_local_pipeline(model_path: str, *, local_code: bool = False) -> ASRPipeline:
@@ -300,8 +326,8 @@ class LocalEvaluator(Evaluator):
         model_path: str,
         user_prompt: str | None = None,
         local_code: bool = False,
-        **kwargs,
-    ):
+        **kwargs: Unpack[EvaluatorOptions],
+    ) -> None:
         # PyTorch's MPS backend is not thread-safe: concurrent threads encode
         # into a shared Metal command encoder and segfault in the AGX driver
         # (setComputePipelineState). `-w 4` on frozen-4 crashed within 3 minutes.
@@ -318,12 +344,12 @@ class LocalEvaluator(Evaluator):
         # nothing in the stack was train/eval-sensitive. A partially unfrozen
         # Granite encoder is: its 16 BatchNorm1d modules normalise with batch
         # statistics in train mode, which cost 25 WER points on Earnings22.
-        self.pipe.model.eval()
+        _module_eval(self.pipe.model)
         self.user_prompt = user_prompt
 
         print_generation_config(self.pipe.model, model_path)
 
-    def transcribe(self, audio) -> tuple[str, float, dict | None]:
+    def transcribe(self, audio: object) -> Transcription:
         if self.speakers:
             return self._transcribe_speakers(audio)
         start = time.time()
@@ -334,9 +360,9 @@ class LocalEvaluator(Evaluator):
         result = self.pipe(audio, user_prompt=self.user_prompt, output_scores=True)
         elapsed = time.time() - start
 
-        text = result.get("text", "") if isinstance(result, dict) else str(result)
-        confidence: dict | None = None
-        if isinstance(result, dict):
+        text: str = result.get("text", "") if is_str_dict(result) else str(result)
+        confidence: Confidence | None = None
+        if is_str_dict(result):
             top1 = result.get("top1_logprob")
             top2 = result.get("top2_logprob")
             if top1 and top2 and len(top1) == len(top2):
@@ -350,7 +376,7 @@ class LocalEvaluator(Evaluator):
                 }
         return text, elapsed, confidence
 
-    def _transcribe_speakers(self, audio) -> tuple[str, float, dict | None]:
+    def _transcribe_speakers(self, audio: object) -> Transcription:
         """The pipeline's own diarization (`return_speakers=True`) as `<SPK_n>` turns.
 
         Whatever the checkpoint's pipeline does for speakers is what gets
@@ -376,12 +402,12 @@ class LocalStreamingEvaluator(Evaluator):
         model_path: str,
         user_prompt: str | None = None,
         local_code: bool = False,
-        **kwargs,
-    ):
+        **kwargs: Unpack[EvaluatorOptions],
+    ) -> None:
         super().__init__(**kwargs)
         self.pipe = _build_local_pipeline(model_path, local_code=local_code)
         self.model = self.pipe.model
-        self.model.eval()
+        _module_eval(self.model)
         self.processor = self.model.get_processor()
         self.user_prompt = user_prompt
 
@@ -403,7 +429,7 @@ class LocalStreamingEvaluator(Evaluator):
         self.ttfb_times = []
         self.processing_times = []
 
-    def transcribe(self, audio) -> tuple[str, float, dict | None]:
+    def transcribe(self, audio: object) -> Transcription:
         audio_array = as_16k_array(audio)
 
         # Process audio (ASRProcessor handles sampling_rate internally)
@@ -426,7 +452,7 @@ class LocalStreamingEvaluator(Evaluator):
         first_token_time: list[float | None] = [None]
         generation_start: list[float | None] = [None]
 
-        def generate():
+        def generate() -> None:
             generation_start[0] = time.time()
             self.model.generate(
                 input_features=input_features,
@@ -439,8 +465,8 @@ class LocalStreamingEvaluator(Evaluator):
         thread.start()
 
         # Collect tokens and measure TTFB
-        tokens = []
-        for text in streamer:
+        tokens: list[str] = []
+        for text in cast(Iterable[str], streamer):
             if first_token_time[0] is None and text:
                 first_token_time[0] = time.time()
             tokens.append(text)
@@ -470,7 +496,7 @@ class LocalStreamingEvaluator(Evaluator):
         full_text = "".join(tokens).strip()
         return full_text, processing_time, None
 
-    def compute_metrics(self) -> dict:
+    def compute_metrics(self) -> Metrics:
         """Compute final metrics including streaming-specific timing."""
         metrics = super().compute_metrics()
         if self.ttfb_times:
@@ -485,23 +511,21 @@ class LocalStreamingEvaluator(Evaluator):
 class EndpointEvaluator(Evaluator):
     """Evaluator for HuggingFace Inference Endpoints."""
 
-    def __init__(self, endpoint_url: str, **kwargs):
+    def __init__(self, endpoint_url: str, **kwargs: Unpack[EvaluatorOptions]) -> None:
         super().__init__(**kwargs)
         self.client = InferenceClient(base_url=endpoint_url)
 
-    def transcribe(self, audio) -> tuple[str, float, dict | None]:
+    def transcribe(self, audio: object) -> Transcription:
         wav_bytes = prepare_wav_bytes(audio)
 
         start = time.time()
-        result = self.client.automatic_speech_recognition(wav_bytes)
+        # huggingface_hub leaves `extra_body` an unparameterized dict.
+        result = self.client.automatic_speech_recognition(wav_bytes)  # pyright: ignore[reportUnknownMemberType]
         elapsed = time.time() - start
 
-        if isinstance(result, dict):
-            text = result.get("text", result.get("transcription", ""))
-        elif hasattr(result, "text"):
-            text = result.text
-        else:
-            text = str(result)
+        # The output type is a dict subclass carrying the response fields.
+        fields = cast("Mapping[str, Any]", result)
+        text: str = fields.get("text", fields.get("transcription", ""))
         return text, elapsed, None
 
 
@@ -515,15 +539,19 @@ class AssemblyAIEvaluator(Evaluator):
     """
 
     def __init__(
-        self, api_key: str, model: str = "universal-3-pro", base_url: str | None = None, **kwargs
-    ):
+        self,
+        api_key: str,
+        model: str = "universal-3-pro",
+        base_url: str | None = None,
+        **kwargs: Unpack[EvaluatorOptions],
+    ) -> None:
         super().__init__(**kwargs)
         self.transcriber = setup_assemblyai(api_key, model, base_url=base_url)
         self.speaker_transcriber = setup_assemblyai(
             api_key, model, speaker_labels=True, base_url=base_url
         )
 
-    def transcribe(self, audio) -> tuple[str, float, dict | None]:
+    def transcribe(self, audio: object) -> Transcription:
         wav_bytes = prepare_wav_bytes(audio)
         transcriber = self.speaker_transcriber if self.speakers else self.transcriber
         start = time.time()
@@ -534,7 +562,7 @@ class AssemblyAIEvaluator(Evaluator):
         return transcript.text or "", elapsed, None
 
 
-def speaker_text(transcript) -> str:
+def speaker_text(transcript: aai.Transcript) -> str:
     """An AssemblyAI transcript's utterances as `<SPK_n>` text (plain text if none)."""
     utterances = transcript.utterances or []
     if not utterances:
@@ -569,7 +597,7 @@ class AssemblyAIStreamingEvaluator(Evaluator):
     _stream_semaphore: threading.Semaphore | None = None
     _semaphore_lock = threading.Lock()
 
-    def __init__(self, api_key: str, **kwargs):
+    def __init__(self, api_key: str, **kwargs: Unpack[EvaluatorOptions]) -> None:
         super().__init__(**kwargs)
         self.api_key = api_key
         self._ensure_semaphore()
@@ -591,7 +619,7 @@ class AssemblyAIStreamingEvaluator(Evaluator):
             in AssemblyAIStreamingEvaluator._RETRYABLE_CODES
         )
 
-    def transcribe(self, audio) -> tuple[str, float, dict | None]:
+    def transcribe(self, audio: object) -> Transcription:
         pcm_data = self._prepare_pcm(audio)
         text, elapsed = self._run_session_with_retry(pcm_data)
         return text, elapsed, None
@@ -608,16 +636,14 @@ class AssemblyAIStreamingEvaluator(Evaluator):
         with self._stream_semaphore:
             return self._run_session(pcm_data)
 
-    def _prepare_pcm(self, audio) -> bytes:
+    def _prepare_pcm(self, audio: object) -> bytes:
         audio_array = as_16k_array(audio)
 
-        if isinstance(audio_array, np.ndarray):
-            if audio_array.dtype != np.float32:
-                audio_array = audio_array.astype(np.float32)
-            if np.abs(audio_array).max() > 1.0:
-                audio_array = audio_array / np.abs(audio_array).max()
-            return (audio_array * 32767).astype(np.int16).tobytes()
-        return audio_array
+        if audio_array.dtype != np.float32:
+            audio_array = audio_array.astype(np.float32)
+        if np.abs(audio_array).max() > 1.0:
+            audio_array = audio_array / np.abs(audio_array).max()
+        return (audio_array * 32767).astype(np.int16).tobytes()
 
     def _run_session(self, pcm_data: bytes) -> tuple[str, float]:
         # Per-call state — closures capture these, so threads cannot stomp on
@@ -633,21 +659,25 @@ class AssemblyAIStreamingEvaluator(Evaluator):
             )
         )
 
-        def on_turn(_client, event):
+        def on_turn(_client: StreamingClient, event: TurnEvent) -> None:
             if event.transcript and event.end_of_turn and event.turn_is_formatted:
                 transcripts[event.turn_order] = event.transcript
                 turn_done.set()
 
-        def on_error(_client, err):
+        def on_error(_client: StreamingClient, err: StreamingError) -> None:
             error_box[0] = err
             turn_done.set()
 
-        def on_terminated(_client, _event):
+        def on_terminated(_client: StreamingClient, _event: TerminationEvent) -> None:
             turn_done.set()
 
-        client.on(StreamingEvents.Turn, on_turn)
-        client.on(StreamingEvents.Error, on_error)
-        client.on(StreamingEvents.Termination, on_terminated)
+        handlers: list[tuple[StreamingEvents, Callable[..., None]]] = [
+            (StreamingEvents.Turn, on_turn),
+            (StreamingEvents.Error, on_error),
+            (StreamingEvents.Termination, on_terminated),
+        ]
+        for event, handler in handlers:
+            client.on(event, handler)  # pyright: ignore[reportUnknownMemberType]  # handler: bare Callable
         client.connect(
             StreamingParameters(
                 sample_rate=16000,
@@ -680,11 +710,11 @@ class AssemblyAIStreamingEvaluator(Evaluator):
 class DeepgramEvaluator(Evaluator):
     """Evaluator for Deepgram Nova 3 API."""
 
-    def __init__(self, api_key: str, **kwargs):
+    def __init__(self, api_key: str, **kwargs: Unpack[EvaluatorOptions]) -> None:
         super().__init__(**kwargs)
         self.client = DeepgramClient(api_key=api_key)
 
-    def transcribe(self, audio) -> tuple[str, float, dict | None]:
+    def transcribe(self, audio: object) -> Transcription:
         wav_bytes = prepare_wav_bytes(audio)
         start = time.time()
 
@@ -704,7 +734,7 @@ class DeepgramEvaluator(Evaluator):
 
 
 class _SmallestHTTPError(RuntimeError):
-    def __init__(self, status: int, body: str):
+    def __init__(self, status: int, body: str) -> None:
         super().__init__(f"Smallest.ai HTTP {status}: {body[:200]}")
         self.status = status
 
@@ -721,7 +751,13 @@ class SmallestEvaluator(Evaluator):
     # an empty prediction -- a rate limit under -w N would read as 100% WER rows.
     _RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
 
-    def __init__(self, api_key: str, model: str = "pulse", language: str = "en", **kwargs):
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "pulse",
+        language: str = "en",
+        **kwargs: Unpack[EvaluatorOptions],
+    ) -> None:
         super().__init__(**kwargs)
         self.api_key = api_key
         self.model = model
@@ -739,7 +775,7 @@ class SmallestEvaluator(Evaluator):
         wait=wait_exponential_jitter(initial=1.0, max=30.0),
         reraise=True,
     )
-    def _post(self, wav_bytes: bytes) -> dict:
+    def _post(self, wav_bytes: bytes) -> dict[str, Any]:
         query = urllib.parse.urlencode({"model": self.model, "language": self.language})
         request = urllib.request.Request(
             f"{self.URL}?{query}",
@@ -750,11 +786,12 @@ class SmallestEvaluator(Evaluator):
         try:
             # B310 guards file:// schemes; the URL is the fixed https constant above.
             with urllib.request.urlopen(request, timeout=120) as response:  # nosec B310
-                return json.loads(response.read())
+                payload: dict[str, Any] = json.loads(response.read())
+                return payload
         except urllib.error.HTTPError as e:
             raise _SmallestHTTPError(e.code, e.read().decode(errors="replace")) from e
 
-    def transcribe(self, audio) -> tuple[str, float, dict | None]:
+    def transcribe(self, audio: object) -> Transcription:
         wav_bytes = prepare_wav_bytes(audio)
         start = time.time()
         payload = self._post(wav_bytes)
@@ -769,7 +806,9 @@ class SmallestEvaluator(Evaluator):
 class ElevenLabsEvaluator(Evaluator):
     """Evaluator for ElevenLabs Scribe API."""
 
-    def __init__(self, api_key: str, model: str = "scribe_v2", **kwargs):
+    def __init__(
+        self, api_key: str, model: str = "scribe_v2", **kwargs: Unpack[EvaluatorOptions]
+    ) -> None:
         super().__init__(**kwargs)
         if not _ELEVENLABS_AVAILABLE:
             msg = "ElevenLabs backend requires the elevenlabs SDK: pip install elevenlabs"
@@ -777,7 +816,7 @@ class ElevenLabsEvaluator(Evaluator):
         self.client = ElevenLabs(api_key=api_key)
         self.model = model
 
-    def transcribe(self, audio) -> tuple[str, float, dict | None]:
+    def transcribe(self, audio: object) -> Transcription:
         wav_bytes = prepare_wav_bytes(audio)
         start = time.time()
 
@@ -819,8 +858,8 @@ class SwiftSDKEvaluator(Evaluator):
         self,
         repo_id: str = "mazesmazes/tiny-audio-mlx",
         model_dir: Path | None = None,
-        **kwargs,
-    ):
+        **kwargs: Unpack[EvaluatorOptions],
+    ) -> None:
         if kwargs.get("num_workers", 1) > 1:
             console.print(
                 "[yellow]Warning: SwiftSDKEvaluator forces num_workers=1 "
@@ -972,7 +1011,7 @@ class SwiftSDKEvaluator(Evaluator):
             msg = f"Swift binary failed to start. stderr:\n{err}"
             raise RuntimeError(msg)
         try:
-            ready_msg = json.loads(ready_line)
+            ready_msg: dict[str, Any] = json.loads(ready_line)
         except json.JSONDecodeError as exc:
             msg = f"Swift binary emitted non-JSON startup line: {ready_line!r}"
             raise RuntimeError(msg) from exc
@@ -984,7 +1023,7 @@ class SwiftSDKEvaluator(Evaluator):
             raise RuntimeError(msg)
         console.print("[bold green]Swift SDK ready[/bold green]")
 
-    def transcribe(self, audio) -> tuple[str, float, dict | None]:
+    def transcribe(self, audio: object) -> Transcription:
         # The eval framework passes either a path string or a dict-like with an
         # 'array' field. The Swift binary takes file paths only — write to a
         # temp wav if we got an in-memory array.
@@ -999,15 +1038,15 @@ class SwiftSDKEvaluator(Evaluator):
                 msg = f"Swift binary closed unexpectedly. stderr:\n{err}"
                 raise RuntimeError(msg)
             try:
-                reply = json.loads(line)
+                reply: dict[str, Any] = json.loads(line)
             except json.JSONDecodeError as exc:
                 msg = f"Swift binary emitted non-JSON line: {line!r}"
                 raise RuntimeError(msg) from exc
             if "error" in reply:
                 msg = f"Swift transcribe failed: {reply['error']}"
                 raise RuntimeError(msg)
-            text = reply.get("text", "")
-            elapsed_ms = reply.get("elapsed_ms", 0)
+            text: str = reply.get("text", "")
+            elapsed_ms: float = reply.get("elapsed_ms", 0)
             return text, elapsed_ms / 1000.0, None
         finally:
             if is_temp:
@@ -1021,7 +1060,7 @@ class SwiftSDKEvaluator(Evaluator):
         assert proc.stderr is not None
         return proc.stdin, proc.stdout, proc.stderr
 
-    def _resolve_audio_path(self, audio) -> tuple[str, bool]:
+    def _resolve_audio_path(self, audio: object) -> tuple[str, bool]:
         """Return (filesystem_path, is_temp) for the Swift binary to read.
 
         The eval framework's `audio` argument can be:
@@ -1034,9 +1073,9 @@ class SwiftSDKEvaluator(Evaluator):
         """
         if isinstance(audio, str):
             return audio, False
-        if isinstance(audio, dict):
+        if is_str_dict(audio):
             # HF datasets Audio feature: dict with 'path' (absolute) + optionally 'array'/'bytes'.
-            path = audio.get("path")
+            path: str | None = audio.get("path")
             if path and Path(path).is_absolute() and Path(path).exists():
                 return path, False
             # 'bytes' field: raw file bytes (wav, mp3, etc.) — write to temp file.
@@ -1057,9 +1096,12 @@ class SwiftSDKEvaluator(Evaluator):
             sf.write(tmp_name, arr, sr, subtype="PCM_16")
             return tmp_name, True
         # AudioDecoder / AudioSamples fallback for torchcodec / SDK-style inputs.
-        if hasattr(audio, "get_all_samples"):
+        if isinstance(audio, LazyAudioDecoder):
             samples = audio.get_all_samples()
-            data = samples.data.detach().cpu().numpy()
+            data = cast(
+                "np.ndarray[Any, np.dtype[np.floating[Any]]]",
+                samples.data.detach().cpu().numpy(),  # pyright: ignore[reportUnknownMemberType]
+            )
             sr = int(samples.sample_rate)
             if data.ndim > 1:
                 data = data.mean(axis=0)
@@ -1070,7 +1112,7 @@ class SwiftSDKEvaluator(Evaluator):
         msg = f"unsupported audio input type for Swift eval: {type(audio)}"
         raise ValueError(msg)
 
-    def __del__(self):
+    def __del__(self) -> None:
         if hasattr(self, "proc") and self.proc.poll() is None:
             try:
                 self._pipes()[0].close()

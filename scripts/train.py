@@ -6,14 +6,15 @@ import logging
 import os
 import subprocess
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import fields
 from pathlib import Path
 from types import ModuleType
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 import hydra
 import numpy as np
+import numpy.typing as npt
 import torch
 import wandb
 from datasets import (
@@ -21,12 +22,14 @@ from datasets import (
     ClassLabel,
     Dataset,
     concatenate_datasets,
-    load_dataset,
+    load_dataset,  # pyright: ignore[reportUnknownVariableType]
 )
 from omegaconf import DictConfig, OmegaConf
 from tqdm.auto import tqdm
 from transformers import (
+    BatchFeature,
     PreTrainedModel,
+    PreTrainedTokenizerBase,
     Trainer,
     TrainerCallback,
     TrainerControl,
@@ -34,7 +37,9 @@ from transformers import (
     TrainingArguments,
 )
 from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
-from transformers.trainer_pt_utils import get_parameter_names
+from transformers.trainer_pt_utils import (
+    get_parameter_names,  # pyright: ignore[reportUnknownVariableType]
+)
 from trl.import_utils import TRLExperimentalWarning
 
 from scripts.labels import (
@@ -47,6 +52,7 @@ from scripts.train_config import register_configs
 from tiny_audio.asr_config import (
     DEFAULT_ENCODER_CONV_LAYERS,
     ASRConfig,
+    ConvLayerSpec,
     compute_encoder_output_length,
 )
 from tiny_audio.asr_modeling import ASRModel
@@ -59,14 +65,16 @@ with warnings.catch_warnings():
 
 # liger is a linux-only optional dependency (see pyproject.toml); without it
 # training falls back to stock kernels and unfused cross-entropy.
+_liger_transformers: ModuleType | None
+_liger_import_error: ImportError | None
 try:
     from liger_kernel import transformers as liger_transformers
 except ImportError as exc:
-    LIGER_TRANSFORMERS: ModuleType | None = None
-    _LIGER_IMPORT_ERROR: ImportError | None = exc
+    _liger_transformers = None
+    _liger_import_error = exc
 else:
-    LIGER_TRANSFORMERS = liger_transformers
-    _LIGER_IMPORT_ERROR = None
+    _liger_transformers = liger_transformers
+    _liger_import_error = None
 
 for _noisy in ("httpx", "httpcore", "urllib3", "huggingface_hub.file_download"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
@@ -107,7 +115,9 @@ TRANSCRIBE_PROMPT = "Transcribe the speech to text"
 TRANSCRIBE_PROMPT_PUNCT = "Transcribe the speech with proper punctuation and capitalization"
 
 
-def _resolve_transcribe_prompt(configured: str | None, datasets: list) -> str | None:
+def _resolve_transcribe_prompt(
+    configured: str | None, datasets: Sequence[Mapping[str, Any]]
+) -> str | None:
     """Pick the inference prompt a checkpoint is saved with.
 
     `transcribe_prompt` never reaches training -- `_build_sample` routes each
@@ -131,11 +141,42 @@ def _resolve_transcribe_prompt(configured: str | None, datasets: list) -> str | 
     return None
 
 
-# `Dataset.add_column` annotates `new_fingerprint: str` as a required argument,
-# but its @fingerprint_transform wrapper computes the fingerprint whenever the
-# caller leaves it out, which is how it is meant to be called. This is that
-# runtime signature, called exactly as `ds.add_column(name, column)` would be.
-_add_column = cast(Callable[[Dataset, str, list[Any]], Dataset], Dataset.add_column)
+# `get_parameter_names` ships without annotations; this is its signature as used here.
+_get_parameter_names = cast(
+    Callable[[torch.nn.Module, list[type[torch.nn.Module]]], list[str]], get_parameter_names
+)
+
+
+class _DatasetTransforms(Protocol):
+    """The `Dataset` transforms used here, with the signatures they run with.
+
+    The library's own annotations are lost behind its untyped
+    @transmit_format / @fingerprint_transform decorators. `add_column` also
+    annotates `new_fingerprint: str` as a required argument, but its
+    @fingerprint_transform wrapper computes the fingerprint whenever the caller
+    leaves it out, which is how it is meant to be called.
+    """
+
+    def add_column(self, name: str, column: list[Any]) -> Dataset: ...
+
+    def filter(
+        self,
+        function: Callable[..., bool],
+        *,
+        num_proc: int | None = ...,
+        input_columns: str | list[str] | None = ...,
+    ) -> Dataset: ...
+
+    def select(self, indices: Iterable[int]) -> Dataset: ...
+
+    def shuffle(self, *, seed: int | None = ...) -> Dataset: ...
+
+    def cast_column(self, column: str, feature: Audio) -> Dataset: ...
+
+
+def _transforms(ds: Dataset) -> _DatasetTransforms:
+    """`ds`, typed by the transform signatures in `_DatasetTransforms`."""
+    return cast(_DatasetTransforms, ds)
 
 
 class DatasetLoader:
@@ -195,7 +236,7 @@ class DatasetLoader:
                     f"got {text_case!r} for {dataset_path}"
                 )
                 raise ValueError(msg)
-            ds = _add_column(ds, "_text_case", [text_case] * len(ds))
+            ds = _transforms(ds).add_column("_text_case", [text_case] * len(ds))
 
         # text_punct: declares whether this source's transcripts carry
         # punctuation. Deliberately separate from text_case -- they are not the
@@ -207,7 +248,7 @@ class DatasetLoader:
             if not isinstance(text_punct, bool):
                 msg = f"text_punct must be a bool, got {text_punct!r} for {dataset_path}"
                 raise ValueError(msg)
-            ds = _add_column(ds, "_text_punct", [text_punct] * len(ds))
+            ds = _transforms(ds).add_column("_text_punct", [text_punct] * len(ds))
 
         # CommonVoice strict-validated filter: Mozilla's `train` split is
         # already up-vote validated (up_votes >= 2 AND up_votes > down_votes),
@@ -218,8 +259,12 @@ class DatasetLoader:
         # below. Guarded on column presence in case a future mirror strips
         # the voting metadata.
         if "common_voice" in dataset_path.lower() and "down_votes" in ds.column_names:
-            ds = ds.filter(
-                lambda dv: dv == 0,
+
+            def _no_down_votes(dv: int) -> bool:
+                return dv == 0
+
+            ds = _transforms(ds).filter(
+                _no_down_votes,
                 num_proc=self.num_proc,
                 input_columns="down_votes",
             )
@@ -269,8 +314,9 @@ class DatasetLoader:
             # against the human-readable names matches nothing and silently
             # dropped 0 of 910,140 rows. Resolve names -> ids so the config
             # stays readable, and reject a name the column does not define.
-            feature = (ds.features or {}).get(column)
-            wanted: set | None = None
+            # `Features` subclasses a bare `dict`; its values are feature types.
+            feature = cast(Mapping[str, object], ds.features or {}).get(column)
+            wanted: set[object] | None = None
             if names:
                 if isinstance(feature, ClassLabel):
                     # Report every bad name at once rather than dying on the first.
@@ -281,11 +327,20 @@ class DatasetLoader:
                             f"{dataset_path} (defined: {feature.names})"
                         )
                         raise ValueError(msg)
-                    wanted = {feature.str2int(n) for n in names}
+                    # `str2int` leaves its Iterable overload's element type unannotated.
+                    wanted = {
+                        feature.str2int(n)  # pyright: ignore[reportUnknownMemberType]
+                        for n in names
+                    }
                 else:
                     wanted = set(names)
 
-            def _keep(v, _wanted=wanted, _above=above, _below=below):
+            def _keep(
+                v: Any,
+                _wanted: set[object] | None = wanted,
+                _above: float | None = above,
+                _below: float | None = below,
+            ) -> bool:
                 excluded = (
                     (_wanted is not None and v in _wanted)
                     or (v is not None and _above is not None and v > _above)
@@ -297,7 +352,7 @@ class DatasetLoader:
             # `input_columns` keeps this from materialising the audio column --
             # it matters for a duration filter over ~1.1M rows, which would
             # otherwise decode every clip to answer a float comparison.
-            ds = ds.filter(
+            ds = _transforms(ds).filter(
                 _keep,
                 num_proc=self.num_proc,
                 input_columns=column,
@@ -336,7 +391,7 @@ class DatasetLoader:
                     ds = ds.remove_columns([target])
                 ds = ds.rename_column(source, target)
 
-        ds = ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
+        ds = _transforms(ds).cast_column("audio", Audio(sampling_rate=self.sample_rate))
 
         keep_cols = {"audio", "text"}
         # Preserve the declared casing policy so _normalize_label can use it.
@@ -359,10 +414,12 @@ class DatasetLoader:
         # Duration filtering happens in DataCollator to avoid loading all audio upfront.
         if "tedlium" in dataset_path.lower() or "edacc" in dataset_path.lower():
 
-            def filter_ignore_marker(text):
+            def filter_ignore_marker(text: str) -> bool:
                 return text.strip().lower() != "ignore_time_segment_in_scoring"
 
-            ds = ds.filter(filter_ignore_marker, num_proc=self.num_proc, input_columns="text")
+            ds = _transforms(ds).filter(
+                filter_ignore_marker, num_proc=self.num_proc, input_columns="text"
+            )
 
         return ds
 
@@ -382,7 +439,8 @@ class DatasetLoader:
         if current == target:
             return ds
         if current > target:
-            return ds.shuffle(seed=self.seed).select(range(target))
+            shuffled = _transforms(ds).shuffle(seed=self.seed)
+            return _transforms(shuffled).select(range(target))
         # Upsampling repeats rows verbatim, so the extra "samples" carry no
         # new signal. That is intended for small sources, but it is also what
         # happens when a filter (e.g. exclude_where) cuts a large source below
@@ -396,7 +454,7 @@ class DatasetLoader:
         )
         repeats = (target // current) + 1
         indices = list(range(current)) * repeats
-        return ds.select(indices[:target])
+        return _transforms(ds).select(indices[:target])
 
     @staticmethod
     def _expand_epochs(ds: Dataset, times: int) -> Dataset:
@@ -426,7 +484,8 @@ class DatasetLoader:
         return concatenate_datasets([ds] * times)
 
     def load(self) -> tuple[Dataset | None, Dataset | None]:
-        train_datasets, val_datasets = [], []
+        train_datasets: list[Dataset] = []
+        val_datasets: list[Dataset] = []
 
         # epoch_expansion: build ONE physical epoch that is worth N logical
         # ones, so that capped sources contribute fresh rows instead of
@@ -496,11 +555,13 @@ class DatasetLoader:
             for val_split in val_splits:
                 ds = self._prepare_split(d_cfg, val_split)
                 if eval_cap_per_dataset:
-                    ds = ds.select(range(min(len(ds), eval_cap_per_dataset)))
+                    ds = _transforms(ds).select(range(min(len(ds), eval_cap_per_dataset)))
                 val_datasets.append(ds)
 
         train_ds = (
-            concatenate_datasets(train_datasets).shuffle(seed=self.seed) if train_datasets else None
+            _transforms(concatenate_datasets(train_datasets)).shuffle(seed=self.seed)
+            if train_datasets
+            else None
         )
         val_ds = concatenate_datasets(val_datasets) if val_datasets else None
 
@@ -509,9 +570,33 @@ class DatasetLoader:
         # comes in under the global limit).
         if val_ds and self.config.get("max_eval_samples"):
             n_samples = min(len(val_ds), self.config.max_eval_samples)
-            val_ds = val_ds.select(range(n_samples))
+            val_ds = _transforms(val_ds).select(range(n_samples))
 
         return train_ds, val_ds
+
+
+class _AudioFeatureExtractor(Protocol):
+    """The audio feature-extractor call the collator makes (e.g. Whisper's)."""
+
+    def __call__(
+        self,
+        raw_speech: list[npt.NDArray[Any]],
+        /,
+        *,
+        sampling_rate: int,
+        padding: str,
+        return_attention_mask: bool,
+        return_tensors: str,
+    ) -> BatchFeature: ...
+
+
+class _OutputLengthProjector(Protocol):
+    """Maps encoder output lengths to audio-token counts."""
+
+    def get_output_length(self, input_length: torch.Tensor) -> torch.Tensor: ...
+
+
+ChatSample = dict[str, list[dict[str, str]]]
 
 
 class DataCollator:
@@ -519,13 +604,13 @@ class DataCollator:
 
     def __init__(
         self,
-        tokenizer: Any,
-        feature_extractor: Any,
+        tokenizer: PreTrainedTokenizerBase,
+        feature_extractor: _AudioFeatureExtractor,
         sample_rate: int,
-        projector: Any = None,
-        encoder_conv_layers: list | None = None,
+        projector: _OutputLengthProjector | None = None,
+        encoder_conv_layers: Sequence[ConvLayerSpec] | None = None,
         audio_token: str = "<audio>",
-    ):
+    ) -> None:
         self.tokenizer = tokenizer
         self.feature_extractor = feature_extractor
         self.sample_rate = sample_rate
@@ -578,9 +663,11 @@ class DataCollator:
     # than the labeled token.
     _MIN_AUDIO_SECONDS = 0.8
 
-    def _extract_audio_arrays(self, features):
-        audio_arrays = []
-        valid_features = []
+    def _extract_audio_arrays(
+        self, features: list[dict[str, Any]]
+    ) -> tuple[list[npt.NDArray[Any]], list[dict[str, Any]]]:
+        audio_arrays: list[npt.NDArray[Any]] = []
+        valid_features: list[dict[str, Any]] = []
         for f in features:
             try:
                 audio = f["audio"]["array"]
@@ -645,7 +732,7 @@ class DataCollator:
             raise ValueError(msg)
         return audio_arrays, valid_features
 
-    def _build_sample(self, feature: dict, num_audio_tokens: int) -> dict:
+    def _build_sample(self, feature: dict[str, Any], num_audio_tokens: int) -> ChatSample:
         """Build a single chat sample."""
         text = _normalize_label(feature.get("text") or "", feature.get("_text_case"))
         # Prompt carries the label convention, so the punctuated and
@@ -654,7 +741,7 @@ class DataCollator:
         prompt = TRANSCRIBE_PROMPT_PUNCT if feature.get("_text_punct") else TRANSCRIBE_PROMPT
         return self._make_messages(num_audio_tokens, prompt, text)
 
-    def _make_messages(self, num_audio_tokens: int, prompt: str, response: str) -> dict:
+    def _make_messages(self, num_audio_tokens: int, prompt: str, response: str) -> ChatSample:
         user_content = (self.audio_token * num_audio_tokens) + " " + prompt
         messages = [
             {"role": "user", "content": user_content},
@@ -673,10 +760,17 @@ class DataCollator:
             return_tensors="pt",
         )
 
-        mel_lengths = audio_out.attention_mask.sum(dim=-1)
+        audio_attention_mask: torch.Tensor = audio_out["attention_mask"]
+        input_features: torch.Tensor = audio_out["input_features"]
+        mel_lengths = audio_attention_mask.sum(dim=-1)
         encoder_lengths = compute_encoder_output_length(mel_lengths, self.encoder_conv_layers)
+        assert self.projector is not None, "DataCollator needs a projector to count audio tokens"
         token_counts_tensor = self.projector.get_output_length(encoder_lengths).to(torch.long)
-        audio_token_counts = token_counts_tensor.tolist()
+        # torch annotates `Tensor.tolist` with a bare `list`.
+        audio_token_counts = cast(
+            list[int],
+            token_counts_tensor.tolist(),  # pyright: ignore[reportUnknownMemberType]
+        )
 
         text_features = [
             self._build_sample(f, n)
@@ -684,10 +778,15 @@ class DataCollator:
         ]
 
         batch = self.text_collator(text_features)
-        batch["input_features"] = audio_out.input_features
-        batch["audio_attention_mask"] = audio_out.attention_mask
+        batch["input_features"] = input_features
+        batch["audio_attention_mask"] = audio_attention_mask
         batch["audio_token_counts"] = token_counts_tensor
         return batch
+
+
+def _trainer_model(trainer: Trainer) -> torch.nn.Module | None:
+    """`trainer.model`, whose declared union includes one unannotated assignment."""
+    return trainer.model  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
 
 
 class ASRTrainer(Trainer):
@@ -695,14 +794,15 @@ class ASRTrainer(Trainer):
 
     def __init__(
         self,
-        *args,
+        *args: Any,
         decoder_learning_rate: float | None = None,
         projector_weight_decay: float | None = None,
         encoder_learning_rate: float | None = None,
         encoder_weight_decay: float | None = None,
-        **kwargs,
-    ):
-        super().__init__(*args, **kwargs)
+        **kwargs: Any,
+    ) -> None:
+        # Trainer.__init__ leaves some of its parameters unannotated.
+        super().__init__(*args, **kwargs)  # pyright: ignore[reportUnknownMemberType]
         self.decoder_learning_rate = decoder_learning_rate
         self.projector_weight_decay = projector_weight_decay
         self.encoder_learning_rate = encoder_learning_rate
@@ -732,7 +832,8 @@ class ASRTrainer(Trainer):
             or self.encoder_weight_decay is not None
         )
         if self.optimizer is not None or not overrides:
-            return super().create_optimizer(model)
+            # Trainer.create_optimizer leaves `model` unannotated.
+            return super().create_optimizer(model)  # pyright: ignore[reportUnknownMemberType]
 
         # ALL_LAYERNORM_LAYERS only contains torch.nn.LayerNorm, but every
         # decoder here normalizes with an RMSNorm subclass instead, whose gain
@@ -753,13 +854,13 @@ class ASRTrainer(Trainer):
         # exists to prevent.
         # Same model resolution as Trainer.create_optimizer, which train() calls
         # with the accelerator-prepared model when optimizer creation is delayed.
-        opt_model = self.model if model is None else model
+        opt_model = _trainer_model(self) if model is None else model
         if opt_model is None:
             msg = "ASRTrainer.create_optimizer needs a model"
             raise ValueError(msg)
         norm_modules = [type(m) for m in opt_model.modules() if "Norm" in type(m).__name__]
         forbidden = list(ALL_LAYERNORM_LAYERS) + norm_modules
-        decay_parameters = set(get_parameter_names(opt_model, forbidden))
+        decay_parameters = set(_get_parameter_names(opt_model, forbidden))
         decay_parameters = {n for n in decay_parameters if "bias" not in n}
 
         # State-space / gated-delta-rule tensors are excluded by convention in
@@ -803,7 +904,7 @@ class ASRTrainer(Trainer):
         # Three-way component split. Names are checked against fixed prefixes
         # so the routing matches the freeze flags exactly: `audio_tower.*`,
         # `language_model.*`, and everything else (projector + auxiliary).
-        groups: dict[tuple[str, bool], list] = {
+        groups: dict[tuple[str, bool], list[torch.nn.Parameter]] = {
             ("encoder", True): [],
             ("encoder", False): [],
             ("decoder", True): [],
@@ -833,7 +934,7 @@ class ASRTrainer(Trainer):
         enc_lr = self.encoder_learning_rate if self.encoder_learning_rate is not None else base_lr
         enc_wd = self.encoder_weight_decay if self.encoder_weight_decay is not None else base_wd
 
-        optimizer_grouped_parameters = [
+        optimizer_grouped_parameters: list[dict[str, Any]] = [
             {
                 "params": groups[("other", True)],
                 "weight_decay": proj_wd,
@@ -902,7 +1003,7 @@ class PushToHubCallback(TrainerCallback):
             )
 
 
-def get_valid_training_args(config: dict) -> dict:
+def get_valid_training_args(config: dict[str, Any]) -> dict[str, Any]:
     """Filter config to only valid, set TrainingArguments fields.
 
     None means "unset" in the structured-config schema (scripts/train_config.py),
@@ -952,7 +1053,7 @@ TRAINING_MODEL_PARAMS = [
 ]
 
 
-def _require_fused_cross_entropy(model, cfg) -> None:
+def _require_fused_cross_entropy(model: ASRModel, cfg: DictConfig) -> None:
     """Fail at startup when fused CE is unavailable on a GPU run.
 
     Without liger's fused linear cross-entropy, every labelled forward
@@ -1021,7 +1122,7 @@ def main(cfg: DictConfig) -> None:
         cfg_container = OmegaConf.to_container(cfg, resolve=True)
         assert isinstance(cfg_container, dict)
         # The root config's keys are the group names (model/data/training).
-        wandb_config = {str(k): v for k, v in cfg_container.items()}
+        wandb_config = {str(k): v for k, v in cast(dict[Any, Any], cfg_container).items()}
         git_commit, git_dirty = _git_state()
         if git_commit:
             # Surface the commit in the run config so it's queryable/filterable
@@ -1069,10 +1170,10 @@ def main(cfg: DictConfig) -> None:
             )
         else:
             try:
-                if LIGER_TRANSFORMERS is None:
-                    assert _LIGER_IMPORT_ERROR is not None
-                    raise _LIGER_IMPORT_ERROR
-                getattr(LIGER_TRANSFORMERS, patcher_name)()
+                if _liger_transformers is None:
+                    assert _liger_import_error is not None
+                    raise _liger_import_error
+                getattr(_liger_transformers, patcher_name)()
                 logger.info("Applied liger kernels via %s()", patcher_name)
             except (ImportError, AttributeError) as e:
                 logger.warning(
@@ -1086,7 +1187,7 @@ def main(cfg: DictConfig) -> None:
     model_container = OmegaConf.to_container(cfg.model, resolve=True)
     assert isinstance(model_container, dict), "model config must be a dict"
     # Keys are ModelConfig field names (scripts/train_config.py), i.e. strings.
-    model_config_dict = {str(k): v for k, v in model_container.items()}
+    model_config_dict = {str(k): v for k, v in cast(dict[Any, Any], model_container).items()}
     for param in TRAINING_MODEL_PARAMS:
         val = cfg.training.get(param)
         if val is None:
@@ -1138,8 +1239,13 @@ def main(cfg: DictConfig) -> None:
 
     # Workaround: TRL's DataCollatorForChatML doesn't pass enable_thinking=False to Qwen3.
     # See https://github.com/huggingface/trl/issues/3387
-    if model.tokenizer.chat_template and "enable_thinking" in model.tokenizer.chat_template:
-        model.tokenizer.chat_template = model.tokenizer.chat_template.replace(
+    # transformers assigns `chat_template` from an unannotated kwargs.pop.
+    chat_template = cast(
+        str | dict[str, str] | None,
+        model.tokenizer.chat_template,  # pyright: ignore[reportUnknownMemberType]
+    )
+    if isinstance(chat_template, str) and "enable_thinking" in chat_template:
+        model.tokenizer.chat_template = chat_template.replace(
             "enable_thinking is defined and enable_thinking is false",
             "true",
         )
@@ -1148,19 +1254,22 @@ def main(cfg: DictConfig) -> None:
 
     data_collator = DataCollator(
         tokenizer=model.tokenizer,
-        feature_extractor=model.feature_extractor,
+        # Every concrete SequenceFeatureExtractor (Whisper, GLM-ASR) is callable.
+        feature_extractor=cast(_AudioFeatureExtractor, model.feature_extractor),
         sample_rate=cfg.data.sample_rate,
         projector=model.projector,
         encoder_conv_layers=model.config.encoder_conv_layers,
         audio_token=model.audio_token,
     )
 
-    callbacks = []
+    callbacks: list[TrainerCallback] = []
     if push_to_hub:
         callbacks.append(PushToHubCallback())
 
-    training_config = OmegaConf.to_container(cfg.training, resolve=True)
-    assert isinstance(training_config, dict)
+    training_container = OmegaConf.to_container(cfg.training, resolve=True)
+    assert isinstance(training_container, dict)
+    # Keys are TrainingConfig field names (scripts/train_config.py), i.e. strings.
+    training_config = cast(dict[str, Any], training_container)
     decoder_learning_rate = training_config.pop("decoder_learning_rate", None)
     projector_weight_decay = training_config.pop("projector_weight_decay", None)
     encoder_learning_rate = training_config.pop("encoder_learning_rate", None)
@@ -1192,7 +1301,10 @@ def main(cfg: DictConfig) -> None:
         encoder_weight_decay=encoder_weight_decay,
     )
 
-    trainer.train(resume_from_checkpoint=cfg.training.get("resume_from_checkpoint"))
+    # Trainer.train leaves its `trial` parameter's type partly unannotated.
+    trainer.train(  # pyright: ignore[reportUnknownMemberType]
+        resume_from_checkpoint=cfg.training.get("resume_from_checkpoint")
+    )
     # `_internal_call=True` suppresses Trainer's own hub push, which
     # `upload_folder`s the entire output_dir. The explicit push below is the
     # one that matters: it runs through `ASRModel.push_to_hub`, which sets

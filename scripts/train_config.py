@@ -59,7 +59,7 @@ class DatasetConfig:
 
 @dataclass
 class DataConfig:
-    datasets: list[DatasetConfig] = field(default_factory=list)
+    datasets: list[DatasetConfig] = field(default_factory=list[DatasetConfig])
     sample_rate: int = 16000
     dataset_cache_dir: str | None = None
     num_proc: int = 16

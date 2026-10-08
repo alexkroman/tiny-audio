@@ -31,8 +31,9 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import html
 import sys
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, NotRequired, TypedDict, TypeVar, cast
 
 import gradio as gr
 import soundfile
@@ -41,8 +42,34 @@ import typer
 from gradio import themes
 from transformers import pipeline
 
+_F = TypeVar("_F", bound=Callable[..., Any])
 
-def gpu_seconds(audio, kwargs):
+
+class Word(TypedDict):
+    """One aligned word from the pipeline's `words` output."""
+
+    word: str
+    start: float
+    end: float
+    speaker: NotRequired[str]
+
+
+class SpeakerWord(TypedDict):
+    """A word from a diarized result, where every word carries its speaker."""
+
+    word: str
+    start: float
+    end: float
+    speaker: str
+
+
+class SpeakerSegment(TypedDict):
+    start: float
+    end: float
+    speaker: str
+
+
+def gpu_seconds(audio: str, kwargs: Mapping[str, Any]) -> int:
     """GPU time to reserve for one request, from the audio's length.
 
     ZeroGPU charges each visitor's daily quota the RESERVED duration up front,
@@ -59,27 +86,27 @@ def gpu_seconds(audio, kwargs):
     return int(min(120, max(20, 10 + per_second * seconds)))
 
 
-def gpu(fn):
+def gpu(fn: _F) -> _F:
     return zero_gpu(duration=gpu_seconds)(fn) if zero_gpu else fn
 
 
 app = typer.Typer(add_completion=False)
 
 
-def format_timestamp(seconds):
+def format_timestamp(seconds: float) -> str:
     """Format seconds as MM:SS.ms"""
     mins = int(seconds // 60)
     secs = seconds % 60
     return f"{mins:02d}:{secs:05.2f}"
 
 
-def speaker_label(speaker):
+def speaker_label(speaker: str) -> str:
     """The pipeline's "SPEAKER_0" as "Speaker 1" for people; anything else unchanged."""
     prefix, _, index = (speaker or "").rpartition("_")
     return f"Speaker {int(index) + 1}" if prefix == "SPEAKER" and index.isdigit() else speaker
 
 
-def word_rows(words):
+def word_rows(words: Sequence[Word] | None) -> list[list[str]]:
     """Word timestamps as table rows: start, end, speaker, word."""
     return [
         [
@@ -105,7 +132,7 @@ SPEAKER_COLORS = [
 ]
 
 
-def speaker_turns(words):
+def speaker_turns(words: Sequence[SpeakerWord] | None) -> list[tuple[str, float, float, str]]:
     """Consecutive words of one speaker as turns: (speaker, start, end, text)."""
     turns: list[tuple[str, float, float, str]] = []
     for w in words or []:
@@ -117,7 +144,7 @@ def speaker_turns(words):
     return turns
 
 
-def conversation_html(words):
+def conversation_html(words: Sequence[SpeakerWord] | None) -> str:
     """Speaker-attributed transcript: one color-coded block per speaker turn.
 
     Styled inline rather than through the app's CSS: on Spaces this block
@@ -148,7 +175,7 @@ def conversation_html(words):
     )
 
 
-def segment_rows(segments):
+def segment_rows(segments: Sequence[SpeakerSegment] | None) -> list[list[str]]:
     """Speaker segments as table rows: start, end, speaker."""
     return [
         [
@@ -183,7 +210,7 @@ Model: <a href="https://huggingface.co/{model}" target="_blank">{model}</a></p>
 """
 
 
-def create_demo(model_path="mazesmazes/tiny-audio"):
+def create_demo(model_path: str = "mazesmazes/tiny-audio") -> gr.Blocks:
     """Create Gradio demo interface using transformers pipeline."""
 
     # Determine device
@@ -210,12 +237,18 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
     pipeline_module.NemotronDiarizer.get_instance()
 
     @gpu
-    def run_pipeline(audio, kwargs) -> dict[str, Any]:
+    def run_pipeline(audio: str, kwargs: dict[str, Any]) -> dict[str, Any]:
         # One audio input gives one result dict; transformers annotates the
         # pipeline's __call__ with the batched (list) return type.
         return cast(dict[str, Any], pipe(audio, **kwargs))
 
-    def process_audio(audio, show_timestamps, show_diarization, num_speakers=0, max_speakers=0):
+    def process_audio(
+        audio: str | None,
+        show_timestamps: bool,
+        show_diarization: bool,
+        num_speakers: float = 0,
+        max_speakers: float = 0,
+    ) -> tuple[str, str, list[list[str]], list[list[str]], gr.Tabs]:
         """Process audio file for transcription."""
         if audio is None:
             msg = "Record or upload some audio first."
@@ -247,8 +280,10 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
         conversation = conversation_html(result.get("words") if show_diarization else None)
         # Open the conversation view when there are speakers to show.
         tab = gr.Tabs(selected="conversation" if show_diarization else "transcript")
-        return result.get("text", ""), conversation, words, segments, tab
+        text: str = result.get("text", "")
+        return text, conversation, words, segments, tab
 
+    demo: gr.Blocks
     with gr.Blocks(title="Tiny Audio") as demo:
         gr.HTML(HEADER.format(model=model_path))
 
@@ -318,8 +353,11 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
                     )
 
         # The speaker controls only matter when diarization is on
+        def toggle_speaker_controls(on: bool) -> tuple[dict[str, Any], dict[str, Any]]:
+            return gr.update(visible=on), gr.update(visible=on)
+
         show_diarization.change(
-            fn=lambda on: (gr.update(visible=on), gr.update(visible=on)),
+            fn=toggle_speaker_controls,
             inputs=show_diarization,
             outputs=[num_speakers, max_speakers],
             api_visibility="private",
@@ -329,11 +367,10 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
         process_btn.click(fn=process_audio, inputs=inputs, outputs=outputs, api_name="transcribe")
 
         if EXAMPLE.exists():
-            gr.Examples(
+            # gradio annotates `fn` as a bare Callable.
+            gr.Examples(  # pyright: ignore[reportUnknownMemberType]
                 examples=[[str(EXAMPLE), True, True, 0, 0]],
                 inputs=inputs,
-                outputs=outputs,
-                fn=process_audio,
                 label="Try a two-person meeting (AMI Meeting Corpus, CC BY 4.0)",
                 cache_examples=False,
             )
@@ -349,7 +386,7 @@ def main(
     ] = "mazesmazes/tiny-audio",
     port: Annotated[int, typer.Option("--port", "-p", help="Server port")] = 7860,
     share: Annotated[bool, typer.Option("--share", help="Create public share link")] = False,
-):
+) -> None:
     """Launch ASR Gradio demo."""
     demo = create_demo(model)
     demo.launch(server_port=port, share=share, server_name="0.0.0.0", theme=THEME, css=CSS)

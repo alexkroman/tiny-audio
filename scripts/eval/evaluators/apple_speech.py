@@ -9,16 +9,21 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
+from typing import TYPE_CHECKING, Unpack
 
 from scripts.eval.audio import prepare_wav_bytes
 
-from .base import Evaluator, console
+from .base import Evaluator, EvaluatorOptions, Transcription, console
+
+if TYPE_CHECKING:
+    from Foundation import NSError
+    from Speech import SFSpeechRecognitionResult, SFSpeechRecognizer
 
 
 # PyObjC's frameworks exist only on macOS with pyobjc-framework-Speech. They
 # are dynamic bridges (every attribute is resolved at runtime), so they are
-# kept as modules and their members looked up at the call site; the stubs in
-# typings/ type those members as Any.
+# kept as modules and their members looked up at the call site; the objects
+# they hand back are annotated with the stub classes in typings/.
 @dataclass(frozen=True)
 class _AppleFrameworks:
     core_foundation: ModuleType
@@ -26,14 +31,17 @@ class _AppleFrameworks:
     speech: ModuleType
 
 
-try:
-    import CoreFoundation
-    import Foundation
-    import Speech
-except ImportError:
-    _APPLE_FRAMEWORKS: _AppleFrameworks | None = None
-else:
-    _APPLE_FRAMEWORKS = _AppleFrameworks(CoreFoundation, Foundation, Speech)
+def _load_apple_frameworks() -> _AppleFrameworks | None:
+    try:
+        import CoreFoundation
+        import Foundation
+        import Speech
+    except ImportError:
+        return None
+    return _AppleFrameworks(CoreFoundation, Foundation, Speech)
+
+
+_APPLE_FRAMEWORKS = _load_apple_frameworks()
 
 
 def _pump_run_loop_until(
@@ -59,7 +67,7 @@ class AppleSpeechEvaluator(Evaluator):
     AUTH_TIMEOUT_SECONDS = 300.0
     TRANSCRIBE_TIMEOUT_SECONDS = 60.0
 
-    def __init__(self, locale: str = "en-US", **kwargs):
+    def __init__(self, locale: str = "en-US", **kwargs: Unpack[EvaluatorOptions]) -> None:
         if _APPLE_FRAMEWORKS is None:
             msg = (
                 "Apple SFSpeechRecognizer backend requires PyObjC on macOS. "
@@ -83,9 +91,9 @@ class AppleSpeechEvaluator(Evaluator):
 
     def _authorize(self) -> None:
         auth_event = threading.Event()
-        status_box = [None]
+        status_box: list[int | None] = [None]
 
-        def handler(status):
+        def handler(status: int) -> None:
             status_box[0] = status
             auth_event.set()
 
@@ -102,9 +110,11 @@ class AppleSpeechEvaluator(Evaluator):
             )
             raise RuntimeError(msg)
 
-    def _build_recognizer(self, locale: str):
+    def _build_recognizer(self, locale: str) -> "SFSpeechRecognizer":
         ns_locale = self._apple.foundation.NSLocale.alloc().initWithLocaleIdentifier_(locale)
-        recognizer = self._apple.speech.SFSpeechRecognizer.alloc().initWithLocale_(ns_locale)
+        recognizer: SFSpeechRecognizer | None = (
+            self._apple.speech.SFSpeechRecognizer.alloc().initWithLocale_(ns_locale)
+        )
         if recognizer is None:
             msg = f"Unsupported locale: {locale}"
             raise ValueError(msg)
@@ -116,7 +126,7 @@ class AppleSpeechEvaluator(Evaluator):
             raise RuntimeError(msg)
         return recognizer
 
-    def transcribe(self, audio) -> tuple[str, float, dict | None]:
+    def transcribe(self, audio: object) -> Transcription:
         wav_bytes = prepare_wav_bytes(audio)
         fd, temp_path = tempfile.mkstemp(suffix=".wav", dir=self.temp_dir)
         try:
@@ -132,7 +142,9 @@ class AppleSpeechEvaluator(Evaluator):
             text_box = [""]
             error_box: list[str | None] = [None]
 
-            def handler(result, error):
+            def handler(
+                result: "SFSpeechRecognitionResult | None", error: "NSError | None"
+            ) -> None:
                 if error is not None:
                     error_box[0] = str(error)
                     done_event.set()

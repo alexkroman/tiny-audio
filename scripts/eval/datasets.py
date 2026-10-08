@@ -3,7 +3,11 @@
 from dataclasses import dataclass
 from typing import cast
 
-from datasets import Audio, IterableDataset, load_dataset
+from datasets import (
+    Audio,
+    IterableDataset,
+    load_dataset,  # pyright: ignore[reportUnknownVariableType]  # untyped **config_kwargs
+)
 
 
 @dataclass
@@ -149,7 +153,7 @@ def load_eval_dataset(
     split: str,
     config_override: str | None = None,
     shuffle: bool = True,
-):
+) -> IterableDataset:
     """Load any dataset by name with unified interface.
 
     Args:
@@ -175,7 +179,8 @@ def load_eval_dataset(
             else load_dataset(cfg.path, split=split, streaming=True)
         ),
     )
-    ds = ds.cast_column(cfg.audio_field, Audio(sampling_rate=16000))
+    # datasets leaves the feature dict/list/seed parameters unparameterized.
+    ds = ds.cast_column(cfg.audio_field, Audio(sampling_rate=16000))  # pyright: ignore[reportUnknownMemberType]
     if shuffle:
-        ds = ds.shuffle(seed=SHUFFLE_SEED, buffer_size=SHUFFLE_BUFFER_SIZE)
+        ds = ds.shuffle(seed=SHUFFLE_SEED, buffer_size=SHUFFLE_BUFFER_SIZE)  # pyright: ignore[reportUnknownMemberType]
     return ds

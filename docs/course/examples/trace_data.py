@@ -1,21 +1,134 @@
 import base64
 import io
 import pathlib
-from typing import cast
+from collections.abc import Callable, Sequence
+from typing import Any, Literal, Protocol, TypedDict, cast
 
 import matplotlib
 
 matplotlib.use("Agg")  # Use non-interactive backend
 import matplotlib.pyplot as plt
 import numpy as np
+import numpy.typing as npt
 import torch
-from datasets import Dataset, load_dataset
-from matplotlib.patches import Rectangle
+from datasets import (
+    Dataset,
+    load_dataset,  # pyright: ignore[reportUnknownVariableType]  # untyped **config_kwargs
+)
+from matplotlib.colorbar import Colorbar
+from matplotlib.figure import Figure
+from matplotlib.image import AxesImage
+from matplotlib.patches import Patch, Rectangle
+from transformers import BatchFeature
 
 from tiny_audio.asr_modeling import ASRModel
 
+FloatArray = npt.NDArray[np.floating[Any]]
 
-def main():
+
+class _Axes(Protocol):
+    """The `matplotlib.axes.Axes` calls this script makes, with the keywords it passes."""
+
+    def axis(self, arg: Literal["off"], /) -> object: ...
+    def add_patch(self, p: Patch, /) -> Patch: ...
+    def text(
+        self,
+        x: float,
+        y: float,
+        s: str,
+        *,
+        ha: str,
+        va: str,
+        fontsize: float,
+        fontweight: str,
+    ) -> object: ...
+    def annotate(
+        self,
+        text: str,
+        xy: tuple[float, float],
+        *,
+        xytext: tuple[float, float],
+        arrowprops: dict[str, Any],
+    ) -> object: ...
+    def set_xlim(self, left: float, right: float, /) -> object: ...
+    def set_ylim(self, bottom: float, top: float, /) -> object: ...
+    def set_title(
+        self, label: str, *, fontsize: float = ..., fontweight: str = ..., pad: float = ...
+    ) -> object: ...
+    def set_xlabel(self, xlabel: str, /) -> object: ...
+    def set_ylabel(self, ylabel: str, /) -> object: ...
+    def plot(
+        self, x: FloatArray, y: Sequence[float], /, *, color: str, linewidth: float
+    ) -> object: ...
+    def axhline(self, *, y: float, color: str, linestyle: str, linewidth: float) -> object: ...
+    def grid(self, visible: bool, /, *, alpha: float) -> None: ...
+    def imshow(
+        self,
+        x: FloatArray,
+        /,
+        *,
+        aspect: str,
+        origin: str,
+        cmap: str,
+        vmin: float | None = ...,
+        vmax: float | None = ...,
+    ) -> AxesImage: ...
+    def set_xticks(self, ticks: FloatArray, /) -> object: ...
+    def set_xticklabels(self, labels: Sequence[str], /) -> object: ...
+
+
+class _Figure(Protocol):
+    """The `matplotlib.figure.Figure` calls this script makes."""
+
+    def savefig(self, fname: io.BytesIO, /, *, format: str, dpi: int, bbox_inches: str) -> None: ...
+    def colorbar(self, mappable: AxesImage, /, *, ax: _Axes, label: str) -> Colorbar: ...
+
+
+class TensorStats(TypedDict):
+    name: str
+    shape: str
+    mean: str
+    std: str
+    min: str
+    max: str
+
+
+class Heatmap(TypedDict):
+    values: list[list[float]]
+    width: int
+    height: int
+
+
+class StageOutput(Heatmap):
+    stats: TensorStats
+
+
+class ProjectorOutput(StageOutput):
+    nearest_tokens: str
+
+
+class TracePayload(TypedDict):
+    reference_text: str
+    waveform: list[float]
+    sampling_rate: int
+    audio_duration: float
+    spectrogram: Heatmap
+    encoder_output: StageOutput
+    projector_output: ProjectorOutput
+
+
+def _subplots(width: float, height: float) -> tuple[_Figure, _Axes]:
+    """`plt.subplots(figsize=(width, height))` for a single Axes."""
+    fig, ax = plt.subplots(figsize=(width, height))  # pyright: ignore[reportUnknownMemberType]
+    return cast(_Figure, fig), cast(_Axes, ax)
+
+
+def _to_numpy(tensor: torch.Tensor) -> FloatArray:
+    # torch annotates numpy() as a bare ndarray.
+    return cast(FloatArray, tensor.numpy())  # pyright: ignore[reportUnknownMemberType]
+
+
+def main() -> None:
     # --- 1. Load a single audio sample ---
     print("Loading audio sample...")
     # A single named split loads as a Dataset (not a DatasetDict / IterableDataset).
@@ -23,10 +136,11 @@ def main():
         Dataset,
         load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation"),
     )
-    audio_sample = dataset[0]["audio"]
-    waveform = audio_sample["array"]
-    sampling_rate = audio_sample["sampling_rate"]
-    reference_text = dataset[0]["text"]
+    row = cast("dict[str, Any]", dataset[0])
+    audio_sample: dict[str, Any] = row["audio"]
+    waveform: FloatArray = audio_sample["array"]
+    sampling_rate: int = audio_sample["sampling_rate"]
+    reference_text: str = row["text"]
     print(
         f"✓ Audio loaded. Duration: {len(waveform) / sampling_rate:.2f}s, Rate: {sampling_rate} Hz"
     )
@@ -46,16 +160,18 @@ def main():
         encoder_device = "cpu"
 
     model.projector = model.projector.to(encoder_device)
-    model.eval()
+    _module_eval(model)
     print(f"✓ Model loaded to '{encoder_device}' device.")
 
     # --- 3. Process data ---
     print("\nProcessing audio...")
 
     # Get Spectrogram
-    features = model.feature_extractor(waveform, sampling_rate=sampling_rate, return_tensors="pt")
-    input_features = features.input_features
-    spectrogram = input_features.squeeze(0).cpu().numpy()
+    # The feature extractor is a WhisperFeatureExtractor-style callable.
+    extract_features = cast(Callable[..., BatchFeature], model.feature_extractor)
+    features = extract_features(waveform, sampling_rate=sampling_rate, return_tensors="pt")
+    input_features: torch.Tensor = features["input_features"]
+    spectrogram = _to_numpy(input_features.squeeze(0).cpu())
     print(f"  Spectrogram shape: {spectrogram.shape}")
 
     # Get Encoder Output
@@ -86,14 +202,16 @@ def main():
 
         # Normalize for cosine similarity
         proj_norm = projector_flat / projector_flat.norm(dim=-1, keepdim=True)
-        text_norm = text_embeddings / text_embeddings.norm(dim=-1, keepdim=True)
+        # torch leaves Tensor.norm's `dim` / `dtype` unannotated.
+        text_norms: torch.Tensor = text_embeddings.norm(dim=-1, keepdim=True)  # pyright: ignore[reportUnknownMemberType]
+        text_norm = text_embeddings / text_norms
 
         # Get top token for each time step
         similarities = torch.matmul(proj_norm, text_norm.T)  # [seq_len, vocab_size]
         top_tokens = similarities.argmax(dim=-1)  # [seq_len]
 
         # Decode to text
-        nearest_tokens = model.tokenizer.batch_decode(
+        nearest_tokens = model.tokenizer.batch_decode(  # pyright: ignore[reportUnknownMemberType]
             top_tokens.cpu().unsqueeze(1), skip_special_tokens=False
         )
         nearest_tokens_text = " ".join([t.strip() for t in nearest_tokens])  # All tokens
@@ -105,14 +223,14 @@ def main():
     # --- 4. Prepare data for visualization ---
     print("\nPreparing data for visualization...")
     # Downsample waveform for faster plotting
-    waveform_downsampled = waveform[::10].tolist()
+    waveform_downsampled: list[float] = waveform[::10].tolist()
     audio_duration = len(waveform) / sampling_rate  # Calculate duration from original waveform
 
     # Use full embedding space for visualization
-    encoder_viz_data = encoder_output.squeeze(0).cpu().float().numpy()
-    projector_viz_data = projector_output.squeeze(0).cpu().float().numpy()
+    encoder_viz_data = _to_numpy(encoder_output.squeeze(0).cpu().float())
+    projector_viz_data = _to_numpy(projector_output.squeeze(0).cpu().float())
 
-    data_payload = {
+    data_payload: TracePayload = {
         "reference_text": reference_text,
         "waveform": waveform_downsampled,
         "sampling_rate": sampling_rate,
@@ -150,7 +268,16 @@ def main():
     print(f"\n✓ Saved HTML report to '{output_path}'")
 
 
-def get_stats(tensor, name):
+def _module_eval(module: torch.nn.Module) -> None:
+    """`module.eval()`, in place.
+
+    transformers leaves `PreTrainedModel.eval` unannotated; typed as
+    `nn.Module` the call resolves. Same method at runtime.
+    """
+    module.eval()
+
+
+def get_stats(tensor: torch.Tensor, name: str) -> TensorStats:
     return {
         "name": name,
         "shape": str(tuple(tensor.shape)),
@@ -161,19 +288,19 @@ def get_stats(tensor, name):
     }
 
 
-def fig_to_base64(fig):
+def fig_to_base64(fig: _Figure) -> str:
     """Convert matplotlib figure to base64 encoded image."""
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
     buf.seek(0)
     img_base64 = base64.b64encode(buf.read()).decode("utf-8")
-    plt.close(fig)
+    plt.close(cast(Figure, fig))
     return f"data:image/png;base64,{img_base64}"
 
 
-def create_pipeline_summary(data):
+def create_pipeline_summary(data: TracePayload) -> str:
     """Create a summary diagram showing the transformation pipeline."""
-    fig, ax = plt.subplots(figsize=(12, 3))
+    fig, ax = _subplots(12, 3)
     ax.axis("off")
 
     # Calculate dimensions
@@ -219,7 +346,7 @@ def create_pipeline_summary(data):
     return fig_to_base64(fig)
 
 
-def generate_observable_html(data):
+def generate_observable_html(data: TracePayload) -> str:
     """Generate HTML report with matplotlib visualizations."""
 
     # Create visualizations
@@ -229,7 +356,7 @@ def generate_observable_html(data):
     pipeline_summary_img = create_pipeline_summary(data)
 
     # 1. Waveform plot
-    fig, ax = plt.subplots(figsize=(12, 3))
+    fig, ax = _subplots(12, 3)
     time_axis = np.arange(len(data["waveform"])) * 10 / data["sampling_rate"]
     ax.plot(time_axis, data["waveform"], color="royalblue", linewidth=0.5)
     ax.axhline(y=0, color="black", linestyle="-", linewidth=0.5)
@@ -240,7 +367,7 @@ def generate_observable_html(data):
     waveform_img = fig_to_base64(fig)
 
     # 2. Spectrogram
-    fig, ax = plt.subplots(figsize=(12, 4))
+    fig, ax = _subplots(12, 4)
     spec_data = np.array(data["spectrogram"]["values"])
     # Spectrogram is [freq_bins, time_steps] = [128, 3000]
     im = ax.imshow(spec_data, aspect="auto", origin="lower", cmap="viridis")
@@ -258,11 +385,11 @@ def generate_observable_html(data):
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Mel Frequency Bin")
     ax.set_title("2. Log-Mel Spectrogram (Input to Encoder)")
-    plt.colorbar(im, ax=ax, label="dB")
+    fig.colorbar(im, ax=ax, label="dB")
     spectrogram_img = fig_to_base64(fig)
 
     # 3. Encoder output (show most active dimensions)
-    fig, ax = plt.subplots(figsize=(12, 6))
+    fig, ax = _subplots(12, 6)
     encoder_data = np.array(data["encoder_output"]["values"])
     # Select the top 64 most active dimensions based on variance
     variances = np.var(encoder_data, axis=1)
@@ -278,11 +405,11 @@ def generate_observable_html(data):
         f"Embedding Dimension (64 most active of {data['encoder_output']['height']} dims)"
     )
     ax.set_title("3. Encoder Output (Audio Embeddings - Most Active Dimensions)")
-    plt.colorbar(im, ax=ax, label="Activation")
+    fig.colorbar(im, ax=ax, label="Activation")
     encoder_img = fig_to_base64(fig)
 
     # 4. Projector output (show most active dimensions)
-    fig, ax = plt.subplots(figsize=(12, 6))
+    fig, ax = _subplots(12, 6)
     projector_data = np.array(data["projector_output"]["values"])
     # Select the top 64 most active dimensions based on variance
     variances = np.var(projector_data, axis=1)
@@ -298,7 +425,7 @@ def generate_observable_html(data):
         f"Embedding Dimension (64 most active of {data['projector_output']['height']} dims)"
     )
     ax.set_title("4. Projector Output (Text-like Embeddings - Most Active Dimensions)")
-    plt.colorbar(im, ax=ax, label="Activation")
+    fig.colorbar(im, ax=ax, label="Activation")
     projector_img = fig_to_base64(fig)
 
     # Generate HTML

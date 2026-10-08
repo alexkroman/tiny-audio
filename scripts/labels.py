@@ -9,6 +9,8 @@ truncation. Used by the training collator in scripts/train.py.
 import functools
 import os
 import re
+from collections.abc import Callable
+from typing import cast
 
 import ftfy
 import truecase
@@ -187,9 +189,10 @@ def _capitalize_sentence_starts(text: str) -> str:
     acronym rather than a boundary.
     """
 
-    def repl(match: re.Match) -> str:
+    def repl(match: re.Match[str]) -> str:
         if _SPELLED_LETTER_RUN_RE.search(text[: match.start()]):
-            return match.group(0)
+            whole: str = match.group(0)
+            return whole
         return f"{match.group(1)} {match.group(2).upper()}"
 
     return _SENT_START_LOWERCASE_RE.sub(repl, text)
@@ -212,12 +215,17 @@ def _post_truecase_cleanup(text: str) -> str:
 # _normalize_label so downstream regexes see canonical ASCII-leaning text.
 #
 # Truecase (`truecase`, imported above): NLTK-backed statistical recasing for
-# transcripts that arrive in mono-case form (all-upper or zero-caps).
+# transcripts that arrive in mono-case form (all-upper or zero-caps). The
+# package ships without annotations; `get_true_case` maps a str to a str.
+_get_true_case = cast(
+    Callable[[str], str],
+    truecase.get_true_case,  # pyright: ignore[reportUnknownMemberType]
+)
 # LOCAL_RANK=0 guard mirrors Ultravox — avoids multiple workers racing on the
 # punkt download.
 if int(os.environ.get("LOCAL_RANK", "0")) == 0:
     try:
-        truecase.get_true_case("test")
+        _get_true_case("test")
     except LookupError:
         import nltk
 
@@ -225,8 +233,13 @@ if int(os.environ.get("LOCAL_RANK", "0")) == 0:
         # both so this works on either base image. Quiet=True suppresses
         # progress bars; the fetch is ~13 MB and usually completes in
         # seconds.
-        nltk.download("punkt_tab", quiet=True)
-        nltk.download("punkt", quiet=True)
+        # nltk leaves `download`'s parameters unannotated.
+        download = cast(
+            Callable[..., bool],
+            nltk.download,  # pyright: ignore[reportUnknownMemberType]
+        )
+        download("punkt_tab", quiet=True)
+        download("punkt", quiet=True)
 
 
 # Per-source casing policy, set via a dataset config's `text_case` field and
@@ -293,7 +306,7 @@ def _recase_monocase_text(text: str) -> str:
     """
     letters = [c for c in text if c.isalpha()]
     if len(letters) >= _MIN_TRUECASE_LETTERS:
-        return _post_truecase_cleanup(truecase.get_true_case(text))
+        return _post_truecase_cleanup(_get_true_case(text))
     return _capitalize_first_letter(text.lower())
 
 
@@ -382,6 +395,6 @@ def _normalize_label(raw_text: str | None, text_case: str | None = None) -> str:
     if text_case == TEXT_CASE_MONO:
         return _recase_monocase_text(text)
     if _needs_truecase(text):
-        text = truecase.get_true_case(text)
+        text = _get_true_case(text)
         text = _post_truecase_cleanup(text)
     return text

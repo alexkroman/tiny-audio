@@ -23,21 +23,56 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
+from collections.abc import Callable, Iterable
 from enum import StrEnum
-from typing import Annotated, cast
+from typing import Annotated, Any, Protocol, TypedDict, cast
 
+import numpy as np
+import numpy.typing as npt
 import torch
 import typer
 from omegaconf import OmegaConf
+from transformers import BatchFeature
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm
 from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
-from transformers.trainer_pt_utils import get_parameter_names
+from transformers.trainer_pt_utils import (
+    get_parameter_names,  # pyright: ignore[reportUnknownVariableType]
+)
 
 from scripts.utils import get_project_root
 from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
-from tiny_audio.projectors import MLPAudioProjector
+
+# `get_parameter_names` ships without annotations; this is its signature as used here.
+_get_parameter_names = cast(
+    Callable[[torch.nn.Module, list[type[torch.nn.Module]]], list[str]], get_parameter_names
+)
+
+
+class _AudioFeatureExtractor(Protocol):
+    """The feature-extractor call made below (every concrete extractor is callable)."""
+
+    def __call__(
+        self,
+        raw_speech: list[npt.NDArray[np.float32]],
+        /,
+        *,
+        sampling_rate: int,
+        padding: str,
+        return_attention_mask: bool,
+        return_tensors: str,
+    ) -> BatchFeature: ...
+
+
+class ParamGroup(TypedDict):
+    """One optimizer param group as ASRTrainer would build it, plus audit fields."""
+
+    label: str
+    params: list[torch.nn.Parameter]
+    param_names: list[str]
+    lr: float | None
+    wd: float | None
 
 
 def load_embedded_training_knobs() -> dict[str, float | None]:
@@ -57,9 +92,11 @@ def load_embedded_training_knobs() -> dict[str, float | None]:
             "projector_weight_decay": None,
         }
     cfg = OmegaConf.to_container(OmegaConf.load(yaml_path))
-    training = (cfg.get("training") if isinstance(cfg, dict) else None) or {}
+    # A YAML mapping's keys are strings.
+    root = cast(dict[str, Any], cfg) if isinstance(cfg, dict) else {}
+    training: dict[str, Any] = root.get("training") or {}
 
-    def _to_float(v):
+    def _to_float(v: Any) -> float | None:
         return float(v) if v is not None else None
 
     return {
@@ -73,7 +110,7 @@ def load_embedded_training_knobs() -> dict[str, float | None]:
 def build_param_groups(
     model: ASRModel,
     knobs: dict[str, float | None],
-) -> list[dict]:
+) -> list[ParamGroup]:
     """Mirror scripts/train.py ASRTrainer.create_optimizer's four-group split.
 
     Groups: (is_decoder, decay) for is_decoder in {False, True} and
@@ -83,8 +120,12 @@ def build_param_groups(
     routing audit and the configured `lr` / `wd` that ASRTrainer would
     apply under embedded.yaml's knobs.
     """
-    forbidden = [*list(ALL_LAYERNORM_LAYERS), Qwen3RMSNorm, LlamaRMSNorm]
-    decay_set = set(get_parameter_names(model, forbidden))
+    forbidden: list[type[torch.nn.Module]] = [
+        *list(ALL_LAYERNORM_LAYERS),
+        Qwen3RMSNorm,
+        LlamaRMSNorm,
+    ]
+    decay_set = set(_get_parameter_names(model, forbidden))
     decay_set = {n for n in decay_set if "bias" not in n}
 
     base_lr = knobs["learning_rate"]
@@ -115,7 +156,7 @@ def build_param_groups(
         (True, True): ("decoder   / decay", dec_lr, dec_wd),
         (True, False): ("decoder   / no-decay", dec_lr, 0.0),
     }
-    groups: list[dict] = []
+    groups: list[ParamGroup] = []
     for key, items in buckets.items():
         label, lr, wd = labels[key]
         groups.append(
@@ -130,7 +171,7 @@ def build_param_groups(
     return groups
 
 
-def effective_update_norms(groups: list[dict]) -> dict[str, float]:
+def effective_update_norms(groups: list[ParamGroup]) -> dict[str, float]:
     """SGD-style lr x ||grad|| approximation aggregated to projector/decoder.
 
     NOT Adam's true update: Adam normalizes per-parameter by sqrt(v) + eps,
@@ -141,10 +182,11 @@ def effective_update_norms(groups: list[dict]) -> dict[str, float]:
     proj_total = 0.0
     dec_total = 0.0
     for g in groups:
-        if g["lr"] is None or not g["params"]:
+        lr = g["lr"]
+        if lr is None or not g["params"]:
             continue
         gn = grad_norm(g["params"])
-        contribution = g["lr"] * gn
+        contribution = lr * gn
         if g["label"].startswith("projector"):
             proj_total += contribution
         else:
@@ -216,8 +258,13 @@ def synthetic_batch(
     """Build a batch shaped exactly like train.DataCollator output."""
     sr = model.feature_extractor.sampling_rate
     n_samples = int(audio_seconds * sr)
-    audio_arrays = [torch.randn(n_samples).numpy() for _ in range(batch_size)]
-    audio_out = model.feature_extractor(
+    audio_arrays: list[npt.NDArray[np.float32]] = [
+        # torch annotates Tensor.numpy's result as a bare ndarray.
+        torch.randn(n_samples).numpy()  # pyright: ignore[reportUnknownMemberType]
+        for _ in range(batch_size)
+    ]
+    feature_extractor = cast(_AudioFeatureExtractor, model.feature_extractor)
+    audio_out = feature_extractor(
         audio_arrays,
         sampling_rate=sr,
         padding="longest",
@@ -225,7 +272,9 @@ def synthetic_batch(
         return_tensors="pt",
     )
 
-    enc_lengths = model._compute_encoder_output_lengths(audio_out.attention_mask)
+    audio_attention_mask: torch.Tensor = audio_out["attention_mask"]
+    input_features: torch.Tensor = audio_out["input_features"]
+    enc_lengths = model._compute_encoder_output_lengths(audio_attention_mask)
     token_counts = model.projector.get_output_length(enc_lengths).to(torch.long)
 
     tok = model.tokenizer
@@ -238,15 +287,18 @@ def synthetic_batch(
             {"role": "user", "content": user},
             {"role": "assistant", "content": response},
         ]
-        full_text = tok.apply_chat_template(
+        # apply_chat_template's `tools`/`documents` parameters are unannotated.
+        full_text = tok.apply_chat_template(  # pyright: ignore[reportUnknownMemberType]
             messages, tokenize=False, add_generation_prompt=False, enable_thinking=False
         )
-        prompt_text = tok.apply_chat_template(
+        prompt_text = tok.apply_chat_template(  # pyright: ignore[reportUnknownMemberType]
             messages[:1],
             tokenize=False,
             add_generation_prompt=True,
             enable_thinking=False,
         )
+        assert isinstance(full_text, str)
+        assert isinstance(prompt_text, str)
         full_ids = tok(full_text, add_special_tokens=False)["input_ids"]
         prompt_ids = tok(prompt_text, add_special_tokens=False)["input_ids"]
         sample_labels = [-100] * len(prompt_ids) + list(full_ids[len(prompt_ids) :])
@@ -256,6 +308,7 @@ def synthetic_batch(
 
     max_len = max(len(x) for x in samples_input_ids)
     pad_id = tok.pad_token_id
+    assert isinstance(pad_id, int)
     input_ids = torch.full((batch_size, max_len), pad_id, dtype=torch.long)
     attention_mask = torch.zeros((batch_size, max_len), dtype=torch.long)
     labels = torch.full((batch_size, max_len), -100, dtype=torch.long)
@@ -268,13 +321,13 @@ def synthetic_batch(
         "input_ids": input_ids,
         "attention_mask": attention_mask,
         "labels": labels,
-        "input_features": audio_out.input_features,
-        "audio_attention_mask": audio_out.attention_mask,
+        "input_features": input_features,
+        "audio_attention_mask": audio_attention_mask,
         "audio_token_counts": token_counts,
     }
 
 
-def grad_norm(params) -> float:
+def grad_norm(params: Iterable[torch.nn.Parameter]) -> float:
     total = 0.0
     for p in params:
         if p.grad is None:
@@ -283,17 +336,8 @@ def grad_norm(params) -> float:
     return math.sqrt(total)
 
 
-def projector_submodule_norms(model: ASRModel) -> dict[str, float] | None:
-    """Per-named-submodule grad norms for the MLP projector.
-
-    Returns None for non-MLP projectors so the caller can print a skip note;
-    the other projector types (MOSA, MoE, QFormer) have different internal
-    structures and would each need their own carve-up (out of scope per the
-    design spec).
-    """
-    if not isinstance(model.projector, MLPAudioProjector):
-        return None
-
+def projector_submodule_norms(model: ASRModel) -> dict[str, float]:
+    """Per-named-submodule grad norms for the MLP projector."""
     norms: dict[str, float] = {}
     for name, param in model.projector.named_parameters():
         if param.grad is None:
@@ -372,21 +416,15 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
     print()
 
     sub_norms = projector_submodule_norms(model)
-    if sub_norms is None:
-        print(
-            "[4b] Projector submodule gradient norms: "
-            f"(skipped — projector is {type(model.projector).__name__}, not MLPAudioProjector)"
-        )
-    else:
-        print("[4b] Projector submodule gradient norms:")
-        max_norm = max(sub_norms.values())
-        for name, n in sub_norms.items():
-            ratio = (n / max_norm) if max_norm > 0 else 0.0
-            print(f"    {name:18s} ||grad|| = {n:.6e}  ({ratio:5.2f}x of max)")
+    print("[4b] Projector submodule gradient norms:")
+    max_norm = max(sub_norms.values())
+    for name, n in sub_norms.items():
+        ratio = (n / max_norm) if max_norm > 0 else 0.0
+        print(f"    {name:18s} ||grad|| = {n:.6e}  ({ratio:5.2f}x of max)")
     print()
 
     print("[5] Per-submodule gradient norms (decoder breakdown):")
-    decoder_groups: dict[str, list] = defaultdict(list)
+    decoder_groups: defaultdict[str, list[torch.nn.Parameter]] = defaultdict(list)
     for name, p in model.language_model.named_parameters():
         if p.grad is None:
             continue
@@ -416,16 +454,21 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
     assert isinstance(embed_weight, torch.Tensor)
     if embed_weight.grad is not None:
         row_grad = embed_weight.grad[audio_id].detach().float()
-        print(f"    embed_tokens[<audio>] ||grad|| = {row_grad.norm().item():.6e}")
+        # torch leaves Tensor.norm's `dim` / `dtype` parameters unannotated.
+        print(
+            f"    embed_tokens[<audio>] ||grad|| = {row_grad.norm().item():.6e}"  # pyright: ignore[reportUnknownMemberType]
+        )
         print("    (should be zero if labels mask user prompt and no assistant token is <audio>)")
-    out_emb = model.language_model.get_output_embeddings()
+    out_emb = model.get_output_embeddings()
     out_weight = out_emb.weight if out_emb is not None else None
     assert out_weight is None or isinstance(out_weight, torch.Tensor)
     tied = out_weight is not None and out_weight.data_ptr() == embed_weight.data_ptr()
     if out_weight is not None and out_weight.grad is not None and not tied:
         # Untied head — separate gradient meaningful.
         row_grad = out_weight.grad[audio_id].detach().float()
-        print(f"    lm_head[<audio>]      ||grad|| = {row_grad.norm().item():.6e}")
+        print(
+            f"    lm_head[<audio>]      ||grad|| = {row_grad.norm().item():.6e}"  # pyright: ignore[reportUnknownMemberType]
+        )
     else:
         print(f"    lm_head tied to embed_tokens: {tied}")
     print()
@@ -488,7 +531,7 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
     print()
 
     print("[11] Verdict:")
-    issues = []
+    issues: list[str] = []
     warnings: list[str] = []
 
     if enc_with_grad != 0 or enc_norm != 0.0:
@@ -572,7 +615,7 @@ def main(
         Dtype.bfloat16: torch.bfloat16,
         Dtype.float16: torch.float16,
     }[Dtype(dtype)]
-    torch.manual_seed(0)
+    torch.manual_seed(0)  # pyright: ignore[reportUnknownMemberType]
     built = build_model(torch_dtype, device, model_id=model)
     report(built, torch_dtype, device)
 
