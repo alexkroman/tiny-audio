@@ -79,7 +79,9 @@ class TestEscapeHatches:
             _require_fused_cross_entropy(_model(False, vocab=49152), _cfg())
 
 
-def test_linear_attention_notice_is_info_on_inference_load(caplog: pytest.LogCaptureFixture) -> None:
+def test_linear_attention_notice_is_info_on_inference_load(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """A from_pretrained load is inference: the slower torch path is not actionable there."""
     caplog.set_level(logging.INFO, logger=asr_modeling.logger.name)
     asr_modeling._log_linear_attention_backends(logging.INFO)

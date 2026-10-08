@@ -63,7 +63,9 @@ class TestASRConfigSerialization:
         parsed = json.loads(s)
         assert parsed["audio_model_id"] == base_asr_config.audio_model_id
 
-    def test_save_and_from_pretrained_round_trip(self, base_asr_config: ASRConfig, tmp_path: Path) -> None:
+    def test_save_and_from_pretrained_round_trip(
+        self, base_asr_config: ASRConfig, tmp_path: Path
+    ) -> None:
         save_dir = tmp_path / "cfg"
         save_dir.mkdir()
         base_asr_config.save_pretrained(save_dir)  # pyright: ignore[reportUnknownMemberType]  # untyped **kwargs

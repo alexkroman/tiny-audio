@@ -14,6 +14,11 @@ silent: the config looks conservative, the checkpoint loads, and the scale is
 wrong. So the scale assertion here matters more than the shape one.
 """
 
+from collections.abc import Iterator
+from typing import Any, Protocol, cast
+
+import pytest
+import torch
 from conftest import stub
 from peft import LoraConfig, get_peft_model
 from torch import nn
@@ -26,8 +31,8 @@ from tiny_audio.asr_modeling import ASRModel
 class GateBlock(nn.Module):
     """Mirrors Qwen3.5's linear_attn geometry: two (16, 2048) gates, two wide ones."""
 
-    def __init__(self, dim=2048, heads=16):
-        super().__init__()
+    def __init__(self, dim: int = 2048, heads: int = 16) -> None:
+        super().__init__()  # pyright: ignore[reportUnknownMemberType]  # untyped *args
         self.in_proj_a = nn.Linear(dim, heads, bias=False)
         self.in_proj_b = nn.Linear(dim, heads, bias=False)
         self.in_proj_qkv = nn.Linear(dim, 3 * dim, bias=False)
@@ -41,47 +46,63 @@ class FakeDecoderConfig(PretrainedConfig):
 class FakeDecoder(PreTrainedModel):
     config_class = FakeDecoderConfig
 
-    def __init__(self, depth=2):
-        super().__init__(FakeDecoderConfig())
+    def __init__(self, depth: int = 2) -> None:
+        super().__init__(FakeDecoderConfig())  # pyright: ignore[reportUnknownMemberType]
         self.layers = nn.ModuleList(GateBlock() for _ in range(depth))
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x
 
 
 TARGETS = ["in_proj_a", "in_proj_b", "in_proj_qkv", "out_proj"]
 
 
-def _adapters(model):
+class _LoraAdapter(Protocol):
+    """The per-adapter dicts a PEFT LoRA layer carries (unannotated in peft)."""
+
+    r: dict[str, int]
+    lora_alpha: dict[str, float]
+    scaling: dict[str, float]
+
+
+def _identity_peft(model: nn.Module, _config: object) -> nn.Module:
+    return model
+
+
+def _adapters(model: nn.Module) -> dict[str, tuple[int, float, float]]:
     """Map leaf module name -> (r, alpha, scaling) for layer 0's adapters."""
-    out = {}
-    for name, mod in model.named_modules():
+    out: dict[str, tuple[int, float, float]] = {}
+    for name, mod in cast(Iterator[tuple[str, nn.Module]], model.named_modules()):
         if hasattr(mod, "lora_A") and ".layers.0." in f".{name}.":
             leaf = name.split(".")[-1]
-            out[leaf] = (mod.r["default"], mod.lora_alpha["default"], mod.scaling["default"])
+            lora = cast(_LoraAdapter, mod)
+            out[leaf] = (lora.r["default"], lora.lora_alpha["default"], lora.scaling["default"])
     return out
 
 
 class TestASRConfigFields:
-    def test_defaults_are_empty_dicts_not_none(self):
+    def test_defaults_are_empty_dicts_not_none(self) -> None:
         # PEFT's LoraConfig defaults these to {} and `get_pattern_key` iterates
         # the keys unconditionally, so None would be a TypeError at setup time.
         config = ASRConfig()
         assert config.lora_rank_pattern == {}
         assert config.lora_alpha_pattern == {}
 
-    def test_survives_json_round_trip(self):
+    def test_survives_json_round_trip(self) -> None:
         # These land in config.json and have to come back on from_pretrained.
         config = ASRConfig(
             lora_rank_pattern={"in_proj_a": 16}, lora_alpha_pattern={"in_proj_a": 32}
         )
-        revived = ASRConfig.from_dict(config.to_dict())
+        # transformers' PretrainedConfig.from_dict leaves **kwargs untyped
+        revived = ASRConfig.from_dict(  # pyright: ignore[reportUnknownMemberType]
+            config.to_dict()
+        )
         assert revived.lora_rank_pattern == {"in_proj_a": 16}
         assert revived.lora_alpha_pattern == {"in_proj_a": 32}
 
 
 class TestPatternApplication:
-    def test_rank_override_applies_only_to_named_modules(self):
+    def test_rank_override_applies_only_to_named_modules(self) -> None:
         model = get_peft_model(
             FakeDecoder(),
             LoraConfig(
@@ -100,7 +121,7 @@ class TestPatternApplication:
         assert got["in_proj_qkv"][0] == 64
         assert got["out_proj"][0] == 64
 
-    def test_scale_is_preserved_across_the_override(self):
+    def test_scale_is_preserved_across_the_override(self) -> None:
         """The whole reason `alpha_pattern` is set alongside `rank_pattern`."""
         model = get_peft_model(
             FakeDecoder(),
@@ -116,7 +137,7 @@ class TestPatternApplication:
         for leaf, (_, _, scaling) in _adapters(model).items():
             assert scaling == 2.0, f"{leaf} scale drifted to {scaling}"
 
-    def test_rank_without_alpha_silently_multiplies_the_scale(self):
+    def test_rank_without_alpha_silently_multiplies_the_scale(self) -> None:
         """Pin the failure mode, so nobody 'simplifies' alpha_pattern away.
 
         This is not desired behaviour being asserted -- it is the booby trap,
@@ -137,8 +158,8 @@ class TestPatternApplication:
         assert got["in_proj_a"][2] == 8.0  # 128 / 16, not the intended 2.0
         assert got["out_proj"][2] == 2.0
 
-    def test_override_shrinks_the_parameter_budget(self):
-        def lora_params(**kwargs):
+    def test_override_shrinks_the_parameter_budget(self) -> None:
+        def lora_params(**kwargs: Any) -> int:
             model = get_peft_model(
                 FakeDecoder(),
                 LoraConfig(r=64, lora_alpha=128, target_modules=TARGETS, bias="none", **kwargs),
@@ -155,16 +176,16 @@ class TestPatternApplication:
 
 
 class TestSetupLoraPassthrough:
-    def test_setup_lora_forwards_both_patterns(self, monkeypatch):
+    def test_setup_lora_forwards_both_patterns(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """ASRModel._setup_lora must hand the config's patterns to PEFT."""
-        captured = {}
+        captured: dict[str, Any] = {}
 
         class FakeLoraConfig:
-            def __init__(self, **kwargs):
+            def __init__(self, **kwargs: Any) -> None:
                 captured.update(kwargs)
 
         monkeypatch.setattr("tiny_audio.asr_modeling.LoraConfig", FakeLoraConfig)
-        monkeypatch.setattr("tiny_audio.asr_modeling.get_peft_model", lambda m, c: m)
+        monkeypatch.setattr("tiny_audio.asr_modeling.get_peft_model", _identity_peft)
 
         # `_setup_lora` only reads `config` and rebinds `self.language_model`,
         # so a namespace stands in for the half-built model without dragging in
@@ -183,16 +204,18 @@ class TestSetupLoraPassthrough:
         assert captured["rank_pattern"] == {"in_proj_a": 16}
         assert captured["alpha_pattern"] == {"in_proj_a": 32}
 
-    def test_setup_lora_tolerates_a_config_predating_the_fields(self, monkeypatch):
+    def test_setup_lora_tolerates_a_config_predating_the_fields(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Checkpoint configs written before these fields must still load."""
-        captured = {}
+        captured: dict[str, Any] = {}
 
         class FakeLoraConfig:
-            def __init__(self, **kwargs):
+            def __init__(self, **kwargs: Any) -> None:
                 captured.update(kwargs)
 
         monkeypatch.setattr("tiny_audio.asr_modeling.LoraConfig", FakeLoraConfig)
-        monkeypatch.setattr("tiny_audio.asr_modeling.get_peft_model", lambda m, c: m)
+        monkeypatch.setattr("tiny_audio.asr_modeling.get_peft_model", _identity_peft)
 
         config = ASRConfig(use_lora=True, lora_rank=64, lora_alpha=128)
         del config.lora_rank_pattern
