@@ -117,6 +117,10 @@ class TestCommandWiring:
         assert runner.invoke(dev.app, ["dead-code"]).exit_code == 0
         assert recorded_runs == [tuple(dev.DEAD_CODE_COMMAND)]
 
+    def test_deps_uses_the_shared_command(self, recorded_runs):
+        assert runner.invoke(dev.app, ["deps"]).exit_code == 0
+        assert recorded_runs == [tuple(dev.DEPS_COMMAND)]
+
     def test_failure_exit_code_propagates(self, monkeypatch):
         monkeypatch.setattr(dev, "run", lambda *args: 5)
         assert runner.invoke(dev.app, ["lint"]).exit_code == 5
@@ -151,8 +155,9 @@ class TestQualityGateContents:
     def test_lint_verifies_the_lock_file(self):
         assert ["poetry", "check", "--lock"] in dev.LINT_COMMANDS
 
-    def test_check_includes_dead_code_and_docstrings(self):
+    def test_check_includes_dead_code_deps_and_docstrings(self):
         assert dev.DEAD_CODE_COMMAND in dev.CHECK_COMMANDS
+        assert dev.DEPS_COMMAND in dev.CHECK_COMMANDS
         for cmd in dev.DOCSTRINGS_COMMANDS:
             assert cmd in dev.CHECK_COMMANDS
 

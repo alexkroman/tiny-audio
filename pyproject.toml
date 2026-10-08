@@ -68,7 +68,6 @@ wandb = "*"
 numpy = "*"
 hydra-core = "*"
 omegaconf = "*"
-ninja = "*"
 gradio = "*"
 assemblyai = "*"
 deepgram-sdk = "*"
@@ -76,8 +75,6 @@ typer = ">=0.19.2"
 trl = ">=0.26.0"
 peft = ">=0.13.0"  # LoRA adapters for Stage 2 fine-tuning
 torchaudio = "~2.8.0"  # torchaudio's major.minor must match torch's
-torchvision = ">=0.23.0,<0.24.0"  # Pairs with torch 2.8.x
-bitsandbytes = {version = "*", markers = "sys_platform == 'linux'"}
 # >=0.8.0, NOT the previous >=0.5.0. `apply_liger_kernel_to_qwen3_5` first
 # ships in 0.8.0 (verified against the wheels: 0.7.0 does not export it), and
 # without it scripts/train.py's patcher lookup raises AttributeError, gets
@@ -101,6 +98,12 @@ tenacity = ">=8.2"  # Retry/backoff policy for the AssemblyAI streaming evaluato
 # cpWER for speaker-labelled eval sets (scripts/eval/speaker_metrics.py).
 scipy = "*"
 rapidfuzz = "*"
+# Imported directly (Hub uploads, safetensors I/O, progress bars, RunPod's
+# `invoke` tasks), so declared here rather than left to transitive resolution.
+huggingface-hub = "*"
+safetensors = "*"
+tqdm = "*"
+invoke = "*"
 truecase = ">=0.0.14"  # Statistical re-casing for ASR label normalization
 ftfy = ">=6.0"  # Unicode cleanup (mojibake, smart quotes) + NFKC before normalize
 # nltk 3.10 tokenizes a leading apostrophe as its own token ("'em" -> "'", "em"),
@@ -110,9 +113,6 @@ ftfy = ">=6.0"  # Unicode cleanup (mojibake, smart quotes) + NFKC before normali
 # Transitive via truecase (unbounded); pinned here because nothing in this repo
 # needs 3.10. Revisit if truecase gains a fix.
 nltk = "<3.10"
-
-[project.optional-dependencies]
-local = ["pyaudio>=0.2.14"]
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.0.0"
@@ -128,6 +128,7 @@ pre-commit = ">=3.0.0"
 bandit = ">=1.7.0"
 vulture = ">=2.10"
 interrogate = ">=1.5.0"
+deptry = ">=0.23.0"
 pytest-mock = "^3.15.1"
 elevenlabs = "^2.31.0"
 # Apple SFSpeechRecognizer eval backend (scripts/eval/evaluators/asr.py).
@@ -340,6 +341,30 @@ wrap = 100
 number = false
 # Exclude files with YAML front matter (mdformat mangles `---` delimiters)
 exclude = ["MODEL_CARD.md", "demo/README.md"]
+
+[tool.deptry]
+# The course example plots with matplotlib; it is not part of the package.
+extend_exclude = ["docs"]
+
+[tool.deptry.package_module_name_map]
+# PyObjC's import names; Foundation/CoreFoundation arrive with it (pyobjc-framework-Cocoa).
+pyobjc-framework-Speech = ["Speech", "Foundation", "CoreFoundation"]
+
+[tool.deptry.per_rule_ignores]
+# Flat-layout fallbacks: on the Hub, tiny_audio's files load as sibling modules.
+# `spaces` is provided by the Hugging Face Spaces runtime (demo/requirements.txt).
+DEP001 = [
+  "alignment",
+  "asr_config",
+  "asr_modeling",
+  "asr_pipeline",
+  "asr_processing",
+  "diarization",
+  "projectors",
+  "spaces",
+]
+# Optional vendor SDK for `ta eval -m elevenlabs`, imported lazily; dev-only on purpose.
+DEP004 = ["elevenlabs"]
 
 [tool.coverage.run]
 branch = true

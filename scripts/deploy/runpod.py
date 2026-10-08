@@ -232,11 +232,6 @@ def setup_remote_environment(conn: Connection) -> None:
     conn.run(
         "apt-get install -y -qq ffmpeg tmux rsync libsndfile1",
     )
-    # portaudio19-dev is only needed for pyaudio runtime, never training;
-    # fall back gracefully on pods where it isn't available.
-    conn.run(
-        "apt-get install -y portaudio19-dev || true",
-    )
     print("Remote environment setup complete!")
 
 

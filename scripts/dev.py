@@ -42,6 +42,9 @@ TYPE_CHECK_COMMANDS = [
     ["pyright", LIB_PATH],
 ]
 SECURITY_COMMAND = ["bandit", "-c", "pyproject.toml", "-r", "tiny_audio", "scripts", "-ll"]
+# Unused, missing, transitive-only and misplaced dependencies; configured in
+# `[tool.deptry]` (pyproject.toml).
+DEPS_COMMAND = ["deptry", "."]
 DEAD_CODE_COMMAND = [
     "vulture",
     "tiny_audio",
@@ -58,6 +61,7 @@ CHECK_COMMANDS = [
     *TYPE_CHECK_COMMANDS,
     SECURITY_COMMAND,
     DEAD_CODE_COMMAND,
+    DEPS_COMMAND,
     *DOCSTRINGS_COMMANDS,
 ]
 # pytest-cov reads `fail_under` from `[tool.coverage.report]`, so the same
@@ -138,7 +142,7 @@ def coverage():
 
 @app.command()
 def check():
-    """Run all checks (lint + format + type-check + security + dead-code + docstrings)."""
+    """Run all checks (lint + format + type-check + security + dead-code + deps + docstrings)."""
     raise typer.Exit(run_all(*CHECK_COMMANDS))
 
 
@@ -171,6 +175,12 @@ def security():
 def dead_code():
     """Find dead/unused code with vulture."""
     raise typer.Exit(run(*DEAD_CODE_COMMAND))
+
+
+@app.command()
+def deps():
+    """Find unused, missing and transitive-only dependencies with deptry."""
+    raise typer.Exit(run(*DEPS_COMMAND))
 
 
 @app.command()
