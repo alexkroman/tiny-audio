@@ -74,11 +74,11 @@ class TestCommandWiring:
     def test_check_runs_every_check_in_order(self, recorded_runs):
         result = runner.invoke(dev.app, ["check"])
         assert result.exit_code == 0
-        assert recorded_runs == [tuple(cmd) for cmd in dev.CHECK_COMMANDS]
+        assert recorded_runs == [tuple(cmd) for cmd in dev.check_commands()]
 
     def test_lint_runs_lint_commands(self, recorded_runs):
         assert runner.invoke(dev.app, ["lint"]).exit_code == 0
-        assert recorded_runs == [tuple(cmd) for cmd in dev.LINT_COMMANDS]
+        assert recorded_runs == [tuple(cmd) for cmd in dev.lint_commands()]
 
     def test_type_check_runs_both_checkers(self, recorded_runs):
         assert runner.invoke(dev.app, ["type-check"]).exit_code == 0
@@ -103,7 +103,7 @@ class TestCommandWiring:
         assert runner.invoke(dev.app, ["precommit"]).exit_code == 0
         assert recorded_runs[0] == ("<format>",)
         assert recorded_runs[1:] == [
-            *(tuple(cmd) for cmd in dev.CHECK_COMMANDS),
+            *(tuple(cmd) for cmd in dev.check_commands()),
             tuple(dev.TEST_COMMAND),
             tuple(dev.BUILD_COMMAND),
             *(tuple(cmd) for cmd in dev.dist_check_commands()),
@@ -141,7 +141,7 @@ class TestCommandWiring:
 
 
 class TestFormatCode:
-    """Markdown formatting only touches tracked files outside the excluded set."""
+    """Markdown formatting touches tracked files except the front-matter ones."""
 
     def test_only_tracked_unexcluded_markdown_is_formatted(self, recorded_runs, monkeypatch):
         listing = (
@@ -150,7 +150,7 @@ class TestFormatCode:
         monkeypatch.setattr(dev.subprocess, "run", lambda *a, **kw: SimpleNamespace(stdout=listing))
         dev.format_code()
         md_calls = [c for c in recorded_runs if c[0] == "mdformat"]
-        assert md_calls == [("mdformat", "README.md", "docs/QUICKSTART.md")]
+        assert md_calls == [("mdformat", "README.md", "docs/course/01.md", "docs/QUICKSTART.md")]
         assert [c[0] for c in recorded_runs[:3]] == ["black", "ruff", "ruff"]
 
     def test_no_markdown_means_no_mdformat_call(self, recorded_runs, monkeypatch):
@@ -166,14 +166,20 @@ class TestQualityGateContents:
         assert ["ruff", "format", "--check", *dev.CODE_PATHS] in dev.LINT_COMMANDS
         assert ["black", "--check", *dev.CODE_PATHS] in dev.LINT_COMMANDS
 
+    def test_lint_checks_tracked_markdown_except_front_matter_files(self):
+        *_, markdown = dev.lint_commands()
+        assert markdown[:2] == ["mdformat", "--check"]
+        assert "README.md" in markdown
+        assert not set(markdown) & dev.MARKDOWN_SKIP
+
     def test_lint_verifies_the_lock_file(self):
         assert ["poetry", "check", "--lock"] in dev.LINT_COMMANDS
 
     def test_check_includes_dead_code_deps_and_docstrings(self):
-        assert dev.DEAD_CODE_COMMAND in dev.CHECK_COMMANDS
-        assert dev.DEPS_COMMAND in dev.CHECK_COMMANDS
+        assert dev.DEAD_CODE_COMMAND in dev.check_commands()
+        assert dev.DEPS_COMMAND in dev.check_commands()
         for cmd in dev.DOCSTRINGS_COMMANDS:
-            assert cmd in dev.CHECK_COMMANDS
+            assert cmd in dev.check_commands()
 
     def test_check_covers_both_packages_with_interrogate(self):
         targets = {cmd[1] for cmd in dev.DOCSTRINGS_COMMANDS}

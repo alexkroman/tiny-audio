@@ -62,8 +62,8 @@ DOCSTRINGS_COMMANDS = [
     ["interrogate", LIB_PATH, "--fail-under", DOCSTRING_MIN_LIB],
     ["interrogate", "scripts", "--fail-under", DOCSTRING_MIN_SCRIPTS],
 ]
-CHECK_COMMANDS = [
-    *LINT_COMMANDS,
+# Everything `ta dev check` runs after the linters; see `check_commands()`.
+ANALYSIS_COMMANDS = [
     *TYPE_CHECK_COMMANDS,
     SECURITY_COMMAND,
     DEAD_CODE_COMMAND,
@@ -117,6 +117,32 @@ def build_and_check() -> int:
     return run(*BUILD_COMMAND) or run_all(*dist_check_commands())
 
 
+# YAML front matter, which mdformat mangles (also excluded in [tool.mdformat]).
+MARKDOWN_SKIP = {"MODEL_CARD.md", "demo/README.md"}
+
+
+def markdown_files() -> list[str]:
+    """Tracked Markdown that `ta dev format` rewrites and `ta dev lint` checks.
+
+    git ls-files rather than a glob: it skips worktrees, build/cache dirs and
+    anything else gitignore already excludes.
+    """
+    tracked = subprocess.run(
+        ["git", "ls-files", "*.md"], capture_output=True, text=True, check=True
+    )
+    return [f for f in tracked.stdout.splitlines() if f and f not in MARKDOWN_SKIP]
+
+
+def lint_commands() -> list[list[str]]:
+    """`LINT_COMMANDS` plus the Markdown check, whose file list comes from git."""
+    return [*LINT_COMMANDS, ["mdformat", "--check", *markdown_files()]]
+
+
+def check_commands() -> list[list[str]]:
+    """Everything `ta dev check` (and CI's quality step) runs, in order."""
+    return [*lint_commands(), *ANALYSIS_COMMANDS]
+
+
 def run(*args: str) -> int:
     """Run a command and return exit code."""
     console.print(f"[dim]$ {' '.join(args)}[/dim]")
@@ -134,8 +160,8 @@ def run_all(*commands: list[str]) -> int:
 
 @app.command()
 def lint():
-    """Run linters (Poetry + Python + YAML + TOML + GitHub Actions)."""
-    raise typer.Exit(run_all(*LINT_COMMANDS))
+    """Run linters (Poetry + Python + YAML + TOML + GitHub Actions + Markdown)."""
+    raise typer.Exit(run_all(*lint_commands()))
 
 
 @app.command("format")
@@ -145,20 +171,7 @@ def format_code():
     run("ruff", "format", *CODE_PATHS)
     run("ruff", "check", "--fix", *CODE_PATHS)
 
-    # Use git ls-files so we only format tracked markdown — naturally skips
-    # worktrees, build/cache/checkpoint dirs, and vendored docs that gitignore
-    # already excludes. (Pre-rglob version mis-handled `.claude/worktrees`,
-    # `swift/.build`, etc.)
-    tracked = subprocess.run(
-        ["git", "ls-files", "*.md"], capture_output=True, text=True, check=True
-    )
-    md_excludes = ("docs/course/",)
-    md_skip_exact = {"MODEL_CARD.md", "demo/README.md"}
-    md_files = [
-        line
-        for line in tracked.stdout.splitlines()
-        if line and not any(line.startswith(p) for p in md_excludes) and line not in md_skip_exact
-    ]
+    md_files = markdown_files()
     if md_files:
         run("mdformat", *md_files)
 
@@ -184,7 +197,7 @@ def coverage():
 @app.command()
 def check():
     """Run all checks (lint + format + type-check + security + dead-code + deps + docstrings)."""
-    raise typer.Exit(run_all(*CHECK_COMMANDS))
+    raise typer.Exit(run_all(*check_commands()))
 
 
 @app.command()
@@ -197,7 +210,7 @@ def build():
 def precommit():
     """Pre-commit quality gate (format, check, test with coverage floor, build)."""
     format_code()
-    raise typer.Exit(run_all(*CHECK_COMMANDS, TEST_COMMAND) or build_and_check())
+    raise typer.Exit(run_all(*check_commands(), TEST_COMMAND) or build_and_check())
 
 
 @app.command("install-hooks")

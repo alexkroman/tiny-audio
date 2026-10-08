@@ -2,7 +2,7 @@
 
 The commands and numbers from the course on one page.
 
----
+______________________________________________________________________
 
 ## Essential Commands
 
@@ -97,7 +97,7 @@ poetry run ta deploy --repo-id <user>/<space>         # upload demo/ to a Gradio
 # then set MODEL_ID=<model> in the Space's Settings → Variables
 ```
 
----
+______________________________________________________________________
 
 ## Architecture
 
@@ -126,7 +126,7 @@ Audio → GLM-ASR encoder (frozen) → MLP projector (trained) → Qwen3-0.6B (f
 **Prompt the decoder sees**: `<audio>…<audio> Transcribe the speech to text` as the user turn,
 transcript as the assistant turn, via Qwen3's chat template.
 
----
+______________________________________________________________________
 
 ## Experiments (`configs/experiments/`)
 
@@ -146,7 +146,7 @@ transcript as the assistant turn, via Qwen3's chat template.
 | `training.freeze_projector` | `false` | `true` = LoRA-only training |
 | `training.use_lora` | `false` | LoRA adapters (rank 8, alpha 32) instead of full fine-tune |
 
----
+______________________________________________________________________
 
 ## Key Hyperparameters
 
@@ -167,7 +167,7 @@ transcript as the assistant turn, via Qwen3's chat template.
 | `model.projector_hidden_dim` | `1024` | |
 | `model.label_smoothing` | `0.1` | `stage_1`: 0.0 |
 
----
+______________________________________________________________________
 
 ## Evaluation Datasets (`-d`)
 
@@ -185,7 +185,7 @@ transcript as the assistant turn, via Qwen3's chat template.
 | `ami`, `ami-sdm` | Meetings (headset / distant mic) |
 | `expresso` | Expressive speech |
 
----
+______________________________________________________________________
 
 ## Training Metrics
 
@@ -195,7 +195,7 @@ transcript as the assistant turn, via Qwen3's chat template.
 | `eval/loss` | Tracks training loss | Rising while training loss falls (overfit) |
 | `train/grad_norm` | 1-3 after warmup | Spikes over 100 |
 
----
+______________________________________________________________________
 
 ## Config Layout
 
@@ -210,7 +210,7 @@ configs/
 Override syntax is `key=value` (Hydra), never `--key value`. Experiment files start with
 `# @package _global_`.
 
----
+______________________________________________________________________
 
 ## Common Options
 
@@ -224,7 +224,7 @@ Override syntax is `key=value` (Hydra), never `--key value`. Experiment files st
 | `--experiment` | `-e` | `train asr`, `runpod plan`, `runpod train`, `runpod up` |
 | `--repo-id` | `-r` | `push`, `deploy` |
 
----
+______________________________________________________________________
 
 ## tmux (on the pod)
 
@@ -234,7 +234,7 @@ Override syntax is `key=value` (Hydra), never `--key value`. Experiment files st
 | Scroll | `Ctrl+B`, then `[`; `q` to exit |
 | Stop training | `Ctrl+C` |
 
----
+______________________________________________________________________
 
 ## Environment Variables
 
@@ -249,7 +249,7 @@ pairing as `[env var: ...]`. Pass the flag to override the environment for one r
 | `MODEL_ID` | Model served by the Gradio demo / Space | `ta demo --model` |
 | `ASSEMBLYAI_API_KEY`, `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY` | Commercial API baselines | `ta eval --assemblyai-api-key / --deepgram-api-key / --elevenlabs-api-key` |
 
----
+______________________________________________________________________
 
 ## Common Issues
 
@@ -265,7 +265,7 @@ pairing as `[env var: ...]`. Pass the flag to override the environment for one r
 | `analysis` finds no results | Use the short model name (after the last `/`); it must match exactly |
 | Space serves the wrong model | Set `MODEL_ID` in the Space's variables |
 
----
+______________________________________________________________________
 
 ## Formulas
 
@@ -274,6 +274,6 @@ pairing as `[env var: ...]`. Pass the flag to override the environment for one r
 **WER**: `(Substitutions + Insertions + Deletions) / Reference words`, after Whisper text
 normalization on both sides.
 
----
+______________________________________________________________________
 
 [← Class 3: Evaluation](./3-evaluation-and-deployment.md) | [Glossary →](./5-glossary.md)

@@ -15,7 +15,7 @@
 > The commands below refer to `$MODEL`, and to `$NAME` for its short name (the part after the
 > slash, e.g. `tiny-audio-yourname`), which is how the analysis tools identify it.
 
----
+______________________________________________________________________
 
 ## Part A: Lecture (15 min)
 
@@ -84,7 +84,7 @@ An aggregate WER tells you *how much* the model fails. To improve it you need to
 | **Inference Endpoints** | Paid GPU | A production HTTP API; the repo ships the handler |
 | **Local server** | Your hardware | Privacy, or wiring into your own app |
 
----
+______________________________________________________________________
 
 ## Part B: Hands-On (45 min)
 
@@ -192,13 +192,14 @@ environment variable, so the same code serves any Tiny Audio model.
 
 1. Edit `demo/README.md`. Its front matter is the Space's card: set `title`, and change the
    `models:` list and `preload_from_hub:` to your model ID.
-2. Deploy. The command creates the Space if it doesn't exist:
+
+1. Deploy. The command creates the Space if it doesn't exist:
 
    ```bash
    poetry run ta deploy --repo-id your-username/tiny-audio-demo
    ```
 
-3. In the Space's **Settings → Variables**, add `MODEL_ID` = `your-username/tiny-audio-yourname`.
+1. In the Space's **Settings → Variables**, add `MODEL_ID` = `your-username/tiny-audio-yourname`.
    The Space restarts. (Without this it serves the published model.)
 
 The first build takes a few minutes on the free CPU tier. Inference on CPU is slow but works.
@@ -216,15 +217,17 @@ For an HTTP API on a GPU, use Inference Endpoints. The repo's `handler.py` is up
 the custom code, so the endpoint knows how to load and warm up the model:
 
 1. On your model page, choose **Deploy → Inference Endpoints**
-2. Pick a GPU and a scaling policy (scale-to-zero keeps idle cost near nothing)
-3. Create it, then call it with any HTTP client, or evaluate through it by passing the
+
+1. Pick a GPU and a scaling policy (scale-to-zero keeps idle cost near nothing)
+
+1. Create it, then call it with any HTTP client, or evaluate through it by passing the
    endpoint URL as the model:
 
    ```bash
    poetry run ta eval -m https://<your-endpoint>.endpoints.huggingface.cloud --endpoint -n 50
    ```
 
----
+______________________________________________________________________
 
 ## Advanced Evaluation
 
@@ -261,7 +264,7 @@ If you still have a RunPod instance up, evaluation is much faster there:
 poetry run ta runpod eval <HOST> <PORT> -m $MODEL -d loquacious -d ami -n 500
 ```
 
----
+______________________________________________________________________
 
 ## Debugging Poor Performance
 
@@ -275,7 +278,7 @@ poetry run ta runpod eval <HOST> <PORT> -m $MODEL -d loquacious -d ami -n 500
 | Great eval loss, bad WER | Mismatch between eval split and test set | Compare label formats; check normalization |
 | Wrong casing or punctuation but good WER | Training labels lacked them | Expected with LoquaciousSet; add cased, punctuated data |
 
----
+______________________________________________________________________
 
 ## Congratulations
 
@@ -295,6 +298,6 @@ You now have:
   corpora were added and removed
 - Try a different encoder or decoder; `granite_qwen_frozen.yaml` shows how little changes
 
----
+______________________________________________________________________
 
 [← Class 2](./2-training.md) | [Quick Reference →](./4-quick-reference.md)

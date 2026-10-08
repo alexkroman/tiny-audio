@@ -2,7 +2,7 @@
 
 Terms used in the course, grouped by topic.
 
----
+______________________________________________________________________
 
 ## The Model
 
@@ -64,7 +64,7 @@ attend to every other, weighted by relevance.
 Two implementations of attention. Flash Attention 2 is fastest on recent NVIDIA GPUs; the
 model falls back to PyTorch's scaled-dot-product attention (SDPA) elsewhere.
 
----
+______________________________________________________________________
 
 ## Audio
 
@@ -83,7 +83,7 @@ frames per second.
 Data augmentation that masks random time spans of the spectrogram during training. Available
 via `model.apply_spec_augment`; most useful when the encoder is trainable.
 
----
+______________________________________________________________________
 
 ## Training
 
@@ -169,7 +169,7 @@ statistical truecaser over such training labels so the decoder sees one consiste
 The function that turns a list of raw rows into one padded batch: extracts features, filters
 bad clips, builds chat-template conversations, tokenizes.
 
----
+______________________________________________________________________
 
 ## Evaluation
 
@@ -194,7 +194,7 @@ the most user-visible errors: one wrong surname costs a single word but breaks t
 Corpus WER pools all edits and all reference words across a dataset. Per-sample WER is
 computed per clip and is what each `Sample N - WER:` line of `results.txt` reports.
 
----
+______________________________________________________________________
 
 ## Tools
 
@@ -238,6 +238,6 @@ runs on MPS or CPU.
 GPU memory. Determines the largest batch (and model) you can train. `ta runpod plan` estimates
 what a config needs.
 
----
+______________________________________________________________________
 
 [← Quick Reference](./4-quick-reference.md) | [Course Overview](./0-course-overview.md)
