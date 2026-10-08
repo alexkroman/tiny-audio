@@ -3,15 +3,16 @@
 
 import contextlib
 import functools
-import importlib
 import logging
 import os
 import re
 import subprocess
+import warnings
 from collections.abc import Callable
 from dataclasses import fields
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from types import ModuleType
+from typing import Any, cast
 
 import ftfy
 import hydra
@@ -38,6 +39,7 @@ from transformers import (
 )
 from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
 from transformers.trainer_pt_utils import get_parameter_names
+from trl.import_utils import TRLExperimentalWarning
 
 from scripts.train_config import register_configs
 from tiny_audio.asr_config import (
@@ -47,15 +49,22 @@ from tiny_audio.asr_config import (
 )
 from tiny_audio.asr_modeling import ASRModel
 
-# trl.experimental prints a notice when it is first imported unless this is
-# set, so the env-var must be in place *before* that import -- which is why
-# DataCollatorForChatML is imported through importlib here rather than with
-# the other imports above. Nothing imported above pulls in trl.
-os.environ["TRL_EXPERIMENTAL_SILENCE"] = "1"
-if TYPE_CHECKING:
+# trl.experimental warns (TRLExperimentalWarning) the first time it is
+# imported; DataCollatorForChatML is the only thing used from it.
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", TRLExperimentalWarning)
     from trl.experimental.utils import DataCollatorForChatML
+
+# liger is a linux-only optional dependency (see pyproject.toml); without it
+# training falls back to stock kernels and unfused cross-entropy.
+try:
+    from liger_kernel import transformers as liger_transformers
+except ImportError as exc:
+    LIGER_TRANSFORMERS: ModuleType | None = None
+    _LIGER_IMPORT_ERROR: ImportError | None = exc
 else:
-    DataCollatorForChatML = importlib.import_module("trl.experimental.utils").DataCollatorForChatML
+    LIGER_TRANSFORMERS = liger_transformers
+    _LIGER_IMPORT_ERROR = None
 
 for _noisy in ("httpx", "httpcore", "urllib3", "huggingface_hub.file_download"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
@@ -221,7 +230,7 @@ _WHITESPACE_RE = re.compile(r"\s+")
 _EDGE_CONTENT_TAG_RE = re.compile(r"^\s*<(?:unk|foreign|overlap)>", re.IGNORECASE)
 
 
-def _has_edge_content_tag(raw_text: str) -> bool:
+def _has_edge_content_tag(raw_text: str | None) -> bool:
     """True when a label starts or ends with a content-bearing annotation tag.
 
     Such rows supervise onset/offset truncation once the tag is stripped, so
@@ -405,7 +414,7 @@ def _resolve_transcribe_prompt(configured: str | None, datasets: list) -> str | 
 # to test for an empty label and once to build the sample. Cache sized well
 # above the largest training batch so the second call is always a hit.
 @functools.lru_cache(maxsize=4096)
-def _normalize_label(raw_text: str, text_case: str | None = None) -> str:
+def _normalize_label(raw_text: str | None, text_case: str | None = None) -> str:
     """Canonicalize a training transcript label to cased+punct form.
 
     Pipeline (in order):
@@ -1243,15 +1252,13 @@ class PushToHubCallback(TrainerCallback):
         state: TrainerState,
         control: TrainerControl,
         **kwargs: Any,
-    ) -> None:
-        # Returning None leaves `control` as is: CallbackHandler only replaces
-        # it when a callback returns a new one.
+    ) -> TrainerControl:
         if not (args.push_to_hub and args.hub_model_id):
-            return
+            return control
 
         model = kwargs.get("model")
         if model is None:
-            return
+            return control
 
         with contextlib.suppress(Exception):
             model.push_to_hub(
@@ -1259,6 +1266,7 @@ class PushToHubCallback(TrainerCallback):
                 commit_message=f"Training in progress - step {state.global_step}",
                 private=args.hub_private_repo,
             )
+        return control
 
 
 def get_valid_training_args(config: dict) -> dict:
@@ -1428,10 +1436,10 @@ def main(cfg: DictConfig) -> None:
             )
         else:
             try:
-                # Imported on demand: liger is a linux-only optional dependency
-                # and is only needed when a patcher is actually applied.
-                liger = importlib.import_module("liger_kernel.transformers")
-                getattr(liger, patcher_name)()
+                if LIGER_TRANSFORMERS is None:
+                    assert _LIGER_IMPORT_ERROR is not None
+                    raise _LIGER_IMPORT_ERROR
+                getattr(LIGER_TRANSFORMERS, patcher_name)()
                 logger.info("Applied liger kernels via %s()", patcher_name)
             except (ImportError, AttributeError) as e:
                 logger.warning(

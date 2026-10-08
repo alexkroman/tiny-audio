@@ -11,7 +11,7 @@ from copy import copy
 from os import PathLike
 from pathlib import Path
 from threading import Thread
-from typing import TYPE_CHECKING, Any, TypedDict, TypeVar, cast, overload
+from typing import TYPE_CHECKING, Any, Protocol, TypedDict, TypeVar, cast, overload
 
 import torch
 import torch.nn as nn
@@ -25,6 +25,8 @@ from transformers import (
     AutoModelForCausalLM,
     AutoModelForSeq2SeqLM,
     AutoTokenizer,
+    BatchEncoding,
+    PretrainedConfig,
     PreTrainedModel,
     TextIteratorStreamer,
     WhisperModel,
@@ -36,13 +38,12 @@ from transformers.utils.hub import PushToHubMixin, cached_file
 
 if TYPE_CHECKING:
     from transformers import GraniteSpeech5Encoder
-    from transformers.models.auto.modeling_auto import _BaseModelWithGenerate
     from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
     from transformers.models.gemma4.modeling_gemma4 import Gemma4ForCausalLM
 
     from .asr_config import ASRConfig, compute_encoder_output_length
     from .asr_processing import ASRProcessor, left_pad_prompt_rows
-    from .projectors import PROJECTOR_CLASSES
+    from .projectors import PROJECTOR_CLASSES, MLPAudioProjector
 else:
     try:
         from .asr_config import ASRConfig, compute_encoder_output_length
@@ -61,9 +62,33 @@ else:
     except ImportError:  # transformers < 5.16: no native granite_speech5
         GraniteSpeech5Encoder = None
     try:
+        from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
         from transformers.models.gemma4.modeling_gemma4 import Gemma4ForCausalLM
     except ImportError:  # transformers without the gemma4 architecture
+        Gemma4TextConfig = None
         Gemma4ForCausalLM = None
+
+
+if TYPE_CHECKING:
+
+    class _GenerativeDecoder(PreTrainedModel, GenerationMixin):
+        """Static view of the decoder: a PreTrainedModel that can generate.
+
+        transformers annotates GenerationMixin's `self` with a protocol
+        (`GenerativePreTrainedModel`) that no PreTrainedModel satisfies -- it
+        asks for a mutable `device` where the model has a read-only property --
+        so neither checker can bind `generate` on a real model. This restates
+        the two generation entry points ASRModel calls without that bound.
+        Type-checking only; the runtime object is whatever the loader returned.
+        """
+
+        def generate(self, *args: Any, **kwargs: Any) -> GenerateOutput | torch.LongTensor:
+            """`GenerationMixin.generate`."""
+            ...
+
+        def prepare_inputs_for_generation(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            """`GenerationMixin.prepare_inputs_for_generation`."""
+            ...
 
 
 logger = logging.getLogger(__name__)
@@ -483,6 +508,16 @@ def _assert_audio_token_counts(
         raise ValueError(msg)
 
 
+def _module_to_dtype(module: nn.Module, dtype: torch.dtype) -> nn.Module:
+    """Return `module.to(dtype=dtype)`, typed through `nn.Module.to`.
+
+    PreTrainedModel declares `to` via functools.wraps, which type checkers
+    cannot bind to an instance. The call still dispatches to the module's own
+    `to` (PreTrainedModel's included), so this is only a typing boundary.
+    """
+    return module.to(dtype=dtype)
+
+
 def _patch_gemma_decode_loop(model) -> None:
     """Make a Gemma4ForCausalLM drop `per_layer_inputs` after the first step.
 
@@ -609,17 +644,49 @@ class _DecoderLoadKwargs(_LoadKwargs):
     trust_remote_code: bool
 
 
+class _HubFileKwargs(TypedDict, total=False):
+    """Hub location arguments forwarded to `cached_file` and PEFT's loader."""
+
+    subfolder: str
+    revision: str
+
+
+class _PerLayerInputsTextModel(Protocol):
+    """A Gemma 4 style text model, which builds its per-layer inputs (PLE) itself."""
+
+    config: PretrainedConfig
+
+    def get_per_layer_inputs(
+        self, input_ids: torch.Tensor, inputs_embeds: torch.Tensor | None
+    ) -> torch.Tensor:
+        """Per-layer embeddings for `input_ids` (or recovered from `inputs_embeds`)."""
+        ...
+
+
 _StateDictT = TypeVar("_StateDictT", bound=dict[str, Any])
+
+
+def _push_to_hub_recording_repo_id(*args: Any, **kwargs: Any) -> str:
+    """`ASRModel.push_to_hub`: push to the Hub, pointing adapter_config at the repo.
+
+    IMPORTANT: Sets base_model_name_or_path in adapter_config.json to repo_id
+    so that transformers pipeline() can load the model correctly. Without this,
+    the pipeline tries to load from "None" which fails.
+
+    Takes `(model, repo_id, ...)` exactly like a bound `push_to_hub`. Spelled
+    with bare `*args` because that is the only wrapper signature both mypy and
+    pyright accept in place of PreTrainedModel's functools.wraps-declared one.
+    """
+    model = args[0]
+    repo_id = args[1] if len(args) > 1 else kwargs["repo_id"]
+    # Store repo_id in config so save_pretrained can access it
+    model.config.pretrained_model_path = repo_id
+    # Call parent's push_to_hub
+    return PreTrainedModel.push_to_hub(*args, **kwargs)
 
 
 class ASRModel(PreTrainedModel, GenerationMixin):
     """Audio-to-text model combining an audio encoder, projector, and language model."""
-
-    audio_tower: nn.Module
-    # The decoder as AutoModelForCausalLM types it. With LoRA attached this is
-    # a PeftModel, which forwards every attribute it does not define to the
-    # decoder it wraps -- so the decoder's interface is the right static view.
-    language_model: "_BaseModelWithGenerate"
 
     config_class = ASRConfig
     base_model_prefix = "model"
@@ -655,7 +722,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             # Load projector weights from safetensors
             subfolder = kwargs.get("subfolder")
             revision = kwargs.get("revision")
-            cache_kwargs: dict[str, str] = {}
+            cache_kwargs: _HubFileKwargs = {}
             if subfolder:
                 cache_kwargs["subfolder"] = subfolder
             if revision:
@@ -698,9 +765,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                         torch_device=str(base_device),
                         **cache_kwargs,
                     )
-                    # See the `language_model` annotation: PEFT forwards the
+                    # See `language_model` in __init__: PEFT forwards the
                     # decoder interface, so callers keep using it unchanged.
-                    model.language_model = cast("_BaseModelWithGenerate", peft_model)
+                    model.language_model = cast("_GenerativeDecoder", peft_model)
                 else:
                     # No saved adapters - initialize fresh LLM LoRA for training.
                     # __init__ skips _setup_lora while loading, so call it here.
@@ -728,8 +795,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # Audio encoder (frozen)
         self.audio_tower = self._load_audio_encoder(config, target_dtype)
 
-        # Language model (frozen)
-        self.language_model = self._load_language_model(config, target_dtype)
+        # Language model (frozen). Typed as the decoder even with LoRA attached:
+        # a PeftModel forwards every attribute it does not define to the
+        # decoder it wraps, so the decoder's interface is the right static view.
+        self.language_model: _GenerativeDecoder = self._load_language_model(config, target_dtype)
 
         # Does the decoder's forward take `skip_logits`? Only liger's patched
         # `lce_forward` declares it; the stock transformers forward does not.
@@ -959,7 +1028,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # `encoder_dtype` overrides the stack dtype when the encoder has
         # trainable blocks; it must be fp32 for Adam's step to survive
         # rounding. See ASRConfig.encoder_dtype for the arithmetic.
-        encoder = encoder.to(dtype=_resolve_dtype(getattr(config, "encoder_dtype", None), dtype))
+        encoder = _module_to_dtype(
+            encoder, _resolve_dtype(getattr(config, "encoder_dtype", None), dtype)
+        )
         if getattr(config, "freeze_audio_encoder", True):
             encoder.requires_grad_(False)
             encoder.train(False)  # equivalent to .eval(); avoids a security hook false-positive
@@ -1001,9 +1072,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         return encoder
 
     @classmethod
-    def _load_language_model(
-        cls, config: ASRConfig, dtype: torch.dtype
-    ) -> "_BaseModelWithGenerate":
+    def _load_language_model(cls, config: ASRConfig, dtype: torch.dtype) -> "_GenerativeDecoder":
         """Load and freeze the language model."""
         attn_implementation = _resolve_attn_implementation(
             config.attn_implementation, config.text_model_id
@@ -1058,7 +1127,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 logging.INFO if cls._is_loading_from_pretrained else logging.WARNING
             )
 
-        decoder = AutoModelForCausalLM.from_pretrained(config.text_model_id, **decoder_kwargs)
+        decoder = cast(
+            "_GenerativeDecoder",
+            AutoModelForCausalLM.from_pretrained(config.text_model_id, **decoder_kwargs),
+        )
 
         # Gemma 4 checkpoints are natively multimodal: AutoModelForCausalLM maps
         # `gemma4` to Gemma4ForConditionalGeneration, which is both wasteful
@@ -1080,13 +1152,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # See _load_audio_encoder note: idempotent post-load cast to dodge the
         # FA2 "current dype is fp32" warning when from_pretrained's dtype kwarg
         # isn't fully propagated to every submodule.
-        #
-        # Called through the nn.Module view: PreTrainedModel declares `to` via
-        # functools.wraps, which type checkers cannot bind to an instance. The
-        # call still dispatches to PreTrainedModel.to, which returns the same
-        # module, so the cast happens in place exactly as before.
-        decoder_module: nn.Module = decoder
-        decoder_module.to(dtype=dtype)
+        # `to` returns the module itself, so the cast happens in place.
+        _module_to_dtype(decoder, dtype)
         decoder.config.use_cache = getattr(config, "use_cache", True)
         if getattr(config, "freeze_language_model", True):
             decoder.requires_grad_(False)
@@ -1094,7 +1161,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         return decoder
 
     @staticmethod
-    def _gemma_text_only(loaded: "_BaseModelWithGenerate") -> "_BaseModelWithGenerate":
+    def _gemma_text_only(loaded: "_GenerativeDecoder") -> "_GenerativeDecoder":
         """Turn a loaded Gemma4ForConditionalGeneration into a text-only CausalLM.
 
         Two independent problems force this transplant rather than just loading
@@ -1128,7 +1195,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             raise ImportError(msg)
 
         # Only reached for gemma-4 checkpoints, whose text config is Gemma4TextConfig.
-        text_config = cast("Gemma4TextConfig", loaded.config.get_text_config())
+        text_config = cast(Gemma4TextConfig, loaded.config.get_text_config())
         with torch.device("meta"):
             shell = Gemma4ForCausalLM(text_config)
 
@@ -1159,10 +1226,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             )
             raise RuntimeError(msg)
         # Gemma4ForCausalLM is a PreTrainedModel with GenerationMixin, which is
-        # all `_BaseModelWithGenerate` stands for.
-        return cast("_BaseModelWithGenerate", shell)
+        # all `_GenerativeDecoder` describes.
+        return cast("_GenerativeDecoder", shell)
 
-    def _create_projector(self, config: ASRConfig, dtype: torch.dtype) -> nn.Module:
+    def _create_projector(self, config: ASRConfig, dtype: torch.dtype) -> "MLPAudioProjector":
         """Create the trainable audio projector."""
         # Auto-detect dimensions if not specified
         if config.encoder_dim is None:
@@ -1224,10 +1291,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             bias="none",
             task_type="CAUSAL_LM",
         )
-        # See the `language_model` annotation for why the PEFT wrapper is
+        # See `language_model` in __init__ for why the PEFT wrapper is
         # typed as the decoder it wraps.
         self.language_model = cast(
-            "_BaseModelWithGenerate", get_peft_model(self.language_model, lora_config)
+            "_GenerativeDecoder", get_peft_model(self.language_model, lora_config)
         )
 
     def _init_tokenizer(self, config: ASRConfig):
@@ -1295,7 +1362,12 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 mean_resizing=True,
             )
 
-        self.audio_token_id = self.tokenizer.convert_tokens_to_ids(self.audio_token)
+        audio_token_id = self.tokenizer.convert_tokens_to_ids(self.audio_token)
+        # The token is in the vocab by now, so a single name maps to one id.
+        if not isinstance(audio_token_id, int):
+            msg = f"Tokenizer has no id for the audio token {self.audio_token!r}"
+            raise TypeError(msg)
+        self.audio_token_id = audio_token_id
         self.tokenizer.padding_side = "right"
 
         # Sync token IDs to configs
@@ -1460,16 +1532,16 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # Gradient checkpointing trades compute for memory by recomputing activations.
         for submodule in self._gradient_checkpointing_targets():
             setter = getattr(submodule, "_set_gradient_checkpointing", None)
+            enable_fn = getattr(submodule, "gradient_checkpointing_enable", None)
+            disable_fn = getattr(submodule, "gradient_checkpointing_disable", None)
             if setter is not None:
                 accepted = inspect.signature(setter).parameters
                 passthrough = {k: v for k, v in forwardable.items() if k in accepted}
                 setter(enable=enable, **passthrough)
-            elif hasattr(submodule, "gradient_checkpointing_enable") and enable:
-                submodule.gradient_checkpointing_enable(
-                    gradient_checkpointing_kwargs={"use_reentrant": False}
-                )
-            elif hasattr(submodule, "gradient_checkpointing_disable") and not enable:
-                submodule.gradient_checkpointing_disable()
+            elif enable_fn is not None and enable:
+                enable_fn(gradient_checkpointing_kwargs={"use_reentrant": False})
+            elif disable_fn is not None and not enable:
+                disable_fn()
 
     def _gradient_checkpointing_targets(self) -> list[nn.Module]:
         """Return the submodules that should respond to gradient_checkpointing
@@ -1491,13 +1563,13 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         """Replace the decoder's token embedding module."""
         self.language_model.set_input_embeddings(value)
 
-    def get_output_embeddings(self) -> nn.Module:
-        """Return the decoder's LM head."""
+    def get_output_embeddings(self) -> nn.Module | None:
+        """Return the decoder's LM head (None for a decoder without one)."""
         return self.language_model.get_output_embeddings()
 
-    def set_output_embeddings(self, value: nn.Module) -> None:
+    def set_output_embeddings(self, new_embeddings: nn.Module) -> None:
         """Replace the decoder's LM head."""
-        self.language_model.set_output_embeddings(value)
+        self.language_model.set_output_embeddings(new_embeddings)
 
     def get_processor(self):
         """Get the processor for this model."""
@@ -1517,7 +1589,13 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     @overload
     def state_dict(self, *, prefix: str = ..., keep_vars: bool = ...) -> dict[str, Any]: ...
 
-    def state_dict(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+    def state_dict(
+        self,
+        *,
+        destination: dict[str, Any] | None = None,
+        prefix: str = "",
+        keep_vars: bool = False,
+    ) -> dict[str, Any]:
         """Save trainable weights: projector, plus the encoder/LM when unfrozen.
 
         Every module this returns is gated on the same freeze flag that decides
@@ -1538,7 +1616,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         `freeze_text_embed_tokens` freezes an embedding that must still
         round-trip with the rest of the LM.
         """
-        sd = {f"projector.{k}": v for k, v in self.projector.state_dict().items()}
+        sd = {
+            f"projector.{k}": v for k, v in self.projector.state_dict(keep_vars=keep_vars).items()
+        }
         # Keyed on autograd state, not `freeze_audio_encoder`. Under the
         # documented partial-unfreeze recipe that flag stays True while the top
         # N blocks train, so gating on it meant a trained encoder was never
@@ -1551,14 +1631,14 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             sd.update(
                 {
                     f"audio_tower.{k}": v
-                    for k, v in self.audio_tower.state_dict().items()
+                    for k, v in self.audio_tower.state_dict(keep_vars=keep_vars).items()
                     if fully or k in enc_trainable
                 }
             )
         if not getattr(self.config, "freeze_language_model", True):
             lm = self.language_model
             if hasattr(lm, "peft_config"):
-                for name, v in lm.state_dict().items():
+                for name, v in lm.state_dict(keep_vars=keep_vars).items():
                     if "lora_" in name:
                         continue
                     k = name.removeprefix("base_model.model.")
@@ -1566,10 +1646,18 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                     k = k.replace(".base_layer.", ".")
                     sd[f"language_model.{k}"] = v
             else:
-                sd.update({f"language_model.{k}": v for k, v in lm.state_dict().items()})
-        return sd
+                sd.update(
+                    {
+                        f"language_model.{k}": v
+                        for k, v in lm.state_dict(keep_vars=keep_vars).items()
+                    }
+                )
+        if destination is None:
+            destination = {}
+        destination.update({f"{prefix}{k}": v for k, v in sd.items()})
+        return destination
 
-    def _ple_text_model(self):
+    def _ple_text_model(self) -> _PerLayerInputsTextModel | None:
         """Locate the submodule owning `get_per_layer_inputs`, or None.
 
         Only Gemma 4 style decoders have one. The attribute sits on
@@ -1583,7 +1671,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         )
         for candidate in candidates:
             if candidate is not None and hasattr(candidate, "get_per_layer_inputs"):
-                return candidate
+                # Checked just above; only Gemma 4 text models define it.
+                return cast("_PerLayerInputsTextModel", candidate)
         return None
 
     def _per_layer_kwargs(self, input_ids: torch.Tensor | None) -> dict:
@@ -1611,6 +1700,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         if not getattr(text_model.config, "hidden_size_per_layer_input", None):
             return {}
         return {"per_layer_inputs": text_model.get_per_layer_inputs(input_ids, None)}
+
+    def _embed_tokens(self, input_ids: torch.Tensor | None) -> torch.Tensor:
+        """Look `input_ids` up in the decoder's token embedding table."""
+        return self.language_model.get_input_embeddings()(input_ids)
 
     def _compute_encoder_output_lengths(
         self,
@@ -1878,7 +1971,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     ) -> CausalLMOutputWithPast:
         """Forward pass for training and inference."""
         if inputs_embeds is None:
-            inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
+            inputs_embeds = self._embed_tokens(input_ids)
 
         # Gemma 4 PLE: derived from input_ids, so it must be captured before the
         # masked_scatter below replaces the audio rows. No-op ({}) elsewhere.
@@ -2020,6 +2113,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             return_tensors="pt",
             enable_thinking=False,  # Disable Qwen3 thinking mode for ASR
         )
+        if not isinstance(chat_result, BatchEncoding):
+            msg = f"apply_chat_template returned {type(chat_result).__name__}, not BatchEncoding"
+            raise TypeError(msg)
         ids = chat_result.input_ids
         return (ids[0] if ids.dim() > 1 else ids).to(torch.long)
 
@@ -2074,7 +2170,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             input_ids, attention_mask = self._left_pad_prompt_rows(rows, device)
 
         # Get text embeddings and replace audio tokens with audio embeddings
-        inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
+        inputs_embeds = self._embed_tokens(input_ids)
         audio_token_mask = (input_ids == self.audio_token_id).unsqueeze(-1)
         inputs_embeds = inputs_embeds.masked_scatter(
             audio_token_mask.to(inputs_embeds.device),
@@ -2311,8 +2407,12 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             self.config.vocab_size = vocab_size
             self.config.text_config.vocab_size = vocab_size
 
-        if hasattr(self.audio_tower.config, "num_mel_bins"):
-            self.config.audio_config.num_mel_bins = self.audio_tower.config.num_mel_bins
+        encoder_config = self.audio_tower.config
+        if hasattr(encoder_config, "num_mel_bins"):
+            # The default is never used: hasattr just confirmed the attribute.
+            # Read through getattr because nn.Module types `.config` as
+            # Tensor | Module, which hasattr does not narrow.
+            self.config.audio_config.num_mel_bins = getattr(encoder_config, "num_mel_bins", None)
 
         # Save model (temporarily remove non-serializable attributes)
         tokenizer = self.tokenizer
@@ -2407,23 +2507,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         if card_fn is not None:
             card_fn(str(output_dir))
 
-    def _push_to_hub_recording_repo_id(self: Any, *args: Any, **kwargs: Any) -> str:
-        """Push model to HuggingFace Hub, ensuring adapter_config points to repo.
-
-        IMPORTANT: Sets base_model_name_or_path in adapter_config.json to repo_id
-        so that transformers pipeline() can load the model correctly. Without this,
-        the pipeline tries to load from "None" which fails.
-        """
-        repo_id = args[0] if args else kwargs["repo_id"]
-        # Store repo_id in config so save_pretrained can access it
-        self.config.pretrained_model_path = repo_id
-        # Call parent's push_to_hub
-        return PreTrainedModel.push_to_hub(self, *args, **kwargs)
-
     # Declared the way PreTrainedModel declares its own push_to_hub (through
-    # functools.wraps), so the override has the type its bases expect. `self`
-    # is Any above because mypy and pyright bind a wraps-declared method
-    # differently, and no narrower annotation satisfies both.
+    # functools.wraps), so the override has the type its bases expect; see
+    # `_push_to_hub_recording_repo_id` for the behaviour.
     push_to_hub = functools.wraps(PushToHubMixin.push_to_hub)(_push_to_hub_recording_repo_id)
 
 

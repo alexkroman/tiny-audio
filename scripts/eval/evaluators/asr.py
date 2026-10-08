@@ -1,7 +1,6 @@
 """ASR evaluator implementations."""
 
 import contextlib
-import importlib
 import io
 import json
 import os
@@ -14,6 +13,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import IO, TYPE_CHECKING, cast
@@ -59,23 +59,26 @@ else:
     except ImportError:
         _ELEVENLABS_AVAILABLE = False
 
+
 # PyObjC's frameworks exist only on macOS with pyobjc-framework-Speech. They
 # are dynamic bridges (every attribute is resolved at runtime), so they are
-# loaded as modules and their members looked up at the call site.
-if TYPE_CHECKING:
-    CoreFoundation: ModuleType
-    Foundation: ModuleType
-    Speech: ModuleType
-    _APPLE_SPEECH_AVAILABLE: bool
-else:
-    try:
-        CoreFoundation = importlib.import_module("CoreFoundation")
-        Foundation = importlib.import_module("Foundation")
-        Speech = importlib.import_module("Speech")
+# kept as modules and their members looked up at the call site; the stubs in
+# typings/ type those members as Any.
+@dataclass(frozen=True)
+class _AppleFrameworks:
+    core_foundation: ModuleType
+    foundation: ModuleType
+    speech: ModuleType
 
-        _APPLE_SPEECH_AVAILABLE = True
-    except ImportError:
-        _APPLE_SPEECH_AVAILABLE = False
+
+try:
+    import CoreFoundation
+    import Foundation
+    import Speech
+except ImportError:
+    _APPLE_FRAMEWORKS: _AppleFrameworks | None = None
+else:
+    _APPLE_FRAMEWORKS = _AppleFrameworks(CoreFoundation, Foundation, Speech)
 
 
 def print_generation_config(model, model_path: str):
@@ -816,7 +819,9 @@ class ElevenLabsEvaluator(Evaluator):
         return text or "", elapsed, None
 
 
-def _pump_run_loop_until(event: threading.Event, timeout_seconds: float) -> bool:
+def _pump_run_loop_until(
+    core_foundation: ModuleType, event: threading.Event, timeout_seconds: float
+) -> bool:
     """Pump the main CF run loop in 50ms slices until event is set or timeout.
 
     Speech.framework delivers callbacks via the main run loop; a plain
@@ -827,7 +832,7 @@ def _pump_run_loop_until(event: threading.Event, timeout_seconds: float) -> bool
     while not event.is_set():
         if time.time() >= deadline:
             return False
-        CoreFoundation.CFRunLoopRunInMode(CoreFoundation.kCFRunLoopDefaultMode, 0.05, True)
+        core_foundation.CFRunLoopRunInMode(core_foundation.kCFRunLoopDefaultMode, 0.05, True)
     return True
 
 
@@ -838,12 +843,13 @@ class AppleSpeechEvaluator(Evaluator):
     TRANSCRIBE_TIMEOUT_SECONDS = 60.0
 
     def __init__(self, locale: str = "en-US", **kwargs):
-        if not _APPLE_SPEECH_AVAILABLE:
+        if _APPLE_FRAMEWORKS is None:
             msg = (
                 "Apple SFSpeechRecognizer backend requires PyObjC on macOS. "
                 "Install with: pip install pyobjc-framework-Speech"
             )
             raise ImportError(msg)
+        self._apple = _APPLE_FRAMEWORKS
 
         if kwargs.get("num_workers", 1) > 1:
             console.print(
@@ -866,11 +872,13 @@ class AppleSpeechEvaluator(Evaluator):
             status_box[0] = status
             auth_event.set()
 
-        Speech.SFSpeechRecognizer.requestAuthorization_(handler)
-        if not _pump_run_loop_until(auth_event, self.AUTH_TIMEOUT_SECONDS):
+        self._apple.speech.SFSpeechRecognizer.requestAuthorization_(handler)
+        if not _pump_run_loop_until(
+            self._apple.core_foundation, auth_event, self.AUTH_TIMEOUT_SECONDS
+        ):
             msg = "Speech recognition authorization request timed out"
             raise TimeoutError(msg)
-        if status_box[0] != Speech.SFSpeechRecognizerAuthorizationStatusAuthorized:
+        if status_box[0] != self._apple.speech.SFSpeechRecognizerAuthorizationStatusAuthorized:
             msg = (
                 f"Speech recognition not authorized (status={status_box[0]}). "
                 "Approve at System Settings > Privacy & Security > Speech Recognition."
@@ -878,8 +886,8 @@ class AppleSpeechEvaluator(Evaluator):
             raise RuntimeError(msg)
 
     def _build_recognizer(self, locale: str):
-        ns_locale = Foundation.NSLocale.alloc().initWithLocaleIdentifier_(locale)
-        recognizer = Speech.SFSpeechRecognizer.alloc().initWithLocale_(ns_locale)
+        ns_locale = self._apple.foundation.NSLocale.alloc().initWithLocaleIdentifier_(locale)
+        recognizer = self._apple.speech.SFSpeechRecognizer.alloc().initWithLocale_(ns_locale)
         if recognizer is None:
             msg = f"Unsupported locale: {locale}"
             raise ValueError(msg)
@@ -898,8 +906,8 @@ class AppleSpeechEvaluator(Evaluator):
             with os.fdopen(fd, "wb") as f:
                 f.write(wav_bytes)
 
-            url = Foundation.NSURL.fileURLWithPath_(temp_path)
-            request = Speech.SFSpeechURLRecognitionRequest.alloc().initWithURL_(url)
+            url = self._apple.foundation.NSURL.fileURLWithPath_(temp_path)
+            request = self._apple.speech.SFSpeechURLRecognitionRequest.alloc().initWithURL_(url)
             request.setRequiresOnDeviceRecognition_(True)
             request.setShouldReportPartialResults_(False)
 
@@ -921,7 +929,9 @@ class AppleSpeechEvaluator(Evaluator):
             start = time.time()
             task = self.recognizer.recognitionTaskWithRequest_resultHandler_(request, handler)
 
-            if not _pump_run_loop_until(done_event, self.TRANSCRIBE_TIMEOUT_SECONDS):
+            if not _pump_run_loop_until(
+                self._apple.core_foundation, done_event, self.TRANSCRIBE_TIMEOUT_SECONDS
+            ):
                 task.cancel()
                 msg = f"Recognition timed out after {self.TRANSCRIBE_TIMEOUT_SECONDS}s"
                 raise RuntimeError(msg)

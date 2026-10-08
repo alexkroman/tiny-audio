@@ -163,8 +163,8 @@ class TestSetupLoraPassthrough:
             def __init__(self, **kwargs):
                 captured.update(kwargs)
 
-        monkeypatch.setattr("peft.LoraConfig", FakeLoraConfig)
-        monkeypatch.setattr("peft.get_peft_model", lambda m, c: m)
+        monkeypatch.setattr("tiny_audio.asr_modeling.LoraConfig", FakeLoraConfig)
+        monkeypatch.setattr("tiny_audio.asr_modeling.get_peft_model", lambda m, c: m)
 
         # `_setup_lora` only reads `config` and rebinds `self.language_model`,
         # so a namespace stands in for the half-built model without dragging in
@@ -191,8 +191,8 @@ class TestSetupLoraPassthrough:
             def __init__(self, **kwargs):
                 captured.update(kwargs)
 
-        monkeypatch.setattr("peft.LoraConfig", FakeLoraConfig)
-        monkeypatch.setattr("peft.get_peft_model", lambda m, c: m)
+        monkeypatch.setattr("tiny_audio.asr_modeling.LoraConfig", FakeLoraConfig)
+        monkeypatch.setattr("tiny_audio.asr_modeling.get_peft_model", lambda m, c: m)
 
         config = ASRConfig(use_lora=True, lora_rank=64, lora_alpha=128)
         del config.lora_rank_pattern

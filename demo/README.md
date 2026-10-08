@@ -47,20 +47,25 @@ This Space demonstrates an Automatic Speech Recognition (ASR) model that combine
 The model bridges audio and text with a trained projector and LoRA adapters:
 
 1. **Audio Encoder**: Granite Speech 5.0 470M TurboCTC encoder (frozen)
-1. **Projection Layer**: 2-layer MLP mapping audio features into the decoder's embedding space (~12.6M params)
-1. **Text Decoder**: Qwen3.5-2B (frozen) with rank-64 LoRA adapters (~67M params), trained jointly with the projector
+1. **Projection Layer**: 2-layer MLP mapping audio features into the decoder's embedding space
+   (~12.6M params)
+1. **Text Decoder**: Qwen3.5-2B (frozen) with rank-64 LoRA adapters (~67M params), trained jointly
+   with the projector
 
 ## Usage
 
 1. **Upload an audio file** (WAV, MP3, etc.) or **record directly** using your microphone
 1. Click **"Transcribe"** to convert speech to text
 1. The transcription will appear in the output box
-1. Optionally tick **Word Timestamps** or **Speaker Diarization**. If you know how many people are speaking, set **Number of Speakers**: it caps how many speakers are kept
+1. Optionally tick **Word Timestamps** or **Speaker Diarization**. If you know how many people are
+   speaking, set **Number of Speakers**: it caps how many speakers are kept
 
 ## Limitations
 
-- Plain transcription works best on clips up to about 19 seconds (the training length); with timestamps or diarization on, longer audio is transcribed in chunks automatically
-- Each request reserves GPU time from your ZeroGPU quota in proportion to the audio's length (20-120 s), so roughly up to five minutes of speech per request
+- Plain transcription works best on clips up to about 19 seconds (the training length); with
+  timestamps or diarization on, longer audio is transcribed in chunks automatically
+- Each request reserves GPU time from your ZeroGPU quota in proportion to the audio's length (20-120
+  s), so roughly up to five minutes of speech per request
 - Optimized for English language
 - Best performance with clear speech and minimal background noise
 

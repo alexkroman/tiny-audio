@@ -4,6 +4,8 @@ This module contains all projector architectures:
 - MLPAudioProjector: Simple 2-layer MLP with frame stacking downsampling
 """
 
+from typing import overload
+
 import torch
 import torch.nn as nn
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
@@ -111,7 +113,11 @@ class MLPAudioProjector(nn.Module):
         self.act = nn.GELU()
         self.linear_2 = nn.Linear(hidden_dim, llm_dim)
 
-    def get_output_length(self, input_length: int) -> int:
+    @overload
+    def get_output_length(self, input_length: int) -> int: ...
+    @overload
+    def get_output_length(self, input_length: torch.Tensor) -> torch.Tensor: ...
+    def get_output_length(self, input_length: int | torch.Tensor) -> int | torch.Tensor:
         """Calculate output sequence length given input length (matches GLM-ASR)."""
         return _frame_stack_length(input_length, self.k)
 
@@ -136,7 +142,11 @@ class MLPAudioProjector(nn.Module):
 # =============================================================================
 
 
-def _frame_stack_length(length, k: int):
+@overload
+def _frame_stack_length(length: int, k: int) -> int: ...
+@overload
+def _frame_stack_length(length: torch.Tensor, k: int) -> torch.Tensor: ...
+def _frame_stack_length(length: int | torch.Tensor, k: int) -> int | torch.Tensor:
     """Frames left after stacking k adjacent frames (GLM-ASR's rule).
 
     Trailing frames that don't fill a complete k-frame window are dropped.

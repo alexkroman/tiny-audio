@@ -1,12 +1,16 @@
-<div align="center">
-  <img src="https://raw.githubusercontent.com/alexkroman/tiny-audio/main/public/logo.png" alt="Tiny Audio Logo" />
-</div>
-
 # Tiny Audio
 
-**Train your own speech recognition model on a single GPU**
+<div align="center">
+  <img
+    src="https://raw.githubusercontent.com/alexkroman/tiny-audio/main/public/logo.png"
+    alt="Tiny Audio Logo"
+  />
+</div>
 
-A minimal, hackable ASR codebase. Connect a frozen audio encoder to a small LLM through a trainable MLP projector (~6.3M params), then fine-tune the projector and decoder together. That's it.
+**Train your own speech recognition model on a single GPU.**
+
+A minimal, hackable ASR codebase. Connect a frozen audio encoder to a small LLM through a trainable
+MLP projector (~6.3M params), then fine-tune the projector and decoder together. That's it.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
@@ -100,7 +104,9 @@ poetry run python scripts/train.py +experiments=mps_smoke
 
 ### Full Training
 
-The default recipe is `stage_1`: frozen GLM-ASR encoder, fresh MLP projector, and Qwen3-0.6B decoder trained jointly on the `multiasr` mix (about 3M utterances across ten corpora, over a terabyte on disk). It runs at batch size 100 and needs an 80 GB GPU. Size it before renting hardware:
+The default recipe is `stage_1`: frozen GLM-ASR encoder, fresh MLP projector, and Qwen3-0.6B decoder
+trained jointly on the `multiasr` mix (about 3M utterances across ten corpora, over a terabyte on
+disk). It runs at batch size 100 and needs an 80 GB GPU. Size it before renting hardware:
 
 ```bash
 # Estimate VRAM and disk for a config and print a pod command
@@ -153,25 +159,29 @@ poetry run python scripts/train.py +experiments=stage_1 training.use_lora=true
 
 ## Architecture
 
-```
+```text
 Audio (16kHz) → GLM-ASR Encoder (frozen) → MLP Projector (trained) → Qwen3-0.6B (fine-tuned) → Text
 ```
 
-The encoder stays frozen. The projector trains from scratch at a high learning rate while the decoder fine-tunes at a much lower one, so the two learn together without the fresh projector destabilizing the pretrained LLM.
+The encoder stays frozen. The projector trains from scratch at a high learning rate while the
+decoder fine-tunes at a much lower one, so the two learn together without the fresh projector
+destabilizing the pretrained LLM.
 
-| Component | Params | Status | Learning rate |
-|-----------|--------|--------|---------------|
-| GLM-ASR-Nano-2512 encoder | ~635M | Frozen | — |
-| MLP Projector | ~6.3M | **Trained** | 1e-3 |
-| Qwen3-0.6B decoder | ~596M | **Fine-tuned** | 2e-5 |
+| Component                 | Params | Status         | Learning rate |
+| ------------------------- | ------ | -------------- | ------------- |
+| GLM-ASR-Nano-2512 encoder | ~635M  | Frozen         | —             |
+| MLP Projector             | ~6.3M  | **Trained**    | 1e-3          |
+| Qwen3-0.6B decoder        | ~596M  | **Fine-tuned** | 2e-5          |
 
 ### How It Works
 
 1. **Audio Encoder**: GLM-ASR converts raw audio to frame-level embeddings (dim 1280)
-1. **Projector**: Stacks 4 adjacent frames (5120 dims), normalizes, then maps through a 1024-wide hidden layer into Qwen3's 1024-dim embedding space
+1. **Projector**: Stacks 4 adjacent frames (5120 dims), normalizes, then maps through a 1024-wide
+   hidden layer into Qwen3's 1024-dim embedding space
 1. **Language Model**: Qwen3 generates text conditioned on the projected audio
 
-Frame stacking reduces sequence length: `output_len = (input_len - k) // k + 1` where k is `projector_pool_stride` (default 4).
+Frame stacking reduces sequence length: `output_len = (input_len - k) // k + 1` where k is
+`projector_pool_stride` (default 4).
 
 ## Evaluation
 
@@ -187,10 +197,10 @@ poetry run ta eval -m assemblyai --assemblyai-model universal -d loquacious -n 1
 ```
 
 Other vendors: `-m deepgram`, `-m elevenlabs`, `-m smallest` (each reads its API key from the
-environment or a `--*-api-key` option), `-m assemblyai -s` for AssemblyAI streaming, and
-`-m swift` for the Swift SDK. Speaker-labelled sets (`-d ami-speakers`, `-d ami-speakers-long`)
-add cpWER next to WER; local models diarize with `return_speakers=True` and AssemblyAI with its
-native speaker labels.
+environment or a `--*-api-key` option), `-m assemblyai -s` for AssemblyAI streaming, and `-m swift`
+for the Swift SDK. Speaker-labelled sets (`-d ami-speakers`, `-d ami-speakers-long`) add cpWER next
+to WER; local models diarize with `return_speakers=True` and AssemblyAI with its native speaker
+labels.
 
 ### Apple SFSpeechRecognizer (macOS, on-device)
 
@@ -199,10 +209,9 @@ poetry run ta eval -m apple-speech -d loquacious -n 1000
 poetry run ta eval -m apple-speech --locale es-ES -d loquacious -n 100
 ```
 
-Calls Apple's on-device `SFSpeechRecognizer` via PyObjC. macOS-only —
-`pyobjc-framework-Speech` is auto-installed on macOS via the Poetry
-`sys_platform == 'darwin'` marker. First run prompts for Speech Recognition
-consent (System Settings → Privacy & Security → Speech Recognition).
+Calls Apple's on-device `SFSpeechRecognizer` via PyObjC. macOS-only — `pyobjc-framework-Speech` is
+auto-installed on macOS via the Poetry `sys_platform == 'darwin'` marker. First run prompts for
+Speech Recognition consent (System Settings → Privacy & Security → Speech Recognition).
 
 ## CLI Reference
 
@@ -212,21 +221,21 @@ All commands available via `tiny-audio` (or `ta` for short):
 poetry run ta --help  # Show all commands
 ```
 
-| Command | Description |
-|---------|-------------|
-| `ta train` | Train locally: `ta train asr -e <preset>` (Hydra overrides pass through) |
-| `ta eval` | Evaluate ASR models on datasets |
-| `ta deploy` | Deploy demo to HuggingFace Space |
-| `ta push` | Push model to HuggingFace Hub |
-| `ta demo` | Launch local Gradio demo |
-| `ta debug` | Debug utilities (check-gradient-flow) |
+| Command     | Description                                                                         |
+| ----------- | ----------------------------------------------------------------------------------- |
+| `ta train`  | Train locally: `ta train asr -e <preset>` (Hydra overrides pass through)            |
+| `ta eval`   | Evaluate ASR models on datasets                                                     |
+| `ta deploy` | Deploy demo to HuggingFace Space                                                    |
+| `ta push`   | Push model to HuggingFace Hub                                                       |
+| `ta demo`   | Launch local Gradio demo                                                            |
+| `ta debug`  | Debug utilities (check-gradient-flow)                                               |
 | `ta runpod` | Remote training on RunPod (plan, up, wait, deploy, train, attach, eval, checkpoint) |
-| `ta dev` | Development tools (lint, format, type-check, test, check, precommit, ...) |
+| `ta dev`    | Development tools (lint, format, type-check, test, check, precommit, ...)           |
 
 ### CLI conventions
 
-Every command follows the same rules, and `tests/test_cli_conventions.py` checks them against
-the built command tree:
+Every command follows the same rules, and `tests/test_cli_conventions.py` checks them against the
+built command tree:
 
 - Commands that *run* something (`eval`, `demo`, `runpod eval`, `dev handler`) take the model as
   `--model/-m`. Commands that *inspect* a model (`debug *`) take it as the first positional
@@ -240,22 +249,22 @@ the built command tree:
   `--audio` are checked before the command runs.
 - A short flag means one thing everywhere, and a long flag keeps the same short flag everywhere:
 
-| Option | Short | Description |
-|--------|-------|-------------|
-| `--model` | `-m` | Model path or Hub ID |
-| `--datasets` | `-d` | Datasets to evaluate (repeatable, `all` expands) |
-| `--max-samples` | `-n` | Maximum samples per dataset |
-| `--output-dir` | `-o` | Directory eval results are written to / read from |
-| `--num-workers` | `-w` | Parallel workers for API evaluations |
-| `--streaming` | `-s` | Streaming evaluation |
-| `--config` | `-c` | Dataset config override |
-| `--experiment` | `-e` | Experiment config (`ta train asr`, `ta runpod`) |
-| `--force` | `-f` | Kill an existing tmux session first (`ta runpod`) |
-| `--repo-id` | `-r` | Hub repo to push or deploy to |
-| `--branch` | `-b` | Hub branch (`ta push`) |
-| `--list` | `-l` | List tmux sessions (`ta runpod attach`) |
-| `--port` | `-p` | Server port (`ta demo`) |
-| `--audio` | `-a` | Audio file (`ta dev handler`) |
+| Option          | Short | Description                                       |
+| --------------- | ----- | ------------------------------------------------- |
+| `--model`       | `-m`  | Model path or Hub ID                              |
+| `--datasets`    | `-d`  | Datasets to evaluate (repeatable, `all` expands)  |
+| `--max-samples` | `-n`  | Maximum samples per dataset                       |
+| `--output-dir`  | `-o`  | Directory eval results are written to / read from |
+| `--num-workers` | `-w`  | Parallel workers for API evaluations              |
+| `--streaming`   | `-s`  | Streaming evaluation                              |
+| `--config`      | `-c`  | Dataset config override                           |
+| `--experiment`  | `-e`  | Experiment config (`ta train asr`, `ta runpod`)   |
+| `--force`       | `-f`  | Kill an existing tmux session first (`ta runpod`) |
+| `--repo-id`     | `-r`  | Hub repo to push or deploy to                     |
+| `--branch`      | `-b`  | Hub branch (`ta push`)                            |
+| `--list`        | `-l`  | List tmux sessions (`ta runpod attach`)           |
+| `--port`        | `-p`  | Server port (`ta demo`)                           |
+| `--audio`       | `-a`  | Audio file (`ta dev handler`)                     |
 
 ## Configuration
 
@@ -273,11 +282,15 @@ poetry run python scripts/train.py +experiments=stage_1 \
 poetry run python scripts/train.py +experiments=stage_1 data=librispeech_dummy
 ```
 
-The YAML files are validated against a typed [structured-config](https://hydra.cc/docs/tutorials/structured_config/intro/) schema in `scripts/train_config.py`, so a misspelled key or a wrongly typed value fails at startup. To add a new knob, declare it there; for a one-off run, append an undeclared key with `+training.<key>=<value>`.
+The YAML files are validated against a typed
+[structured-config](https://hydra.cc/docs/tutorials/structured_config/intro/) schema in
+`scripts/train_config.py`, so a misspelled key or a wrongly typed value fails at startup. To add a
+new knob, declare it there; for a one-off run, append an undeclared key with
+`+training.<key>=<value>`.
 
 ### Config Files
 
-```
+```text
 configs/
 ├── config.yaml                  # Main config (model defaults; imports data + training)
 ├── experiments/                 # Training recipes
@@ -315,11 +328,13 @@ training:
   lr_scheduler_type: cosine_with_min_lr
 ```
 
-The encoder is frozen by the `freeze_audio_encoder` default in `ASRConfig`; set `training.freeze_audio_encoder=false` (or `training.encoder_trainable_top_layers=N` for the top N blocks) to train it.
+The encoder is frozen by the `freeze_audio_encoder` default in `ASRConfig`; set
+`training.freeze_audio_encoder=false` (or `training.encoder_trainable_top_layers=N` for the top N
+blocks) to train it.
 
 ## Project Structure
 
-```
+```text
 tiny-audio/
 ├── tiny_audio/              # Core library
 │   ├── asr_modeling.py      # ASRModel: encoder + projector + decoder
@@ -392,83 +407,86 @@ commit the diff.
 
 1. Add your projector class to `tiny_audio/projectors.py`:
 
-```python
-class MyProjector(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        # config.encoder_dim, config.llm_dim, config.projector_pool_stride are available
-        # Your architecture here
+   ```python
+   class MyProjector(nn.Module):
+       def __init__(self, config):
+           super().__init__()
+           # config.encoder_dim, config.llm_dim, config.projector_pool_stride are available
+           # Your architecture here
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [batch, seq_len, encoder_dim] -> [batch, out_len, llm_dim]
-        return x
+       def forward(self, x: torch.Tensor) -> torch.Tensor:
+           # x: [batch, seq_len, encoder_dim] -> [batch, out_len, llm_dim]
+           return x
 
-    def get_output_length(self, input_length: int) -> int:
-        # Return output sequence length given input length
-        return input_length
-```
+       def get_output_length(self, input_length: int) -> int:
+           # Return output sequence length given input length
+           return input_length
+   ```
 
-2. Register it in the `PROJECTOR_CLASSES` dict in `projectors.py`:
+1. Register it in the `PROJECTOR_CLASSES` dict in `projectors.py`:
 
-```python
-PROJECTOR_CLASSES = {
-    "mlp": MLPAudioProjector,
-    "my_projector": MyProjector,  # Add here
-}
-```
+   ```python
+   PROJECTOR_CLASSES = {
+       "mlp": MLPAudioProjector,
+       "my_projector": MyProjector,  # Add here
+   }
+   ```
 
-3. Create an experiment config `configs/experiments/my_projector.yaml`:
+1. Create an experiment config `configs/experiments/my_projector.yaml`:
 
-```yaml
-# @package _global_
-model:
-  projector_type: my_projector
-```
+   ```yaml
+   # @package _global_
+   model:
+     projector_type: my_projector
+   ```
 
-4. Train: `poetry run python scripts/train.py +experiments=my_projector`
+1. Train: `poetry run python scripts/train.py +experiments=my_projector`
 
 ### Adding a New Dataset
 
-1. Add a config file `configs/data/my_dataset.yaml`. Each entry in `datasets:` is one Hub dataset (or one config of it); see `configs/data/librispeech_dummy.yaml` and `configs/data/multiasr.yaml` for the full set of fields:
+1. Add a config file `configs/data/my_dataset.yaml`. Each entry in `datasets:` is one Hub dataset
+   (or one config of it); see `configs/data/librispeech_dummy.yaml` and `configs/data/multiasr.yaml`
+   for the full set of fields:
 
-```yaml
-datasets:
-  - path: your-org/your-dataset
-    name: en                  # Optional dataset config name
-    audio_column: audio
-    text_column: text
-    task: transcribe
-    text_case: cased          # or `mono` for lowercase / ALL-CAPS labels
-    text_punct: true
-    train_splits: [train]
-    eval_splits: [validation]
-    target_samples: 600000    # Optional cap on the train split
+   ```yaml
+   datasets:
+     - path: your-org/your-dataset
+       name: en                  # Optional dataset config name
+       audio_column: audio
+       text_column: text
+       task: transcribe
+       text_case: cased          # or `mono` for lowercase / ALL-CAPS labels
+       text_punct: true
+       train_splits: [train]
+       eval_splits: [validation]
+       target_samples: 600000    # Optional cap on the train split
 
-sample_rate: 16000
-dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
-max_eval_samples_per_dataset: 500
-```
+   sample_rate: 16000
+   dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
+   max_eval_samples_per_dataset: 500
+   ```
 
-2. Train with your dataset: `poetry run python scripts/train.py +experiments=stage_1 data=my_dataset`
+1. Train with your dataset:
+   `poetry run python scripts/train.py +experiments=stage_1 data=my_dataset`
 
 ### Key Files to Understand
 
-| File | Purpose | When to Modify |
-|------|---------|----------------|
-| `asr_modeling.py` | Core model class | Adding model features, changing forward pass |
-| `asr_config.py` | Configuration | Adding new config parameters |
-| `projectors.py` | Projector architectures | Adding new projector types |
-| `asr_processing.py` | Audio/text preprocessing | Changing input processing |
-| `train.py` | Training loop | Modifying training behavior |
+| File                | Purpose                  | When to Modify                               |
+| ------------------- | ------------------------ | -------------------------------------------- |
+| `asr_modeling.py`   | Core model class         | Adding model features, changing forward pass |
+| `asr_config.py`     | Configuration            | Adding new config parameters                 |
+| `projectors.py`     | Projector architectures  | Adding new projector types                   |
+| `asr_processing.py` | Audio/text preprocessing | Changing input processing                    |
+| `train.py`          | Training loop            | Modifying training behavior                  |
 
 ## Environment Variables
 
-| Variable | Description |
-|----------|-------------|
-| `HF_TOKEN` | HuggingFace API token (for private models/pushing) |
-| `WANDB_API_KEY` | Weights & Biases API key |
-| `WANDB_RUN_ID` | Resume a specific W&B run |
-| `ASSEMBLYAI_API_KEY` | For AssemblyAI evaluation comparison |
+| Variable             | Description                                        |
+| -------------------- | -------------------------------------------------- |
+| `HF_TOKEN`           | HuggingFace API token (for private models/pushing) |
+| `WANDB_API_KEY`      | Weights & Biases API key                           |
+| `WANDB_RUN_ID`       | Resume a specific W&B run                          |
+| `ASSEMBLYAI_API_KEY` | For AssemblyAI evaluation comparison               |
 
 ## Learn More
 
@@ -480,7 +498,8 @@ max_eval_samples_per_dataset: 500
 
 - [GLM-ASR](https://huggingface.co/zai-org/GLM-ASR-Nano-2512) for audio encoding
 - [Qwen3](https://huggingface.co/Qwen/Qwen3-0.6B) for language modeling
-- [LoquaciousSet](https://huggingface.co/datasets/speechbrain/LoquaciousSet) for the default evaluation set
+- [LoquaciousSet](https://huggingface.co/datasets/speechbrain/LoquaciousSet) for the default
+  evaluation set
 
 ## License
 

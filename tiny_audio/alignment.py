@@ -1,5 +1,7 @@
 """Forced alignment for word-level timestamps with Qwen3-ForcedAligner."""
 
+from __future__ import annotations
+
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
@@ -60,11 +62,12 @@ class QwenForcedAligner:
     MODEL_ID = "Qwen/Qwen3-ForcedAligner-0.6B-hf"
     MAX_SECONDS = 300.0
     BATCH_SIZE = 8
-    _model: "Qwen3ASRForTokenClassification | None" = None
-    _processor: "Qwen3ASRProcessor | None" = None
+    _model: Qwen3ASRForTokenClassification | None = None
+    _processor: Qwen3ASRProcessor | None = None
 
     @classmethod
-    def get_instance(cls) -> "tuple[Qwen3ASRForTokenClassification, Qwen3ASRProcessor]":
+    def get_instance(cls) -> tuple[Qwen3ASRForTokenClassification, Qwen3ASRProcessor]:
+        """Load the aligner model and processor once, then return the cached pair."""
         if cls._model is None or cls._processor is None:
             if _QWEN3_ASR_IMPORT_ERROR is not None:
                 raise _QWEN3_ASR_IMPORT_ERROR
@@ -76,11 +79,12 @@ class QwenForcedAligner:
             )
             _module_to(model, device)
             cls._model = model.eval()
-            cls._processor = cast("Qwen3ASRProcessor", AutoProcessor.from_pretrained(cls.MODEL_ID))
+            cls._processor = cast(Qwen3ASRProcessor, AutoProcessor.from_pretrained(cls.MODEL_ID))
         return cls._model, cls._processor
 
     @staticmethod
     def _to_16k(audio, sample_rate: int) -> np.ndarray:
+        """Flatten `audio` to a float32 mono array resampled to 16 kHz."""
         if isinstance(audio, torch.Tensor):
             audio = audio.cpu().numpy()
         audio = np.asarray(audio, dtype=np.float32).reshape(-1)

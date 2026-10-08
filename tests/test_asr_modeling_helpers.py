@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 from conftest import stub
+from transformers import BatchEncoding
 
 from tiny_audio.asr_modeling import (
     ASRModel,
@@ -285,8 +286,8 @@ class TestRenderAudioPrompt:
 
     def test_content_and_template_kwargs(self):
         tokenizer = MagicMock()
-        tokenizer.apply_chat_template.return_value = SimpleNamespace(
-            input_ids=torch.tensor([[1, 2, 3]], dtype=torch.int32)
+        tokenizer.apply_chat_template.return_value = BatchEncoding(
+            {"input_ids": torch.tensor([[1, 2, 3]], dtype=torch.int32)}
         )
         fake = stub(tokenizer=tokenizer, audio_token="<audio>", TRANSCRIBE_PROMPT="Transcribe")
         row = ASRModel._render_audio_prompt(fake, 3)
@@ -299,7 +300,7 @@ class TestRenderAudioPrompt:
 
     def test_empty_instruction_leaves_placeholders_alone(self):
         tokenizer = MagicMock()
-        tokenizer.apply_chat_template.return_value = SimpleNamespace(input_ids=torch.tensor([1]))
+        tokenizer.apply_chat_template.return_value = BatchEncoding({"input_ids": torch.tensor([1])})
         fake = stub(tokenizer=tokenizer, audio_token="<a>", TRANSCRIBE_PROMPT="")
         ASRModel._render_audio_prompt(fake, 2)
         assert tokenizer.apply_chat_template.call_args.args[0][0]["content"] == "<a><a>"

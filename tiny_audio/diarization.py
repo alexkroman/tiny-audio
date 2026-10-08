@@ -17,7 +17,9 @@ from transformers import (
 class _AudioProcessor(Protocol):
     """What `activity` uses of the Nemotron processor (its class ships after 5.17)."""
 
-    def __call__(self, audio: np.ndarray, *, sampling_rate: int) -> BatchFeature: ...
+    def __call__(self, audio: np.ndarray, *, sampling_rate: int) -> BatchFeature:
+        """Turn 16 kHz mono audio into model inputs."""
+        ...
 
 
 def _get_device() -> torch.device:
@@ -84,6 +86,7 @@ class NemotronDiarizer:
 
     @classmethod
     def get_instance(cls) -> tuple[PreTrainedModel, _AudioProcessor]:
+        """Load the diarization model and processor once, then return the cached pair."""
         if cls._model is None or cls._processor is None:
             if importlib.util.find_spec("transformers.models.nemotron3_diarization") is None:
                 msg = (

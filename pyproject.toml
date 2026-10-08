@@ -6,19 +6,27 @@ build-backend = "poetry.core.masonry.api"
 name = "tiny-audio"
 version = "0.1.0"
 description = "Learn ASR by Building One - A minimal speech recognition model combining a GLM-ASR encoder with Qwen3-0.6B"
-authors = [{name = "Alex Kroman", email = "alex@alexkroman.com"}]
+authors = [{ name = "Alex Kroman", email = "alex@alexkroman.com" }]
 license = "MIT"
 readme = "README.md"
-keywords = ["speech-recognition", "asr", "glm-asr", "qwen3", "transformers", "deep-learning", "education"]
+keywords = [
+  "speech-recognition",
+  "asr",
+  "glm-asr",
+  "qwen3",
+  "transformers",
+  "deep-learning",
+  "education",
+]
 classifiers = [
-    "Development Status :: 4 - Beta",
-    "Intended Audience :: Developers",
-    "Intended Audience :: Education",
-    "Intended Audience :: Science/Research",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.12",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
-    "Topic :: Software Development :: Libraries :: Python Modules",
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Education",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 requires-python = ">=3.12,<3.13"
 # Poetry fills deps in from [tool.poetry.dependencies] below. A static
@@ -38,10 +46,7 @@ tiny-audio = "scripts.cli:app"
 ta = "scripts.cli:app"
 
 [tool.poetry]
-packages = [
-    {include = "tiny_audio"},
-    {include = "scripts"},
-]
+packages = [{ include = "tiny_audio" }, { include = "scripts" }]
 include = ["configs/**/*.yaml"]
 
 [[tool.poetry.source]]
@@ -60,7 +65,7 @@ torch = "~2.8.0"
 soundfile = ">=0.12.1"
 librosa = ">=0.10.0"
 transformers = ">=5.0.0"
-datasets = {extras = ["audio"], version = ">=3.0.0,<4.0.0"}
+datasets = { extras = ["audio"], version = ">=3.0.0,<4.0.0" }
 jiwer = "*"
 attrs = "*"
 rich = "*"
@@ -73,8 +78,8 @@ assemblyai = "*"
 deepgram-sdk = "*"
 typer = ">=0.19.2"
 trl = ">=0.26.0"
-peft = ">=0.13.0"  # LoRA adapters for Stage 2 fine-tuning
-torchaudio = "~2.8.0"  # torchaudio's major.minor must match torch's
+peft = ">=0.13.0"                                             # LoRA adapters for Stage 2 fine-tuning
+torchaudio = "~2.8.0"                                         # torchaudio's major.minor must match torch's
 # >=0.8.0, NOT the previous >=0.5.0. `apply_liger_kernel_to_qwen3_5` first
 # ships in 0.8.0 (verified against the wheels: 0.7.0 does not export it), and
 # without it scripts/train.py's patcher lookup raises AttributeError, gets
@@ -84,7 +89,7 @@ torchaudio = "~2.8.0"  # torchaudio's major.minor must match torch's
 # ~29 GiB at B=48/T=330, and the OOM that killed several granite_qwen_lora
 # launches. A floor that admits seven versions lacking the architecture this
 # repo trains is a silent 29 GiB regression waiting for a fresh resolve.
-liger-kernel = {version = ">=0.8.0", markers = "sys_platform == 'linux'"}
+liger-kernel = { version = ">=0.8.0", markers = "sys_platform == 'linux'" }
 # NOTE: the Qwen3.5 linear-attention fast path (flash-linear-attention +
 # tilelang + causal-conv1d) is deliberately NOT a main dependency -- see the
 # `hybrid-kernels` group below for why installing it unconditionally can turn a
@@ -92,9 +97,9 @@ liger-kernel = {version = ">=0.8.0", markers = "sys_platform == 'linux'"}
 # these on pods (Hub kernels are not used -- see _load_language_model); this
 # group remains for local pods that have nvcc or want the upstream
 # packages specifically.
-pyobjc-framework-Speech = {version = "*", markers = "sys_platform == 'darwin'"}
+pyobjc-framework-Speech = { version = "*", markers = "sys_platform == 'darwin'" }
 fabric = ">=3.0.0"
-tenacity = ">=8.2"  # Retry/backoff policy for eval API clients and RunPod/SSH deploy polling
+tenacity = ">=8.2"                                                                # Retry/backoff policy for eval API clients and RunPod/SSH deploy polling
 # cpWER for speaker-labelled eval sets (scripts/eval/speaker_metrics.py).
 scipy = "*"
 rapidfuzz = "*"
@@ -104,8 +109,8 @@ huggingface-hub = "*"
 safetensors = "*"
 tqdm = "*"
 invoke = "*"
-truecase = ">=0.0.14"  # Statistical re-casing for ASR label normalization
-ftfy = ">=6.0"  # Unicode cleanup (mojibake, smart quotes) + NFKC before normalize
+truecase = ">=0.0.14" # Statistical re-casing for ASR label normalization
+ftfy = ">=6.0"        # Unicode cleanup (mojibake, smart quotes) + NFKC before normalize
 # nltk 3.10 tokenizes a leading apostrophe as its own token ("'em" -> "'", "em"),
 # and truecase's TreebankWordDetokenizer re-glues that bare "'" onto the PREVIOUS
 # word. Training labels from mono-case corpora then come out as "get' em" and
@@ -129,18 +134,18 @@ bandit = ">=1.7.0"
 vulture = ">=2.10"
 interrogate = ">=1.5.0"
 deptry = ">=0.23.0"
-zizmor = ">=1.0.0"  # GitHub Actions security audit
-actionlint-py = ">=1.7.0"  # GitHub Actions workflow linter (bundles the actionlint binary)
-check-wheel-contents = ">=0.6.0"  # Wheel layout checks after `ta dev build`
-twine = ">=6.0.0"  # `twine check`: package metadata renders on PyPI
-pylint = ">=3.3.0"  # duplicate-code only (`ta dev duplication`); ruff covers the rest
+zizmor = ">=1.0.0"               # GitHub Actions security audit
+actionlint-py = ">=1.7.0"        # GitHub Actions workflow linter (bundles the actionlint binary)
+check-wheel-contents = ">=0.6.0" # Wheel layout checks after `ta dev build`
+twine = ">=6.0.0"                # `twine check`: package metadata renders on PyPI
+pylint = ">=3.3.0"               # duplicate-code only (`ta dev duplication`); ruff covers the rest
 pytest-mock = "^3.15.1"
 elevenlabs = "^2.31.0"
 # Apple SFSpeechRecognizer eval backend (scripts/eval/evaluators/asr.py).
 # Already a runtime dep on macOS, but pinning it in dev too so the dev env
 # doesn't fail-import when running tests/CLI flows that touch the backend.
-pyobjc-framework-Speech = {version = "*", markers = "sys_platform == 'darwin'"}
-torchcodec = ">=0.5.0,<0.8"  # 0.7.x is the last line built against torch 2.8 ABI; 0.8+ requires torch 2.9+
+pyobjc-framework-Speech = { version = "*", markers = "sys_platform == 'darwin'" }
+torchcodec = ">=0.5.0,<0.8"                                                       # 0.7.x is the last line built against torch 2.8 ABI; 0.8+ requires torch 2.9+
 
 # Optional fast path for Qwen3.5's hybrid linear-attention layers (three of
 # every four). Without these, transformers logs `causal_conv1d_fn` and
@@ -170,13 +175,16 @@ types-tqdm = "^4.70.0.20260906"
 scipy-stubs = "^1.18.1.1"
 matplotlib = "^3.11.2"
 mdformat-frontmatter = "^2.1.2"
+pre-commit-hooks = "^6.0.0"
+pymarkdownlnt = "^0.9.40"
+mdformat-gfm = "^1.0.0"
 [tool.poetry.group.hybrid-kernels]
 optional = true
 
 [tool.poetry.group.hybrid-kernels.dependencies]
-causal-conv1d = {version = ">=1.4.0", markers = "sys_platform == 'linux'"}
-flash-linear-attention = {version = ">=0.5.0", markers = "sys_platform == 'linux'"}
-tilelang = {version = ">=0.1.9", markers = "sys_platform == 'linux'"}
+causal-conv1d = { version = ">=1.4.0", markers = "sys_platform == 'linux'" }
+flash-linear-attention = { version = ">=0.5.0", markers = "sys_platform == 'linux'" }
+tilelang = { version = ">=0.1.9", markers = "sys_platform == 'linux'" }
 
 [tool.black]
 line-length = 100
@@ -233,14 +241,21 @@ xfail_strict = true
 testpaths = ["tests"]
 
 # Ignore directories
-norecursedirs = ["outputs", ".venv", "venv", ".git", "__pycache__", "*.egg-info"]
+norecursedirs = [
+  "outputs",
+  ".venv",
+  "venv",
+  ".git",
+  "__pycache__",
+  "*.egg-info",
+]
 
 # Markers for test categorization
 markers = ["slow: marks tests as slow (deselected by default)"]
 
 # Filter out third-party warnings
 filterwarnings = [
-    "ignore:builtin type.*has no __module__ attribute:DeprecationWarning",
+  "ignore:builtin type.*has no __module__ attribute:DeprecationWarning",
 ]
 
 [tool.ruff]
@@ -250,60 +265,56 @@ line-length = 100
 # generics) and lets code that only runs on 3.12 pass as if it were portable.
 target-version = "py312"
 extend-exclude = [
-    ".git",
-    "__pycache__",
-    ".venv",
-    "venv",
-    "build",
-    "dist",
-    "*.egg-info",
-    ".mypy_cache",
-    ".pytest_cache",
+  ".git",
+  "__pycache__",
+  ".venv",
+  "venv",
+  "build",
+  "dist",
+  "*.egg-info",
+  ".mypy_cache",
+  ".pytest_cache",
 ]
 
 [tool.ruff.lint]
 select = [
-    "E",  # pycodestyle errors
-    "W",  # pycodestyle warnings
-    "F",  # pyflakes
-    "I",  # isort
-    "N",  # pep8-naming
-    "UP", # pyupgrade
-    "B",  # flake8-bugbear
-    "C4", # flake8-comprehensions
-    "DTZ", # flake8-datetimez
-    "T10", # flake8-debugger
-    "ISC", # flake8-implicit-str-concat
-    "RET", # flake8-return
-    "SIM", # flake8-simplify
-    "PTH", # flake8-use-pathlib
-    "A",   # flake8-builtins (shadowed builtins)
-    "PIE", # flake8-pie (misc. lints: duplicate class fields, redundant startswith chains)
-    "PT",  # flake8-pytest-style
-    "RSE", # flake8-raise
-    "TID", # flake8-tidy-imports
-    "Q",   # flake8-quotes (agrees with black/ruff-format)
-    "G",   # flake8-logging-format
-    "LOG", # flake8-logging
-    "TRY", # tryceratops (exception-handling anti-patterns)
-    "FLY", # flynt (static string joins)
-    "PERF", # perflint
-    "PGH", # pygrep-hooks (blanket noqa / type: ignore)
-    "PLC", # pylint conventions
-    "PLE", # pylint errors
-    "PLW", # pylint warnings
-    "FURB", # refurb (modernization)
-    "RUF", # ruff-specific rules
+  "E",    # pycodestyle errors
+  "W",    # pycodestyle warnings
+  "F",    # pyflakes
+  "I",    # isort
+  "N",    # pep8-naming
+  "UP",   # pyupgrade
+  "B",    # flake8-bugbear
+  "C4",   # flake8-comprehensions
+  "DTZ",  # flake8-datetimez
+  "T10",  # flake8-debugger
+  "ISC",  # flake8-implicit-str-concat
+  "RET",  # flake8-return
+  "SIM",  # flake8-simplify
+  "PTH",  # flake8-use-pathlib
+  "A",    # flake8-builtins (shadowed builtins)
+  "PIE",  # flake8-pie (misc. lints: duplicate class fields, redundant startswith chains)
+  "PT",   # flake8-pytest-style
+  "RSE",  # flake8-raise
+  "TID",  # flake8-tidy-imports
+  "Q",    # flake8-quotes (agrees with black/ruff-format)
+  "G",    # flake8-logging-format
+  "LOG",  # flake8-logging
+  "TRY",  # tryceratops (exception-handling anti-patterns)
+  "FLY",  # flynt (static string joins)
+  "PERF", # perflint
+  "PGH",  # pygrep-hooks (blanket noqa / type: ignore)
+  "PLC",  # pylint conventions
+  "PLE",  # pylint errors
+  "PLW",  # pylint warnings
+  "FURB", # refurb (modernization)
+  "RUF",  # ruff-specific rules
 ]
 
 [tool.ruff.lint.isort]
 # A local `wandb/` run directory at the repo root makes ruff classify `wandb`
 # as first-party, so local `--fix` and CI disagree on import order.
 known-third-party = ["wandb"]
-
-[tool.mdformat]
-wrap = 100
-number = false
 
 [tool.deptry]
 # The course example plots with matplotlib; it is not part of the package.
@@ -333,8 +344,8 @@ DEP004 = ["elevenlabs"]
 branch = true
 source = ["tiny_audio", "scripts"]
 omit = [
-    # A __main__ probe against a live checkpoint; no unit-testable surface.
-    "scripts/debug/check_gradient_flow.py",
+  # A __main__ probe against a live checkpoint; no unit-testable surface.
+  "scripts/debug/check_gradient_flow.py",
 ]
 
 [tool.coverage.report]
@@ -347,13 +358,13 @@ show_missing = true
 skip_covered = true
 precision = 1
 exclude_also = [
-    "if TYPE_CHECKING:",
-    "if __name__ == .__main__.:",
-    "raise NotImplementedError",
-    "@(abc\\.)?abstractmethod",
-    # `except ImportError` fallbacks for the flat-layout HF Hub checkout, where
-    # the package is loaded as a set of sibling modules rather than `tiny_audio.*`.
-    "except ImportError:",
+  "if TYPE_CHECKING:",
+  "if __name__ == .__main__.:",
+  "raise NotImplementedError",
+  "@(abc\\.)?abstractmethod",
+  # `except ImportError` fallbacks for the flat-layout HF Hub checkout, where
+  # the package is loaded as a set of sibling modules rather than `tiny_audio.*`.
+  "except ImportError:",
 ]
 
 [tool.coverage.xml]
@@ -363,3 +374,23 @@ output = "coverage.xml"
 # Skip B615: We intentionally want latest HuggingFace model versions
 # Skip B108: RunPod deployment uses /tmp for remote scripts
 skips = ["B615", "B108"]
+
+[tool.pymarkdown]
+# YAML front matter (MODEL_CARD.md, demo/README.md) and GFM tables, which
+# mdformat-gfm writes.
+extensions.front-matter.enabled = true
+extensions.markdown-tables.enabled = true
+# Same width mdformat wraps at (.mdformat.toml).
+plugins.md013.line_length = 100
+plugins.md013.code_block_line_length = 100
+# mdformat-gfm pads table cells to align columns, so a table is as wide as its
+# longest cell and cannot be re-wrapped; prose and code blocks stay at 100.
+plugins.md013.tables = false
+# mdformat's `number = false` writes every ordered-list item as `1.`.
+plugins.md029.style = "one"
+# The README's centred logo is the one place raw HTML is used.
+plugins.md033.allowed_elements = "div,img"
+# Table column alignment is the formatter's job (mdformat-gfm aligns every
+# table on write), and MD060 measures columns in UTF-8 bytes, so it rejects
+# mdformat's correctly aligned output wherever a cell holds "—" or "→".
+plugins.md060.enabled = false
