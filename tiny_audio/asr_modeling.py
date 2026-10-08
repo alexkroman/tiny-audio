@@ -231,7 +231,7 @@ def _patch_gemma_decode_loop(model: "GenerativeDecoder") -> None:
             model_inputs.pop("per_layer_inputs", None)
         return model_inputs
 
-    model.prepare_inputs_for_generation = prepare_inputs_for_generation  # type: ignore[method-assign]
+    model.prepare_inputs_for_generation = prepare_inputs_for_generation
 
 
 def _assert_projector_loaded(incompatible_keys: LoadStateDictResult, projector_type: str) -> None:
@@ -311,7 +311,7 @@ def _log_linear_attention_backends(level: int = logging.WARNING) -> None:
         logger.info("Linear-attention fast path: causal-conv1d + flash-linear-attention packages.")
 
 
-class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-call]
+class ASRModel(PreTrainedModel, GenerationMixin):
     """Audio-to-text model combining an audio encoder, projector, and language model."""
 
     config_class = ASRConfig
@@ -562,7 +562,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
         # encoders (e.g. GLM-ASR) accept variable-length input, so we disable
         # padding to avoid wasting compute on silent frames.
         if "whisper" not in config.audio_model_id.lower():
-            feature_extractor.padding = False  # type: ignore[attr-defined]
+            feature_extractor.padding = False  # pyright: ignore[reportAttributeAccessIssue]
         return feature_extractor
 
     @classmethod
@@ -1047,7 +1047,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
         full speed. Chunking keeps the model on the GPU -- falling back to CPU
         would be correct but costs roughly an order of magnitude in latency.
         """
-        module: Self = super()._apply(*args, **kwargs)  # type: ignore[no-untyped-call]
+        module: Self = super()._apply(*args, **kwargs)
         try:
             on_mps = any(p.device.type == "mps" for p in module.parameters())
         except StopIteration:  # pragma: no cover - parameterless model
@@ -1183,11 +1183,11 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
 
     def get_output_embeddings(self) -> nn.Module | None:
         """Return the decoder's LM head (None for a decoder without one)."""
-        return self.language_model.get_output_embeddings()  # type: ignore[no-untyped-call]
+        return self.language_model.get_output_embeddings()
 
     def set_output_embeddings(self, new_embeddings: nn.Module) -> None:
         """Replace the decoder's LM head."""
-        self.language_model.set_output_embeddings(new_embeddings)  # type: ignore[no-untyped-call]
+        self.language_model.set_output_embeddings(new_embeddings)
 
     def get_processor(self) -> ASRProcessor:
         """Get the processor for this model."""
@@ -2140,7 +2140,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
     # typeshed's functools._Wrapped (how PreTrainedModel declares push_to_hub) is
     # not a descriptor, so no method can match it; the signature is the
     # PushToHubMixin one that PreTrainedModel wraps.
-    def push_to_hub(  # type: ignore[override]
+    def push_to_hub(  # pyright: ignore[reportIncompatibleVariableOverride]
         self,
         repo_id: str,
         *,
@@ -2162,7 +2162,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
         # Store repo_id in config so save_pretrained can access it
         self.config.pretrained_model_path = repo_id
         # Call parent's push_to_hub
-        url: str = PreTrainedModel.push_to_hub(
+        return PreTrainedModel.push_to_hub(
             self,
             repo_id,
             commit_message=commit_message,
@@ -2174,7 +2174,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
             max_shard_size=max_shard_size,
             tags=tags,
         )
-        return url
 
 
 # Register with transformers Auto classes

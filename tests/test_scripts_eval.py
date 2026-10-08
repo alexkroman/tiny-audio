@@ -266,7 +266,7 @@ class TestMergeLoraAdapters:
 
     @staticmethod
     def _peft_holder() -> types.SimpleNamespace:
-        class Tiny(PreTrainedModel):  # type: ignore[no-untyped-call]  # untyped __init_subclass__
+        class Tiny(PreTrainedModel):
             config_class = PretrainedConfig
 
             def __init__(self) -> None:

@@ -377,7 +377,7 @@ class TestEncoderIsNeverLeftInTrainMode:
         model.train()
         assert model.audio_tower.training is False
         # transformers' PreTrainedModel.eval is unannotated
-        model.eval()  # type: ignore[no-untyped-call]
+        model.eval()
         assert model.audio_tower.training is False
 
 

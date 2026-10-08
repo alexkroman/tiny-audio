@@ -81,7 +81,7 @@ def _config_from_dict(model_type: str, values: dict[str, Any]) -> transformers.P
     return default.__class__(**values)
 
 
-class ASRConfig(transformers.PretrainedConfig):  # type: ignore[no-untyped-call]  # untyped __init_subclass__
+class ASRConfig(transformers.PretrainedConfig):
     """Configuration class for the ASR model.
 
     This config combines settings for:

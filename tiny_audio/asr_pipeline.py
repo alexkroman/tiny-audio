@@ -360,10 +360,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
 
         return None
 
-    # `Pipeline` annotates its stages for single-shot pipelines; this one is a generator.
-    def preprocess(  # type: ignore[override]
-        self, *args: Any, **preprocess_params: Any
-    ) -> Iterator[dict[str, Any]]:
+    def preprocess(self, *args: Any, **preprocess_params: Any) -> Iterator[dict[str, Any]]:
         """Preprocess audio inputs for the model.
 
         Args:
@@ -413,9 +410,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                 item["is_last"] = True
             yield item
 
-    def _forward(  # type: ignore[override]  # Pipeline types this as returning ModelOutput
-        self, *args: Any, **generate_kwargs: Any
-    ) -> dict[str, Any]:
+    def _forward(self, *args: Any, **generate_kwargs: Any) -> dict[str, Any]:
         """Run model forward pass to generate transcription.
 
         Args:
@@ -497,7 +492,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             "is_last": is_last,
         }
 
-    def postprocess(  # type: ignore[override]  # Pipeline types every kwarg as a dict
+    def postprocess(
         self,
         model_outputs: dict[str, Any] | list[dict[str, Any]],
         decoder_kwargs: dict[str, Any] | None = None,

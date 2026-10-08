@@ -174,4 +174,4 @@ def _english_normalizer() -> EnglishTextNormalizer:
     """
     tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-tiny")
     spelling: dict[str, str] = tokenizer.english_spelling_normalizer
-    return EnglishTextNormalizer(spelling)  # type: ignore[no-untyped-call]  # unannotated __init__
+    return EnglishTextNormalizer(spelling)

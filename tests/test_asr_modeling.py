@@ -460,7 +460,7 @@ class TestGradientCheckpointing:
     def test_enable_via_upstream_entry_point(self, base_asr_model: ASRModel) -> None:
         base_asr_model.gradient_checkpointing_enable()
         assert base_asr_model.language_model.is_gradient_checkpointing
-        base_asr_model.gradient_checkpointing_disable()  # type: ignore[no-untyped-call]  # untyped upstream
+        base_asr_model.gradient_checkpointing_disable()
         assert not base_asr_model.language_model.is_gradient_checkpointing
 
     def test_enable_accepts_upstream_kwargs(self, base_asr_model: ASRModel) -> None:
@@ -470,7 +470,7 @@ class TestGradientCheckpointing:
             every_n_layers=1,
         )
         assert base_asr_model.language_model.is_gradient_checkpointing
-        base_asr_model.gradient_checkpointing_disable()  # type: ignore[no-untyped-call]  # untyped upstream
+        base_asr_model.gradient_checkpointing_disable()
 
     def test_signature_matches_upstream(self, base_asr_model: ASRModel) -> None:
         upstream = inspect.signature(PreTrainedModel._set_gradient_checkpointing).parameters
@@ -919,7 +919,7 @@ class TestVocabPadding:
         rows = input_embedding_rows(base_asr_model)
         output_embeddings = cast(
             torch.nn.Linear,
-            base_asr_model.language_model.get_output_embeddings(),  # type: ignore[no-untyped-call]  # untyped upstream
+            base_asr_model.language_model.get_output_embeddings(),
         )
         assert output_embeddings.weight.shape[0] == rows
         assert base_asr_model.language_model.config.vocab_size == rows

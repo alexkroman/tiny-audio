@@ -39,11 +39,11 @@ class GateBlock(nn.Module):
         self.out_proj = nn.Linear(dim, dim, bias=False)
 
 
-class FakeDecoderConfig(PretrainedConfig):  # type: ignore[no-untyped-call]  # untyped __init_subclass__
+class FakeDecoderConfig(PretrainedConfig):
     model_type = "fake_decoder"
 
 
-class FakeDecoder(PreTrainedModel):  # type: ignore[no-untyped-call]  # untyped __init_subclass__
+class FakeDecoder(PreTrainedModel):
     config_class = FakeDecoderConfig
 
     def __init__(self, depth: int = 2) -> None:

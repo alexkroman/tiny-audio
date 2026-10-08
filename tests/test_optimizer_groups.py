@@ -78,7 +78,7 @@ def _input_embedding(lm: PreTrainedModel) -> torch.Tensor:
 
 
 def _output_embedding(lm: PreTrainedModel) -> torch.Tensor:
-    head = lm.get_output_embeddings()  # type: ignore[no-untyped-call]
+    head = lm.get_output_embeddings()
     return cast(nn.Linear, head).weight
 
 

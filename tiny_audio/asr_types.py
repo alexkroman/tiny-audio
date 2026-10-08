@@ -23,7 +23,7 @@ StateDictT = TypeVar("StateDictT", bound=dict[str, Any])
 
 if TYPE_CHECKING:
 
-    class GenerativeDecoder(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-call]
+    class GenerativeDecoder(PreTrainedModel, GenerationMixin):
         """Static view of the decoder: a PreTrainedModel that can generate.
 
         transformers annotates GenerationMixin's `self` with a protocol

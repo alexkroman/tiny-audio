@@ -161,7 +161,9 @@ class _MaskOnDevice:
         self.shape = self._tensor.shape
 
     # Elementwise like Tensor.__eq__, which object.__eq__'s signature cannot express.
-    def __eq__(self, other: torch.Tensor | int) -> torch.Tensor:  # type: ignore[override]
+    def __eq__(  # pyright: ignore[reportIncompatibleMethodOverride]
+        self, other: torch.Tensor | int
+    ) -> torch.Tensor:
         return self._tensor == other
 
     # Like a real Tensor, hash by identity even though __eq__ is elementwise.
