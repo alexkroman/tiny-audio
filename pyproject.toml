@@ -287,6 +287,7 @@ select = [
   "UP",   # pyupgrade
   "B",    # flake8-bugbear
   "C4",   # flake8-comprehensions
+  "C90",  # mccabe: cyclomatic complexity, ruff's default limit of 10 per function
   "DTZ",  # flake8-datetimez
   "T10",  # flake8-debugger
   "ISC",  # flake8-implicit-str-concat
