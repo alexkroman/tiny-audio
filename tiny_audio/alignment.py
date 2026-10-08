@@ -38,13 +38,26 @@ class AlignedWord(TypedDict):
     end: float
 
 
-def _get_device() -> str:
+def get_device() -> torch.device:
     """Get best available device for inference."""
     if torch.cuda.is_available():
-        return "cuda"
+        return torch.device("cuda")
     if torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def to_16k(audio: npt.ArrayLike | torch.Tensor, sample_rate: int) -> npt.NDArray[np.float32]:
+    """Flatten `audio` to a float32 mono array resampled to 16 kHz."""
+    if isinstance(audio, torch.Tensor):
+        audio = audio.cpu()
+    out: npt.NDArray[np.float32] = np.asarray(audio, dtype=np.float32).reshape(-1)
+    if sample_rate != 16000:
+        out = np.asarray(
+            torchaudio.functional.resample(torch.as_tensor(out), sample_rate, 16000),
+            dtype=np.float32,
+        )
+    return out
 
 
 class QwenForcedAligner:
@@ -73,9 +86,9 @@ class QwenForcedAligner:
         if cls._model is None or cls._processor is None:
             if _QWEN3_ASR_IMPORT_ERROR is not None:
                 raise _QWEN3_ASR_IMPORT_ERROR
-            device = _get_device()
+            device = get_device()
             # Batches are padded, and Metal sdpa returns NaN for fully masked rows.
-            attn = "eager" if device == "mps" else "sdpa"
+            attn = "eager" if device.type == "mps" else "sdpa"
             model = Qwen3ASRForTokenClassification.from_pretrained(
                 cls.MODEL_ID, dtype=torch.bfloat16, attn_implementation=attn
             )
@@ -85,19 +98,6 @@ class QwenForcedAligner:
             cls._model = model
             cls._processor = Qwen3ASRProcessor.from_pretrained(cls.MODEL_ID)
         return cls._model, cls._processor
-
-    @staticmethod
-    def _to_16k(audio: npt.ArrayLike | torch.Tensor, sample_rate: int) -> npt.NDArray[np.float32]:
-        """Flatten `audio` to a float32 mono array resampled to 16 kHz."""
-        if isinstance(audio, torch.Tensor):
-            audio = audio.cpu()
-        out: npt.NDArray[np.float32] = np.asarray(audio, dtype=np.float32).reshape(-1)
-        if sample_rate != 16000:
-            out = np.asarray(
-                torchaudio.functional.resample(torch.as_tensor(out), sample_rate, 16000),
-                dtype=np.float32,
-            )
-        return out
 
     @classmethod
     @torch.inference_mode()
@@ -116,7 +116,7 @@ class QwenForcedAligner:
             kept = [w for w in text.split() if _clean_tokens([w])]
             if not kept:
                 continue
-            audio = cls._to_16k(raw, sample_rate)
+            audio = to_16k(raw, sample_rate)
             if len(audio) / 16000 > cls.MAX_SECONDS:
                 msg = (
                     f"chunk {i} is {len(audio) / 16000:.0f} s; Qwen3-ForcedAligner takes at most "

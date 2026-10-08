@@ -3,6 +3,7 @@
 Uses pytest-mock and shared fixtures from conftest.py.
 """
 
+import functools
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -139,7 +140,7 @@ class TestProcessorCall:
         tok.apply_chat_template.return_value = torch.tensor([[1, 2, 3, 4, 5]])
 
         proj = mocker.MagicMock()
-        proj.get_output_length.return_value = 50
+        proj.get_output_length.side_effect = functools.partial(torch.full_like, fill_value=50)
 
         return ASRProcessor(fe, tok, proj)
 
@@ -335,7 +336,9 @@ class TestProcessorAudioToken:
         mock_projector: MagicMock,
     ) -> None:
         """The prompt must repeat the configured token, or masked_scatter mismatches."""
-        mock_projector.get_output_length.return_value = 3
+        mock_projector.get_output_length.side_effect = functools.partial(
+            torch.full_like, fill_value=3
+        )
         mock_tokenizer.apply_chat_template.return_value = torch.tensor([[1, 2, 3]])
 
         processor = ASRProcessor(

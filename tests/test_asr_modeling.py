@@ -109,7 +109,7 @@ class TestEmbeddings:
 
 
 class TestEncoderOutputLengths:
-    """_compute_encoder_output_lengths and _get_num_audio_tokens use conv formula."""
+    """_compute_encoder_output_lengths uses the conv formula."""
 
     def test_compute_encoder_output_lengths_shape(self, base_asr_model: ASRModel) -> None:
         # whisper-tiny defaults: mel_len 3000 -> 1500 after conv
@@ -117,12 +117,6 @@ class TestEncoderOutputLengths:
         lengths = base_asr_model._compute_encoder_output_lengths(attention_mask)
         assert lengths.shape == (2,)
         assert lengths[0].item() == 1500
-
-    def test_get_num_audio_tokens_matches_projector(self, base_asr_model: ASRModel) -> None:
-        attention_mask = torch.ones(1, 3000)
-        n = base_asr_model._get_num_audio_tokens(attention_mask)
-        assert n > 0
-        assert isinstance(n, int)
 
 
 class TestFeatureExtractor:

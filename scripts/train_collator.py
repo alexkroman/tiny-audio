@@ -22,7 +22,7 @@ from tiny_audio.asr_config import (
     ConvLayerSpec,
     compute_encoder_output_length,
 )
-from tiny_audio.asr_processing import ASRProcessor
+from tiny_audio.asr_processing import DEFAULT_TRANSCRIBE_PROMPT as TRANSCRIBE_PROMPT
 from tiny_audio.asr_types import AudioFeatureExtractor, OutputLengthProjector
 
 # trl.experimental warns (TRLExperimentalWarning) the first time it is
@@ -33,8 +33,6 @@ with warnings.catch_warnings():
 
 logger = logging.getLogger(__name__)
 
-# The inference default: training and decoding must share one conditioning.
-TRANSCRIBE_PROMPT = ASRProcessor.TRANSCRIBE_PROMPT
 # Used for sources whose transcripts natively carry punctuation, selected per
 # row via the `text_punct` dataset field. Granite Speech 4.1 documents exactly
 # this mechanism -- its model card says punctuation and truecasing are chosen
