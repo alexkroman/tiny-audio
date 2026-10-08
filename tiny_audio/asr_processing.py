@@ -18,6 +18,26 @@ except ImportError:
     )
 
 
+def left_pad_prompt_rows(rows: list[torch.Tensor], tokenizer) -> tuple[torch.Tensor, torch.Tensor]:
+    """Stack per-sample prompt rows into a left-padded batch: `(input_ids, attention_mask)`.
+
+    Left, not right: these feed `generate`, so padding must not sit between
+    the prompt and the first generated token. Pads with the tokenizer's pad
+    token, falling back to eos, then 0. Pad positions never carry
+    `audio_token_id`, so the model's masked_scatter is unaffected.
+    """
+    pad_id = tokenizer.pad_token_id
+    if pad_id is None:
+        pad_id = tokenizer.eos_token_id or 0
+    input_ids = pad_sequence(rows, batch_first=True, padding_value=int(pad_id), padding_side="left")
+    # Padded from ones rather than `input_ids != pad_id`: a real token may
+    # equal `pad_id` when pad falls back to eos.
+    attention_mask = pad_sequence(
+        [torch.ones_like(row) for row in rows], batch_first=True, padding_side="left"
+    )
+    return input_ids, attention_mask
+
+
 def prepend_lead_in(audio, sampling_rate: int, seconds: float):
     """Prepend `seconds` of silence to a waveform (or each waveform in a list).
 
@@ -120,25 +140,8 @@ class ASRProcessor(ProcessorMixin):
         return (ids[0] if ids.dim() > 1 else ids).to(torch.long)
 
     def _stack_prompt_rows(self, rows: list[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
-        """Stack per-sample prompt rows into a batch, left-padding if ragged.
-
-        Left, not right: these feed `generate`, so padding must not sit between
-        the prompt and the first generated token. Mirrors
-        `ASRModel._left_pad_prompt_rows`; pad positions never carry
-        `audio_token_id`, so the model's masked_scatter is unaffected.
-        """
-        pad_id = self.tokenizer.pad_token_id
-        if pad_id is None:
-            pad_id = self.tokenizer.eos_token_id or 0
-        input_ids = pad_sequence(
-            rows, batch_first=True, padding_value=int(pad_id), padding_side="left"
-        )
-        # Padded from ones rather than `input_ids != pad_id`: a real token may
-        # equal `pad_id` when pad falls back to eos.
-        attention_mask = pad_sequence(
-            [torch.ones_like(row) for row in rows], batch_first=True, padding_side="left"
-        )
-        return input_ids, attention_mask
+        """Stack per-sample prompt rows into a batch (see `left_pad_prompt_rows`)."""
+        return left_pad_prompt_rows(rows, self.tokenizer)
 
     def __call__(
         self,

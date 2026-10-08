@@ -51,6 +51,18 @@ SECURITY_COMMAND = ["bandit", "-c", "pyproject.toml", "-r", "tiny_audio", "scrip
 # Unused, missing, transitive-only and misplaced dependencies; configured in
 # `[tool.deptry]` (pyproject.toml).
 DEPS_COMMAND = ["deptry", "."]
+# Copy-pasted blocks of 4+ lines across tiny_audio/ and scripts/ (comments,
+# docstrings, imports and signatures ignored). demo/ is left out: it deploys
+# to the Space on its own and cannot share code with scripts/.
+DUPLICATION_COMMAND = [
+    "pylint",
+    "--disable=all",
+    "--enable=duplicate-code",
+    "--min-similarity-lines=4",
+    "--score=n",
+    LIB_PATH,
+    "scripts",
+]
 DEAD_CODE_COMMAND = [
     "vulture",
     "tiny_audio",
@@ -67,6 +79,7 @@ ANALYSIS_COMMANDS = [
     *TYPE_CHECK_COMMANDS,
     SECURITY_COMMAND,
     DEAD_CODE_COMMAND,
+    DUPLICATION_COMMAND,
     DEPS_COMMAND,
     *DOCSTRINGS_COMMANDS,
 ]
@@ -196,7 +209,7 @@ def coverage():
 
 @app.command()
 def check():
-    """Run all checks (lint + format + type-check + security + dead-code + deps + docstrings)."""
+    """Run all checks (lint, type-check, security, dead code, duplication, deps, docstrings)."""
     raise typer.Exit(run_all(*check_commands()))
 
 
@@ -229,6 +242,12 @@ def security():
 def dead_code():
     """Find dead/unused code with vulture."""
     raise typer.Exit(run(*DEAD_CODE_COMMAND))
+
+
+@app.command()
+def duplication():
+    """Find copy-pasted code with pylint's duplicate-code check."""
+    raise typer.Exit(run(*DUPLICATION_COMMAND))
 
 
 @app.command()

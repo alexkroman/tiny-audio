@@ -131,6 +131,10 @@ class TestCommandWiring:
         assert runner.invoke(dev.app, ["dead-code"]).exit_code == 0
         assert recorded_runs == [tuple(dev.DEAD_CODE_COMMAND)]
 
+    def test_duplication_uses_the_shared_command(self, recorded_runs):
+        assert runner.invoke(dev.app, ["duplication"]).exit_code == 0
+        assert recorded_runs == [tuple(dev.DUPLICATION_COMMAND)]
+
     def test_deps_uses_the_shared_command(self, recorded_runs):
         assert runner.invoke(dev.app, ["deps"]).exit_code == 0
         assert recorded_runs == [tuple(dev.DEPS_COMMAND)]
@@ -175,9 +179,10 @@ class TestQualityGateContents:
     def test_lint_verifies_the_lock_file(self):
         assert ["poetry", "check", "--lock"] in dev.LINT_COMMANDS
 
-    def test_check_includes_dead_code_deps_and_docstrings(self):
+    def test_check_includes_static_analysis_gates(self):
         assert dev.DEAD_CODE_COMMAND in dev.check_commands()
         assert dev.DEPS_COMMAND in dev.check_commands()
+        assert dev.DUPLICATION_COMMAND in dev.check_commands()
         for cmd in dev.DOCSTRINGS_COMMANDS:
             assert cmd in dev.check_commands()
 

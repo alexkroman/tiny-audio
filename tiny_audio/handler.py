@@ -2,25 +2,16 @@
 
 from typing import Any
 
-import torch
-
 try:
     # For remote execution, imports are relative
     from .asr_modeling import ASRModel
     from .asr_pipeline import ASRPipeline
+    from .diarization import _get_device as _best_device
 except ImportError:
     # For local execution, imports are not relative
     from asr_modeling import ASRModel  # type: ignore[no-redef]
     from asr_pipeline import ASRPipeline  # type: ignore[no-redef]
-
-
-def _best_device() -> torch.device:
-    """Best available inference device (cuda > mps > cpu)."""
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
+    from diarization import _get_device as _best_device  # type: ignore[no-redef]
 
 
 class EndpointHandler:
