@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 import typer
 
+from scripts.deploy import plan as plan_module
 from scripts.deploy import runpod
 from scripts.deploy.handler_local import find_latest_model
 from scripts.deploy.plan import DATASET_DISK_FACTOR, build_plan, wait_command
@@ -141,9 +142,19 @@ class TestDiskPlan:
         # generates from it; measured at 2.05x on librispeech_asr_dummy.
         assert DATASET_DISK_FACTOR > 2.0
 
-    def test_checkpoints_scale_with_trainable_stack_and_retention(self):
+    def test_checkpoints_scale_with_trainable_stack_and_retention(self, monkeypatch):
         """A joint fine-tune's checkpoints are the decoder + AdamW, times
         save_total_limit -- not one projector-sized file."""
+        # The planner reads parameter counts and repo sizes from the live Hub
+        # API; stand in approximate real numbers so the test runs offline.
+        params = {"zai-org/GLM-ASR-Nano-2512": 640_000_000, "Qwen/Qwen3-0.6B": 596_049_920}
+        monkeypatch.setattr(
+            plan_module, "_safetensors_params", lambda repo, *_: (params[repo], "BF16")
+        )
+        monkeypatch.setattr(
+            plan_module, "_repo_weight_bytes", lambda repo, *_: 2 * params.get(repo, 0)
+        )
+
         plan = build_plan(
             "stage_1",
             ["training.save_total_limit=1", "data=librispeech_dummy"],

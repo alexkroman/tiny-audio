@@ -1,5 +1,11 @@
 """Pytest configuration and fixtures."""
 
+# First: points huggingface_hub and NLTK at local fixtures, which only takes
+# effect if nothing has imported either yet.
+import offline_assets  # noqa: F401
+
+# isort: split
+
 import os
 from unittest.mock import MagicMock, NonCallableMock
 
