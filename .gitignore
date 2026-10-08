@@ -189,6 +189,8 @@ events.out.tfevents.*
 
 # Audio files
 *.wav
+# ...except the Space's one-click example clips, which ship with `ta deploy`
+!demo/examples/*.wav
 *.mp3
 *.flac
 *.m4a

@@ -9,3 +9,6 @@ numpy
 librosa
 soundfile
 spaces
+# Fast path for Qwen3.5's gated-delta-rule layers (transformers falls back to a
+# slower reference implementation without it). Pure Triton, nothing to compile.
+flash-linear-attention>=0.2.2

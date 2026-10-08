@@ -13,12 +13,8 @@ import os
 # transformers). It is preinstalled on Spaces; locally the decorator is a no-op.
 try:
     import spaces
-
-    gpu = spaces.GPU(duration=120)
 except ImportError:
-
-    def gpu(fn):
-        return fn
+    spaces = None
 
 
 # Fix OpenMP environment variable if invalid
@@ -31,13 +27,39 @@ os.environ["MPLCONFIGDIR"] = "/tmp/matplotlib"
 # Disable tokenizer parallelism warning
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+import html
 import sys
+from pathlib import Path
 from typing import Annotated
 
 import gradio as gr
 import torch
 import typer
 from transformers import pipeline
+
+
+def gpu_seconds(audio, kwargs):
+    """GPU time to reserve for one request, from the audio's length.
+
+    ZeroGPU charges each visitor's daily quota the RESERVED duration up front,
+    not the time used, so a flat 120 s locked visitors out after a request or
+    two. Measured on the A10G: about 0.2 s of GPU per second of audio with
+    timestamps and diarization (46 s of speech in 8.7 s). Reserve twice that
+    plus load overhead, within ZeroGPU's 20-120 s.
+    """
+    import soundfile
+
+    try:
+        seconds = soundfile.info(audio).duration
+    except Exception:  # unreadable here: let the pipeline report it, reserve the cap
+        return 120
+    per_second = 0.4 if kwargs.get("return_timestamps") or kwargs.get("return_speakers") else 0.2
+    return int(min(120, max(20, 10 + per_second * seconds)))
+
+
+def gpu(fn):
+    return spaces.GPU(duration=gpu_seconds)(fn) if spaces else fn
+
 
 app = typer.Typer(add_completion=False)
 
@@ -49,18 +71,89 @@ def format_timestamp(seconds):
     return f"{mins:02d}:{secs:05.2f}"
 
 
+def speaker_label(speaker):
+    """The pipeline's "SPEAKER_0" as "Speaker 1" for people; anything else unchanged."""
+    prefix, _, index = (speaker or "").rpartition("_")
+    return f"Speaker {int(index) + 1}" if prefix == "SPEAKER" and index.isdigit() else speaker
+
+
 def word_rows(words):
     """Word timestamps as table rows: start, end, speaker, word."""
     return [
-        [format_timestamp(w["start"]), format_timestamp(w["end"]), w.get("speaker", ""), w["word"]]
+        [
+            format_timestamp(w["start"]),
+            format_timestamp(w["end"]),
+            speaker_label(w.get("speaker", "")),
+            w["word"],
+        ]
         for w in words or []
     ]
+
+
+# One color per speaker, in the order they first speak (Nemotron tracks at most 8).
+SPEAKER_COLORS = [
+    "#4f46e5",
+    "#0d9488",
+    "#d97706",
+    "#db2777",
+    "#2563eb",
+    "#65a30d",
+    "#9333ea",
+    "#dc2626",
+]
+
+
+def speaker_turns(words):
+    """Consecutive words of one speaker as turns: (speaker, start, end, text)."""
+    turns = []
+    for w in words or []:
+        if turns and turns[-1][0] == w["speaker"]:
+            speaker, start, _, text = turns[-1]
+            turns[-1] = (speaker, start, w["end"], f"{text} {w['word']}")
+        else:
+            turns.append((w["speaker"], w["start"], w["end"], w["word"]))
+    return turns
+
+
+def conversation_html(words):
+    """Speaker-attributed transcript: one color-coded block per speaker turn.
+
+    Styled inline rather than through the app's CSS: on Spaces this block
+    rendered without the stylesheet's rules (only inline colors survived).
+    """
+    turns = speaker_turns(words)
+    if not turns:
+        return (
+            '<p style="color:var(--body-text-color-subdued)">'
+            "Turn on speaker diarization to see who said what.</p>"
+        )
+    colors = {}
+    for speaker, *_ in turns:
+        colors.setdefault(speaker, SPEAKER_COLORS[len(colors) % len(SPEAKER_COLORS)])
+    blocks = [
+        f'<div style="border-left:4px solid {colors[s]};padding:0.35rem 0.75rem;'
+        'background:var(--background-fill-secondary);border-radius:0 6px 6px 0">'
+        f'<div style="color:{colors[s]};font-weight:600;font-size:0.85rem;margin-bottom:0.15rem">'
+        f"{html.escape(speaker_label(s))}"
+        '<span style="font-weight:400;color:var(--body-text-color-subdued);margin-left:0.5rem">'
+        f"{format_timestamp(start)} – {format_timestamp(end)}</span></div>"
+        f"<div>{html.escape(text)}</div></div>"
+        for s, start, end, text in turns
+    ]
+    return (
+        '<div style="display:flex;flex-direction:column;gap:0.6rem;'
+        'max-height:420px;overflow-y:auto">' + "".join(blocks) + "</div>"
+    )
 
 
 def segment_rows(segments):
     """Speaker segments as table rows: start, end, speaker."""
     return [
-        [format_timestamp(seg["start"]), format_timestamp(seg["end"]), seg["speaker"]]
+        [
+            format_timestamp(seg["start"]),
+            format_timestamp(seg["end"]),
+            speaker_label(seg["speaker"]),
+        ]
         for seg in segments or []
     ]
 
@@ -76,6 +169,8 @@ CSS = """
 #header h1 { margin-bottom: 0.25rem; }
 #header p { color: var(--body-text-color-subdued); margin-top: 0; }
 """
+
+EXAMPLE = Path(__file__).parent / "examples" / "ami_meeting.wav"
 
 HEADER = """
 <div id="header">
@@ -115,7 +210,7 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
     def run_pipeline(audio, kwargs):
         return pipe(audio, **kwargs)
 
-    def process_audio(audio, show_timestamps, show_diarization, num_speakers=0):
+    def process_audio(audio, show_timestamps, show_diarization, num_speakers=0, max_speakers=0):
         """Process audio file for transcription."""
         if audio is None:
             raise gr.Error("Record or upload some audio first.")
@@ -126,9 +221,12 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
             kwargs["return_timestamps"] = True
         if show_diarization:
             kwargs["return_speakers"] = True
-            # A known count caps the speakers Nemotron keeps. 0 means auto.
+            # An exact count, or an upper bound, caps the speakers Nemotron
+            # keeps; the exact count wins if both are set. 0 means auto.
             if num_speakers and int(num_speakers) > 0:
                 kwargs["num_speakers"] = int(num_speakers)
+            elif max_speakers and int(max_speakers) > 0:
+                kwargs["max_speakers"] = int(max_speakers)
 
         # Transcribe the audio (on the GPU, on ZeroGPU)
         result = run_pipeline(audio, kwargs)
@@ -138,9 +236,12 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
         if "diarization_error" in result:
             gr.Warning(f"Diarization failed: {result['diarization_error']}")
 
-        words = word_rows(result.get("words")) if show_timestamps else []
+        words = word_rows(result.get("words")) if show_timestamps or show_diarization else []
         segments = segment_rows(result.get("speaker_segments")) if show_diarization else []
-        return result.get("text", ""), words, segments
+        conversation = conversation_html(result.get("words") if show_diarization else None)
+        # Open the conversation view when there are speakers to show.
+        tab = gr.Tabs(selected="conversation" if show_diarization else "transcript")
+        return result.get("text", ""), conversation, words, segments, tab
 
     with gr.Blocks(title="Tiny Audio") as demo:
         gr.HTML(HEADER.format(model=model_path))
@@ -166,32 +267,43 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
                     )
                     num_speakers = gr.Slider(
                         label="Number of speakers",
-                        info="0 detects the count automatically",
+                        info="Exact count if you know it; 0 detects it automatically",
                         value=0,
                         minimum=0,
-                        maximum=10,
+                        maximum=8,
+                        step=1,
+                        visible=False,
+                    )
+                    max_speakers = gr.Slider(
+                        label="Maximum speakers",
+                        info="Upper bound when the exact count is unknown; 0 means no limit",
+                        value=0,
+                        minimum=0,
+                        maximum=8,
                         step=1,
                         visible=False,
                     )
 
                 process_btn = gr.Button("Transcribe", variant="primary", size="lg")
 
-            with gr.Column(scale=3, min_width=400), gr.Tabs():
-                with gr.Tab("Transcript"):
+            with gr.Column(scale=3, min_width=400), gr.Tabs(selected="transcript") as tabs:
+                with gr.Tab("Transcript", id="transcript"):
                     output_text = gr.Textbox(
                         show_label=False,
                         placeholder="Your transcript will appear here.",
                         lines=12,
                         buttons=["copy"],
                     )
-                with gr.Tab("Words"):
+                with gr.Tab("Conversation", id="conversation"):
+                    conversation_output = gr.HTML(conversation_html(None))
+                with gr.Tab("Words", id="words"):
                     timestamps_output = gr.Dataframe(
                         headers=["Start", "End", "Speaker", "Word"],
                         show_label=False,
                         interactive=False,
                         max_height=420,
                     )
-                with gr.Tab("Speakers"):
+                with gr.Tab("Speakers", id="speakers"):
                     diarization_output = gr.Dataframe(
                         headers=["Start", "End", "Speaker"],
                         show_label=False,
@@ -199,18 +311,26 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
                         max_height=420,
                     )
 
-        # The speaker count only matters when diarization is on
+        # The speaker controls only matter when diarization is on
         show_diarization.change(
-            fn=lambda on: gr.update(visible=on),
+            fn=lambda on: (gr.update(visible=on), gr.update(visible=on)),
             inputs=show_diarization,
-            outputs=num_speakers,
+            outputs=[num_speakers, max_speakers],
+            api_visibility="private",
         )
-        process_btn.click(
-            fn=process_audio,
-            inputs=[audio_input, show_timestamps, show_diarization, num_speakers],
-            outputs=[output_text, timestamps_output, diarization_output],
-            api_name="transcribe",
-        )
+        inputs = [audio_input, show_timestamps, show_diarization, num_speakers, max_speakers]
+        outputs = [output_text, conversation_output, timestamps_output, diarization_output, tabs]
+        process_btn.click(fn=process_audio, inputs=inputs, outputs=outputs, api_name="transcribe")
+
+        if EXAMPLE.exists():
+            gr.Examples(
+                examples=[[str(EXAMPLE), True, True, 0, 0]],
+                inputs=inputs,
+                outputs=outputs,
+                fn=process_audio,
+                label="Try a three-person meeting (AMI Meeting Corpus, CC BY 4.0)",
+                cache_examples=False,
+            )
 
     return demo
 

@@ -60,7 +60,7 @@ The model bridges audio and text with a trained projector and LoRA adapters:
 ## Limitations
 
 - Plain transcription works best on clips up to about 19 seconds (the training length); with timestamps or diarization on, longer audio is transcribed in chunks automatically
-- Each request gets up to 120 seconds of GPU time
+- Each request reserves GPU time from your ZeroGPU quota in proportion to the audio's length (20-120 s), so roughly up to five minutes of speech per request
 - Optimized for English language
 - Best performance with clear speech and minimal background noise
 
