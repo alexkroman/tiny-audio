@@ -8,7 +8,7 @@ import pytest
 
 from scripts.eval.cli import save_results
 from scripts.eval.evaluators.base import EvalResult, Metrics
-from scripts.utils import _extract_model_from_dir, find_model_dirs
+from scripts.utils import extract_model_from_dir, find_model_dirs
 
 
 class TestSaveResults:
@@ -136,7 +136,7 @@ class TestSaveResults:
     ) -> None:
         """`--model-name granite_qwen` must still be findable by that label.
 
-        The directory name is split on `_` by `_extract_model_from_dir`, so an
+        The directory name is split on `_` by `extract_model_from_dir`, so an
         underscore in the model label used to shift every later field and make
         a lookup by `granite_qwen` match nothing.
         """
@@ -148,7 +148,7 @@ class TestSaveResults:
                 metrics=sample_metrics,
                 output_dir=tmpdir,
             )
-            assert _extract_model_from_dir(result_dir.name) == "granite-qwen"
+            assert extract_model_from_dir(result_dir.name) == "granite-qwen"
             assert find_model_dirs(Path(tmpdir), "granite-qwen") == [result_dir]
 
 
