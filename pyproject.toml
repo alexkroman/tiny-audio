@@ -361,6 +361,5 @@ output = "coverage.xml"
 
 [tool.bandit]
 # Skip B615: We intentionally want latest HuggingFace model versions
-# Skip B602: RunPod deployment requires shell=True for remote commands
 # Skip B108: RunPod deployment uses /tmp for remote scripts
-skips = ["B615", "B602", "B108"]
+skips = ["B615", "B108"]
