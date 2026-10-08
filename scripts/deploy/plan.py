@@ -526,8 +526,13 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
         # encoder_conv_layers halves twice to ~237. Using seq_len here instead
         # gave 82 and undercounted the tape ~3x.
         enc_seq = int(MAX_AUDIO_SECONDS * ENCODER_FRAME_RATE_HZ)
-        for pad, kernel, stride in cfg.model.get("encoder_conv_layers") or []:
-            enc_seq = (enc_seq + 2 * pad - (kernel - 1) - 1) // stride + 1
+        # Same default as ASRConfig: unset means DEFAULT_ENCODER_CONV_LAYERS,
+        # not "no subsampling".
+        # Lazy, like the transformers/tiny_audio imports in build_plan.
+        asr_config = importlib.import_module("tiny_audio.asr_config")
+        enc_seq = asr_config.compute_encoder_output_length(
+            enc_seq, cfg.model.get("encoder_conv_layers") or None
+        )
         if enc_layers:
             per_tok_enc = (
                 act_bytes_per * (6 * encoder_dim + 3 * 4 * encoder_dim) * ACTIVATION_CALIBRATION

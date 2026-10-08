@@ -690,6 +690,76 @@ class DataCollator:
         return batch
 
 
+def decay_parameter_ids(model: torch.nn.Module) -> set[int]:
+    """ids of the trainable parameters that should get weight decay.
+
+    Shared by ASRTrainer.create_optimizer and scripts/debug/check_gradient_flow.py
+    so the probe audits the routing the trainer actually uses.
+    """
+    # ALL_LAYERNORM_LAYERS only contains torch.nn.LayerNorm, but every
+    # decoder here normalizes with an RMSNorm subclass instead, whose gain
+    # weights would silently land in the decay group and be pulled toward
+    # zero — destabilizing the residual-stream scale the projector's
+    # _NORM_INIT was tuned to. This used to be a two-entry allowlist
+    # (Qwen3RMSNorm, LlamaRMSNorm), which quietly excluded every other
+    # family — an unfrozen Gemma 4 E2B would have decayed all 247 of its
+    # Gemma4RMSNorm gain tensors across 9 distinct sites. Match
+    # structurally on the class name so a new decoder is covered on
+    # arrival rather than needing an import added here.
+    #
+    # Substring, not endswith: Qwen3.5's gated-delta-net layers normalize
+    # with `Qwen3_5RMSNormGated`, which does NOT end in "Norm" and so
+    # escaped an endswith() match entirely — putting all 18
+    # `linear_attn.norm.weight` gains (ones-init, so decay pulls them
+    # toward zero) into the decay group, the exact failure this block
+    # exists to prevent.
+    norm_modules = [type(m) for m in model.modules() if "Norm" in type(m).__name__]
+    forbidden = list(ALL_LAYERNORM_LAYERS) + norm_modules
+    decay_parameters = set(get_parameter_names(model, forbidden))
+    decay_parameters = {n for n in decay_parameters if "bias" not in n}
+
+    # State-space / gated-delta-rule tensors are excluded by convention in
+    # every Mamba-family recipe: `A_log` sets each head's memory horizon
+    # (decaying it homogenizes the decay spectrum toward A=1) and
+    # `conv1d.weight` is the short causal convolution that carries local
+    # token order — which matters more than usual here, since Qwen3.5 is
+    # 75% NoPE and 18 of 24 layers have no RoPE at all. `dt_bias` and `D`
+    # are already caught by the "bias" filter and the norm match, but are
+    # listed for completeness.
+    ssm_no_decay = ("A_log", "conv1d.weight", "dt_bias", ".D")
+    decay_parameters = {n for n in decay_parameters if not any(tag in n for tag in ssm_no_decay)}
+
+    # Embedding tables are excluded from weight decay on top of the norm
+    # exclusion above. Under narrow ASR fine-tuning most of a 248k-row
+    # vocab never appears in any batch, so those rows receive no task
+    # gradient and WD is the *only* force acting on them: they shrink
+    # monotonically toward zero. With tie_word_embeddings=True that same
+    # tensor backs lm_head, so the damage lands on the output projection
+    # and degrades rare-token prediction at decode time. (This is a
+    # fine-tuning-regime argument, not a universal one — under pretraining
+    # every token is seen and decaying embeddings is the usual choice.)
+    #
+    # Matched by tensor identity rather than by name. Tying means
+    # lm_head.weight IS embed_tokens.weight, and get_parameter_names walks
+    # the module tree so it yields BOTH names, while named_parameters()
+    # below deduplicates and yields only whichever the traversal reaches
+    # first. A name-based exclusion would therefore work on Qwen (where
+    # model.embed_tokens precedes lm_head) and silently fail on any
+    # architecture that registers its output head first. Identity holds
+    # regardless of which name wins.
+    no_decay_param_ids = {
+        id(p)
+        for module in model.modules()
+        if isinstance(module, torch.nn.Embedding)
+        for p in module.parameters(recurse=False)
+    }
+    return {
+        id(param)
+        for name, param in model.named_parameters()
+        if name in decay_parameters and id(param) not in no_decay_param_ids
+    }
+
+
 class ASRTrainer(Trainer):
     """Trainer subclass for ASR models."""
 
@@ -734,71 +804,13 @@ class ASRTrainer(Trainer):
         if self.optimizer is not None or not overrides:
             return super().create_optimizer(model)
 
-        # ALL_LAYERNORM_LAYERS only contains torch.nn.LayerNorm, but every
-        # decoder here normalizes with an RMSNorm subclass instead, whose gain
-        # weights would silently land in the decay group and be pulled toward
-        # zero — destabilizing the residual-stream scale the projector's
-        # _NORM_INIT was tuned to. This used to be a two-entry allowlist
-        # (Qwen3RMSNorm, LlamaRMSNorm), which quietly excluded every other
-        # family — an unfrozen Gemma 4 E2B would have decayed all 247 of its
-        # Gemma4RMSNorm gain tensors across 9 distinct sites. Match
-        # structurally on the class name so a new decoder is covered on
-        # arrival rather than needing an import added here.
-        #
-        # Substring, not endswith: Qwen3.5's gated-delta-net layers normalize
-        # with `Qwen3_5RMSNormGated`, which does NOT end in "Norm" and so
-        # escaped an endswith() match entirely — putting all 18
-        # `linear_attn.norm.weight` gains (ones-init, so decay pulls them
-        # toward zero) into the decay group, the exact failure this block
-        # exists to prevent.
         # Same model resolution as Trainer.create_optimizer, which train() calls
         # with the accelerator-prepared model when optimizer creation is delayed.
         opt_model = self.model if model is None else model
         if opt_model is None:
             msg = "ASRTrainer.create_optimizer needs a model"
             raise ValueError(msg)
-        norm_modules = [type(m) for m in opt_model.modules() if "Norm" in type(m).__name__]
-        forbidden = list(ALL_LAYERNORM_LAYERS) + norm_modules
-        decay_parameters = set(get_parameter_names(opt_model, forbidden))
-        decay_parameters = {n for n in decay_parameters if "bias" not in n}
-
-        # State-space / gated-delta-rule tensors are excluded by convention in
-        # every Mamba-family recipe: `A_log` sets each head's memory horizon
-        # (decaying it homogenizes the decay spectrum toward A=1) and
-        # `conv1d.weight` is the short causal convolution that carries local
-        # token order — which matters more than usual here, since Qwen3.5 is
-        # 75% NoPE and 18 of 24 layers have no RoPE at all. `dt_bias` and `D`
-        # are already caught by the "bias" filter and the norm match, but are
-        # listed for completeness.
-        ssm_no_decay = ("A_log", "conv1d.weight", "dt_bias", ".D")
-        decay_parameters = {
-            n for n in decay_parameters if not any(tag in n for tag in ssm_no_decay)
-        }
-
-        # Embedding tables are excluded from weight decay on top of the norm
-        # exclusion above. Under narrow ASR fine-tuning most of a 248k-row
-        # vocab never appears in any batch, so those rows receive no task
-        # gradient and WD is the *only* force acting on them: they shrink
-        # monotonically toward zero. With tie_word_embeddings=True that same
-        # tensor backs lm_head, so the damage lands on the output projection
-        # and degrades rare-token prediction at decode time. (This is a
-        # fine-tuning-regime argument, not a universal one — under pretraining
-        # every token is seen and decaying embeddings is the usual choice.)
-        #
-        # Matched by tensor identity rather than by name. Tying means
-        # lm_head.weight IS embed_tokens.weight, and get_parameter_names walks
-        # the module tree so it yields BOTH names, while named_parameters()
-        # below deduplicates and yields only whichever the traversal reaches
-        # first. A name-based exclusion would therefore work on Qwen (where
-        # model.embed_tokens precedes lm_head) and silently fail on any
-        # architecture that registers its output head first. Identity holds
-        # regardless of which name wins.
-        no_decay_param_ids = {
-            id(p)
-            for module in opt_model.modules()
-            if isinstance(module, torch.nn.Embedding)
-            for p in module.parameters(recurse=False)
-        }
+        decay_ids = decay_parameter_ids(opt_model)
 
         # Three-way component split. Names are checked against fixed prefixes
         # so the routing matches the freeze flags exactly: `audio_tower.*`,
@@ -820,7 +832,7 @@ class ASRTrainer(Trainer):
                 component = "decoder"
             else:
                 component = "other"
-            decay = name in decay_parameters and id(param) not in no_decay_param_ids
+            decay = id(param) in decay_ids
             groups[(component, decay)].append(param)
 
         base_wd = self.args.weight_decay
