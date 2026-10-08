@@ -183,7 +183,9 @@ run downloads about 6 GB (the model plus the encoder's repo) and takes a minute 
 ```python
 from transformers import pipeline
 
-pipe = pipeline("automatic-speech-recognition", model="mazesmazes/tiny-audio", trust_remote_code=True)
+pipe = pipeline(
+    "automatic-speech-recognition", model="mazesmazes/tiny-audio", trust_remote_code=True
+)
 result = pipe("path/to/audio.wav")
 print(result["text"])
 

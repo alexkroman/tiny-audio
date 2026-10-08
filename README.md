@@ -19,7 +19,9 @@ A minimal, hackable ASR codebase. Connect a frozen audio encoder to a small LLM 
 ```python
 from transformers import pipeline
 
-pipe = pipeline("automatic-speech-recognition", model="mazesmazes/tiny-audio", trust_remote_code=True)
+pipe = pipeline(
+    "automatic-speech-recognition", model="mazesmazes/tiny-audio", trust_remote_code=True
+)
 print(pipe("audio.wav")["text"])
 ```
 
@@ -42,7 +44,9 @@ pip install tiny-audio
 from transformers import pipeline
 
 # Load model
-pipe = pipeline("automatic-speech-recognition", model="mazesmazes/tiny-audio", trust_remote_code=True)
+pipe = pipeline(
+    "automatic-speech-recognition", model="mazesmazes/tiny-audio", trust_remote_code=True
+)
 
 # Transcribe audio file
 result = pipe("audio.wav")
@@ -53,6 +57,7 @@ result = pipe("https://example.com/audio.mp3")
 
 # Transcribe numpy array (16kHz)
 import numpy as np
+
 audio = np.random.randn(16000)  # 1 second of audio
 result = pipe(audio)
 ```

@@ -188,46 +188,14 @@ include_trailing_comma = true
 
 [tool.mypy]
 python_version = "3.12"
-warn_return_any = false
-warn_unused_configs = true
-disallow_untyped_defs = false
-disallow_incomplete_defs = false
-check_untyped_defs = true
-no_implicit_optional = true
-warn_redundant_casts = true
-warn_unused_ignores = true
-warn_no_return = true
+strict = true
+warn_unreachable = true
 follow_imports = "normal"
-ignore_missing_imports = true
-# Ignore specific error codes that are library-related
-disable_error_code = ["assignment", "override", "call-overload", "arg-type", "index", "union-attr", "call-arg", "misc", "operator", "attr-defined"]
-
-[[tool.mypy.overrides]]
-module = "transformers.*"
-ignore_errors = true
 
 [tool.pyright]
-include = ["tiny_audio"]
+include = ["tiny_audio", "scripts", "tests", "demo", "docs"]
 exclude = ["**/node_modules", "**/__pycache__", "outputs", ".venv", "venv"]
-ignore = [
-    "tiny_audio/asr_pipeline.py",
-]
-typeCheckingMode = "basic"
-reportPrivateImportUsage = false
-reportOptionalMemberAccess = false
-reportOptionalIterable = false
-reportOptionalCall = false
-reportGeneralTypeIssues = false
-reportIncompatibleMethodOverride = false
-# PyTorch models have dynamic attributes
-reportAttributeAccessIssue = false
-reportCallIssue = false
-reportIndexIssue = false
-# Ignore assignment type issues for PyTorch configs
-reportAssignmentType = false
-reportArgumentType = false
-reportOperatorIssue = false
-reportReturnType = false
+typeCheckingMode = "strict"
 
 [tool.pytest.ini_options]
 # Test discovery patterns
@@ -311,35 +279,11 @@ select = [
     "FURB", # refurb (modernization)
     "RUF", # ruff-specific rules
 ]
-extend-ignore = [
-    "E203",  # whitespace before ':'
-    "E501",  # line too long (handled by black)
-    "B008",  # do not perform function calls in argument defaults
-    "B905",  # zip() without an explicit strict= parameter
-    # Lazy imports are deliberate throughout: `ta` defers every heavy import
-    # (torch, transformers, gradio) to the command that needs it so that
-    # `ta dev lint` doesn't pay ~4.5s of import time per invocation.
-    "PLC0415",  # import-outside-top-level
-    # Long f-string messages inside raise are the house style; moving each one
-    # into an exception subclass buys nothing here.
-    "TRY003",  # raise-vanilla-args
-    # En dashes, arrows and other typographic characters are used on purpose in
-    # user-facing strings, ITN regexes and comments.
-    "RUF001", "RUF002", "RUF003",  # ambiguous-unicode-character-*
-    # A loop with a guard and a side effect is often clearer than an
-    # `extend(...)` over a comprehension; the perf difference is negligible here.
-    "PERF401",  # manual-list-comprehension
-]
 
 [tool.ruff.lint.isort]
 # A local `wandb/` run directory at the repo root makes ruff classify `wandb`
 # as first-party, so local `--fix` and CI disagree on import order.
 known-third-party = ["wandb"]
-
-[tool.ruff.lint.per-file-ignores]
-# `test` here is a typer command (`ta dev handler`), not a pytest test; its
-# defaulted parameters are CLI options.
-"scripts/deploy/handler_local.py" = ["PT028"]
 
 [tool.mdformat]
 wrap = 100

@@ -1,4 +1,10 @@
-extends: relaxed
+---
+extends: default
+
+ignore-from-file: .gitignore
 
 rules:
-  line-length: disable
+  # Same limit as black/ruff (pyproject.toml). Pinned-SHA `uses:` lines with
+  # their dependabot version comment run past yamllint's default of 80.
+  line-length:
+    max: 100

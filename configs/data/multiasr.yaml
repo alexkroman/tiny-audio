@@ -54,7 +54,8 @@
 # constrains alignment QUALITY, not segment boundaries — `clean_sa`
 # ships fixed ~15s grid windows in which 99.3% of rows begin mid-stream
 # and the word straddling each seam is lost. The full measurement and
-# the removal/reinstatement history are at the clean_sa entry below. `dirty_sa` (602K) had been dropped earlier for label quality.
+# the removal/reinstatement history are at the clean_sa entry below.
+# `dirty_sa` (602K) had been dropped earlier for label quality.
 # Peoples eval refs ARE clean — test/validation are utterance-bounded,
 # not grid-cut (median 4.2s vs train's 14.8s), and are human-transcribed
 # per the MLCommons card. No dataset is repeated — every source runs at
@@ -232,6 +233,7 @@
 # (audio arrays included, Opus-encoded) — pkufool/libriheavy is a
 # Lhotse manifest repo, not a directly-loadable audio dataset.
 
+---
 datasets:
   # TEDLIUM-3 — TED talk presentational speech. Re-added after a prior
   # streaming experiment dropped it; tiny-audio is 2.08pt behind
@@ -288,13 +290,14 @@ datasets:
     # keeps any future cap exact. `audio_duration` is a float column on the
     # mythicinfinity mirror (verified via the datasets-server /info endpoint),
     # and `input_columns` keeps the filter from decoding audio to answer it.
-    exclude_where:
-      column: audio_duration
-      above: 19.0
+    #
     # UNCAPPED 2026-09-24 (was target_samples: 600000), matching CV and
     # Gigaspeech. If a cap returns, _resample_to_target in scripts/train.py
     # shuffles on self.seed before selecting, which matters because
     # LibriHeavy ships ordered by chapter/speaker.
+    exclude_where:
+      column: audio_duration
+      above: 19.0
 
   # People's Speech `clean_sa` (~311K train natural, CC-BY). Sentence-
   # aligned subset of the clean tier: CER ≤ 20% upper bound on alignment
@@ -543,12 +546,13 @@ datasets:
     # Must be applied before the keep_cols pruning in _prepare_split, which
     # is why the filter is declared here and executed early; see
     # `exclude_where` in scripts/train.py.
-    exclude_where:
-      column: source
-      values: [audiobook]
+    #
     # UNCAPPED 2026-09-22 (was target_samples: 600000). M's natural size is
     # 910,140; 656,893 after the audiobook exclusion, so this adds the
     # 56,893 in-register rows the cap used to trim. Still the M tier, not L.
+    exclude_where:
+      column: source
+      values: [audiobook]
 
   # Gigaspeech dev split — official repo ships dev/test as separate configs
   # (same pattern as the fixie mirror). The `dev` config exposes its data

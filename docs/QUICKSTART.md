@@ -5,7 +5,9 @@
 ```python
 from transformers import pipeline
 
-pipe = pipeline("automatic-speech-recognition", model="mazesmazes/tiny-audio", trust_remote_code=True)
+pipe = pipeline(
+    "automatic-speech-recognition", model="mazesmazes/tiny-audio", trust_remote_code=True
+)
 print(pipe("audio.wav")["text"])
 ```
 

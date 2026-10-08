@@ -1,6 +1,7 @@
 # Tiny LibriSpeech sample (73 utterances) for local smoke tests on MPS / CPU.
 # The only split available is 'validation' — we reuse it for train and eval.
 
+---
 datasets:
   - path: hf-internal-testing/librispeech_asr_dummy
     name: clean

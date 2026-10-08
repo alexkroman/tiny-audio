@@ -19,7 +19,9 @@ app = typer.Typer(
 app.add_typer(quality.app)
 console = Console()
 
-CODE_PATHS = ["tiny_audio", "scripts", "tests"]
+# Every Python tree in the repo: the package, its CLI, the tests, the Space
+# demo and the course examples. Linters and type checkers all run over this.
+CODE_PATHS = ["tiny_audio", "scripts", "tests", "demo", "docs"]
 LIB_PATH = "tiny_audio"
 
 # Every threshold below is a ratchet: raise it when the codebase clears the
@@ -39,7 +41,8 @@ LINT_COMMANDS = [
     # otherwise formatting drift only shows up as noise in the next PR.
     ["ruff", "format", "--check", *CODE_PATHS],
     ["black", "--check", *CODE_PATHS],
-    ["yamllint", "configs/", ".github/"],
+    # Every YAML file; `.yamllint` skips what .gitignore ignores.
+    ["yamllint", "--strict", "."],
     ["taplo", "check", "pyproject.toml"],
     # Workflow syntax/expressions, then security shapes (template injection,
     # unpinned actions, persisted checkout credentials). `--offline` keeps
@@ -48,8 +51,9 @@ LINT_COMMANDS = [
     ["zizmor", "--offline", ".github/workflows"],
 ]
 TYPE_CHECK_COMMANDS = [
-    ["mypy", LIB_PATH],
-    ["pyright", LIB_PATH],
+    ["mypy", *CODE_PATHS],
+    # Paths come from `[tool.pyright] include`.
+    ["pyright"],
 ]
 SECURITY_COMMAND = ["bandit", "-c", "pyproject.toml", "-r", "tiny_audio", "scripts", "-ll"]
 # Unused, missing, transitive-only and misplaced dependencies; configured in

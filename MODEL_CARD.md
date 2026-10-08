@@ -36,7 +36,9 @@ A frozen Granite Speech encoder is connected to a frozen Qwen3.5-2B decoder thro
 ```python
 from transformers import pipeline
 
-pipe = pipeline("automatic-speech-recognition", model="mazesmazes/tiny-audio", trust_remote_code=True)
+pipe = pipeline(
+    "automatic-speech-recognition", model="mazesmazes/tiny-audio", trust_remote_code=True
+)
 result = pipe("audio.wav")
 print(result["text"])
 # The quarterly revenue grew by 12% according to Dr. Smith.
@@ -49,7 +51,9 @@ print(result["text"])
 ```python
 from transformers import pipeline
 
-pipe = pipeline("automatic-speech-recognition", model="mazesmazes/tiny-audio", trust_remote_code=True)
+pipe = pipeline(
+    "automatic-speech-recognition", model="mazesmazes/tiny-audio", trust_remote_code=True
+)
 
 # From file
 result = pipe("audio.wav")
@@ -60,6 +64,7 @@ result = pipe("https://example.com/audio.mp3")
 
 # From numpy array (must be 16kHz)
 import numpy as np
+
 audio = np.random.randn(16000).astype(np.float32)  # 1 second
 result = pipe(audio)
 ```
@@ -230,7 +235,12 @@ Only the projector and LoRA weights are stored here. The encoder (Granite Speech
 The previous GLM-ASR + Qwen3-0.6B model is still available at revision `glm-asr-qwen3-0.6b`:
 
 ```python
-pipe = pipeline("automatic-speech-recognition", model="mazesmazes/tiny-audio", revision="glm-asr-qwen3-0.6b", trust_remote_code=True)
+pipe = pipeline(
+    "automatic-speech-recognition",
+    model="mazesmazes/tiny-audio",
+    revision="glm-asr-qwen3-0.6b",
+    trust_remote_code=True,
+)
 ```
 
 ## Citation

@@ -181,7 +181,12 @@ Test the result the way a stranger would:
 
 ```python
 from transformers import pipeline
-pipe = pipeline("automatic-speech-recognition", model="your-username/tiny-audio-yourname", trust_remote_code=True)
+
+pipe = pipeline(
+    "automatic-speech-recognition",
+    model="your-username/tiny-audio-yourname",
+    trust_remote_code=True,
+)
 print(pipe("audio.wav")["text"])
 ```
 

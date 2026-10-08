@@ -8,6 +8,7 @@
 # scripts/train_config.py (`base_config`): unknown keys and mistyped values
 # fail at startup. Add new knobs there first, or use `+training.<key>=...`
 # for a one-off.
+---
 defaults:
   - base_config
   - data: multiasr
