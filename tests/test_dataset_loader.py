@@ -9,7 +9,7 @@ import pytest
 from datasets import Audio, ClassLabel, Dataset
 from omegaconf import DictConfig, OmegaConf
 
-from scripts.train import DatasetLoader
+from scripts.train import DatasetLoader, _not_excluded
 
 
 def _make_cfg(
@@ -161,10 +161,11 @@ class TestExcludeWhere:
         wanted = {cast(int, feature.str2int(v)) for v in ["audiobook"]}
         assert wanted == {0}
 
-        def keep(v: int) -> bool:
-            return v not in wanted
-
-        out = ds.filter(keep, input_columns="source")
+        out = ds.filter(
+            _not_excluded,
+            input_columns="source",
+            fn_kwargs={"wanted": wanted, "above": None, "below": None},
+        )
         assert len(out) == 2
         assert out["text"] == ["a", "c"]
 
@@ -172,10 +173,11 @@ class TestExcludeWhere:
         """Regression guard: this is precisely what used to happen."""
         ds = self._ds(self._GS_ROWS, class_label=True)
 
-        def keep_unnamed(v: object) -> bool:
-            return v not in {"audiobook", "podcast"}
-
-        out = ds.filter(keep_unnamed, input_columns="source")
+        out = ds.filter(
+            _not_excluded,
+            input_columns="source",
+            fn_kwargs={"wanted": {"audiobook", "podcast"}, "above": None, "below": None},
+        )
         assert len(out) == len(ds), "if this passes, the int/str mismatch is real"
 
     @staticmethod

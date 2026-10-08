@@ -1,0 +1,60 @@
+{
+  "architectures": [
+    "GlmAsrForConditionalGeneration"
+  ],
+  "audio_config": {
+    "attention_dropout": 0.0,
+    "head_dim": 64,
+    "hidden_act": "gelu",
+    "hidden_size": 1280,
+    "initializer_range": 0.02,
+    "intermediate_size": 5120,
+    "max_position_embeddings": 1500,
+    "model_type": "glmasr_encoder",
+    "num_attention_heads": 20,
+    "num_hidden_layers": 32,
+    "num_key_value_heads": 20,
+    "num_mel_bins": 128,
+    "partial_rotary_factor": 0.5,
+    "rope_parameters": {
+      "partial_rotary_factor": 0.5,
+      "rope_theta": 10000.0,
+      "rope_type": "default"
+    }
+  },
+  "audio_token_id": 59260,
+  "dtype": "bfloat16",
+  "hidden_size": 2048,
+  "model_type": "glmasr",
+  "projector_hidden_act": "gelu",
+  "text_config": {
+    "attention_bias": false,
+    "attention_dropout": 0.0,
+    "eos_token_id": [
+      59246,
+      59253,
+      59255
+    ],
+    "head_dim": 128,
+    "hidden_act": "silu",
+    "hidden_size": 2048,
+    "initializer_range": 0.02,
+    "intermediate_size": 6144,
+    "max_position_embeddings": 8192,
+    "mlp_bias": false,
+    "model_type": "llama",
+    "num_attention_heads": 16,
+    "num_hidden_layers": 28,
+    "num_key_value_heads": 4,
+    "pretraining_tp": 1,
+    "rms_norm_eps": 1e-05,
+    "rope_parameters": {
+      "rope_theta": 10000.0,
+      "rope_type": "default"
+    },
+    "use_cache": true,
+    "vocab_size": 59264
+  },
+  "transformers_version": "5.0.0.dev0",
+  "vocab_size": 59264
+}

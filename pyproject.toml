@@ -204,8 +204,9 @@ include_trailing_comma = true
 include = ["tiny_audio", "scripts", "tests", "demo", "docs", "typings"]
 exclude = ["**/node_modules", "**/__pycache__", "outputs", ".venv", "venv"]
 typeCheckingMode = "strict"
-# Minimal stubs for modules that cannot be installed here (the Spaces runtime's
-# `spaces`, PyObjC's macOS-only frameworks) and for fabric, whose source is untyped.
+# Minimal stubs for modules that cannot be installed everywhere (the Spaces
+# runtime's `spaces`, PyObjC's macOS-only frameworks, linux-only liger) and for
+# fabric, whose source is untyped.
 stubPath = "typings"
 # Packages without stubs or py.typed (datasets, soundfile, torchaudio,
 # nltk, ...) are still analysed from source (`useLibraryCodeForTypes`); this
@@ -257,10 +258,10 @@ norecursedirs = [
 # Markers for test categorization
 markers = ["slow: marks tests as slow (deselected by default)"]
 
-# Filter out third-party warnings
-filterwarnings = [
-  "ignore:builtin type.*has no __module__ attribute:DeprecationWarning",
-]
+# Any warning fails the run: fix it at its source (or, for a genuinely
+# third-party one, add a narrow "ignore:<message>:<Category>:<module>" entry
+# with a comment) rather than letting warnings accumulate.
+filterwarnings = ["error"]
 
 [tool.ruff]
 line-length = 100

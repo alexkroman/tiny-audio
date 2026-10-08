@@ -184,8 +184,11 @@ def markdown_files() -> list[str]:
 
 
 def json_files() -> list[str]:
-    """Tracked JSON (the quality/ baselines) that `ta dev lint` checks."""
-    return tracked_files("*.json")
+    """Tracked JSON (the quality/ baselines) that `ta dev lint` checks.
+
+    tests/fixtures/ is excluded: it holds Hub files vendored byte-for-byte.
+    """
+    return [f for f in tracked_files("*.json") if not f.startswith("tests/fixtures/")]
 
 
 def lint_commands() -> list[list[str]]:

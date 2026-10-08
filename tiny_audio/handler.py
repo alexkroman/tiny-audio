@@ -35,7 +35,12 @@ class EndpointHandler:
         Args:
             path: Path to model directory or HuggingFace model ID
         """
-        nltk.download("punkt_tab", quiet=True)
+        # Only fetch when absent: nltk.download re-checks the remote index
+        # every call, i.e. a network round-trip on every endpoint start.
+        try:
+            nltk.data.find("tokenizers/punkt_tab/english/")
+        except LookupError:
+            nltk.download("punkt_tab", quiet=True)
 
         os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 

@@ -352,25 +352,6 @@ class TestGenerate:
         assert out.shape[1] <= 4
 
 
-class TestGenerateStreaming:
-    """generate_streaming yields partial transcript pieces."""
-
-    def test_streaming_yields_strings(self, base_asr_model: ASRModel) -> None:
-        input_features = torch.zeros(1, 80, 3000)
-        audio_attention_mask = torch.ones(1, 3000, dtype=torch.long)
-
-        outputs = list(
-            base_asr_model.generate_streaming(
-                input_features=input_features,
-                audio_attention_mask=audio_attention_mask,
-                max_new_tokens=4,
-            )
-        )
-        # Each yielded piece is a string (possibly empty)
-        for piece in outputs:
-            assert isinstance(piece, str)
-
-
 class TestSavePretrained:
     """save_pretrained writes config, weights, tokenizer, and source files."""
 

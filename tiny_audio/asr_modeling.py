@@ -1899,21 +1899,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             ):
                 gen_cfg.return_dict_in_generate = True
 
-        # Generate using language model.
-        #
-        # Default path passes both input_ids and inputs_embeds so
-        # repetition_penalty works correctly (it needs input_ids to track which
-        # tokens have been used). Gemma 4 forbids that combination outright --
-        # "You must specify exactly one of input_ids or inputs_embeds" -- so
-        # there we pass embeds plus the PLE precomputed from the clean prompt
-        # ids. Gemma's prepare_inputs_for_generation drops per_layer_inputs
-        # after the first step, so it is correct to hand it to generate().
-        ple_kwargs = self._per_layer_kwargs(input_ids)
-        lm_inputs: dict[str, torch.Tensor] = (
-            {"inputs_embeds": inputs_embeds, **ple_kwargs}
-            if ple_kwargs
-            else {"input_ids": input_ids, "inputs_embeds": inputs_embeds}
-        )
+        lm_inputs = self._lm_generate_inputs(input_ids, inputs_embeds)
         output = self.language_model.generate(
             **lm_inputs,
             attention_mask=attention_mask,
@@ -1934,6 +1920,25 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             return cast("torch.LongTensor", output[:, prompt_len:])
         output.sequences = cast("torch.LongTensor", output.sequences[:, prompt_len:])
         return output
+
+    def _lm_generate_inputs(
+        self, input_ids: torch.Tensor, inputs_embeds: torch.Tensor
+    ) -> dict[str, torch.Tensor]:
+        """The prompt arguments for `language_model.generate`.
+
+        Default path passes both input_ids and inputs_embeds so
+        repetition_penalty and no_repeat_ngram_size see the prompt (they need
+        input_ids to track which tokens have been used). Gemma 4 forbids that
+        combination outright -- "You must specify exactly one of input_ids or
+        inputs_embeds" -- so there we pass embeds plus the PLE precomputed from
+        the clean prompt ids. Gemma's prepare_inputs_for_generation drops
+        per_layer_inputs after the first step, so it is correct to hand it to
+        generate().
+        """
+        ple_kwargs = self._per_layer_kwargs(input_ids)
+        if ple_kwargs:
+            return {"inputs_embeds": inputs_embeds, **ple_kwargs}
+        return {"input_ids": input_ids, "inputs_embeds": inputs_embeds}
 
     def generate_streaming(
         self,
@@ -1966,13 +1971,13 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         )
 
         # Prepare generation kwargs
+        # Same prompt arguments as generate(); with input_ids present the
+        # streamer's skip_prompt drops the echoed prompt tokens.
         gen_kwargs: dict[str, Any] = {
-            "inputs_embeds": inputs_embeds,
+            **self._lm_generate_inputs(input_ids, inputs_embeds),
             "attention_mask": attention_mask,
             "generation_config": self.generation_config,
             "streamer": streamer,
-            # Gemma 4 needs PLE precomputed from the prompt ids; {} elsewhere.
-            **self._per_layer_kwargs(input_ids),
             **generate_kwargs,
         }
 

@@ -129,6 +129,18 @@ def _add_source_policy_columns(ds: Dataset, dataset_cfg: DictConfig, dataset_pat
     return ds
 
 
+def _not_excluded(
+    v: Any, wanted: set[object] | None, above: float | None, below: float | None
+) -> bool:
+    """`exclude_where`'s row predicate: False for a value the rule excludes."""
+    excluded = (
+        (wanted is not None and v in wanted)
+        or (v is not None and above is not None and v > above)
+        or (v is not None and below is not None and v < below)
+    )
+    return not excluded
+
+
 def _validate_exclude_where(ds: Dataset, exclude_where: DictConfig, dataset_path: str) -> None:
     """Reject an `exclude_where` rule with no criteria or a column the source lacks."""
     column = exclude_where.get("column")
@@ -284,27 +296,18 @@ class DatasetLoader:
         feature = (ds.features or {}).get(column)
         wanted = _resolve_excluded_values(names, feature, column, dataset_path)
 
-        def _keep(
-            v: Any,
-            _wanted: set[object] | None = wanted,
-            _above: float | None = above,
-            _below: float | None = below,
-        ) -> bool:
-            excluded = (
-                (_wanted is not None and v in _wanted)
-                or (v is not None and _above is not None and v > _above)
-                or (v is not None and _below is not None and v < _below)
-            )
-            return not excluded
-
         before = len(ds)
         # `input_columns` keeps this from materialising the audio column --
         # it matters for a duration filter over ~1.1M rows, which would
         # otherwise decode every clip to answer a float comparison.
+        # Module-level with fn_kwargs, not a closure: datasets fingerprints a
+        # filter by pickling it, and a local function's code object goes
+        # through dill's deprecated `co_lnotab` path.
         ds = ds.filter(
-            _keep,
+            _not_excluded,
             num_proc=self.num_proc,
             input_columns=column,
+            fn_kwargs={"wanted": wanted, "above": above, "below": below},
         )
         dropped = before - len(ds)
         logger.info(
