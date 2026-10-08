@@ -17,7 +17,7 @@ from scripts.deploy import plan as plan_module
 from scripts.deploy import runpod
 from scripts.deploy.handler_local import find_latest_model
 from scripts.deploy.plan import DATASET_DISK_FACTOR, build_plan, wait_command
-from scripts.deploy.remote_scripts import build_training_script
+from scripts.deploy.remote_scripts import build_eval_script, build_training_script
 from scripts.deploy.runpod import (
     SSH_CONNECT_ATTEMPTS,
     SSH_KEY_PATH,
@@ -338,3 +338,50 @@ class TestDeployRetries:
         conn.run.side_effect = OSError("refused")
         assert runpod.test_connection(conn) is False
         assert conn.run.call_count == SSH_CONNECT_ATTEMPTS
+
+
+class TestBuildEvalScript:
+    """build_eval_script turns eval options into the remote shell script."""
+
+    def _build(self, **overrides: object) -> str:
+        kwargs: dict[str, object] = {
+            "hf_token": "hf_x",
+            "model": "me/model",
+            "datasets": ["loquacious", "earnings22"],
+            "max_samples": 100,
+            "assemblyai_api_key": "aai_key",
+            "assemblyai_model": "best",
+            "num_workers": 4,
+            "streaming": True,
+            "extra_args": ["--foo", "bar"],
+        }
+        kwargs.update(overrides)
+        return build_eval_script(**kwargs)  # type: ignore[arg-type]
+
+    def test_all_options(self) -> None:
+        script = self._build()
+        assert "python -m scripts.eval.cli" in script
+        assert "--model me/model" in script
+        assert "--datasets loquacious earnings22" in script
+        assert "--max-samples 100" in script
+        assert "--assemblyai-model best" in script
+        assert "--num-workers 4" in script
+        assert "--streaming" in script
+        assert "--foo bar" in script
+        assert 'export ASSEMBLYAI_API_KEY="aai_key"' in script
+        assert "pip install modelscope" in script
+        assert "Evaluation Completed Successfully" in script
+
+    def test_optional_flags_omitted(self) -> None:
+        script = self._build(
+            datasets=[],
+            max_samples=None,
+            assemblyai_api_key=None,
+            num_workers=1,
+            streaming=False,
+            extra_args=None,
+        )
+        for flag in ("--datasets", "--max-samples", "--num-workers", "--streaming"):
+            assert flag not in script
+        assert "ASSEMBLYAI_API_KEY" not in script
+        assert "--assemblyai-model best" in script
