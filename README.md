@@ -179,11 +179,13 @@ poetry run ta eval -m mazesmazes/tiny-audio -d loquacious -n 1000
 
 # Compare with other models (reads ASSEMBLYAI_API_KEY, or pass --assemblyai-api-key)
 poetry run ta eval -m assemblyai --assemblyai-model universal -d loquacious -n 100
-
-# WER analysis: analysis commands take the model's short name (after the last "/")
-poetry run ta analysis high-wer tiny-audio --threshold 30
-poetry run ta analysis compare tiny-audio universal
 ```
+
+Other vendors: `-m deepgram`, `-m elevenlabs`, `-m smallest` (each reads its API key from the
+environment or a `--*-api-key` option), `-m assemblyai -s` for AssemblyAI streaming, and
+`-m swift` for the Swift SDK. Speaker-labelled sets (`-d ami-speakers`, `-d ami-speakers-long`)
+add cpWER next to WER; local models diarize with `return_speakers=True` and AssemblyAI with its
+native speaker labels.
 
 ### Apple SFSpeechRecognizer (macOS, on-device)
 
@@ -207,13 +209,12 @@ poetry run ta --help  # Show all commands
 
 | Command | Description |
 |---------|-------------|
-| `ta train` | Train locally: `asr`, `turn-aware`, `speaker-asr` (`-e <preset>`, Hydra overrides pass through) |
+| `ta train` | Train locally: `ta train asr -e <preset>` (Hydra overrides pass through) |
 | `ta eval` | Evaluate ASR models on datasets |
-| `ta analysis` | WER analysis (high-wer, entity-errors, extract-entities, compare) |
 | `ta deploy` | Deploy demo to HuggingFace Space |
 | `ta push` | Push model to HuggingFace Hub |
 | `ta demo` | Launch local Gradio demo |
-| `ta debug` | Debug utilities (analyze-weights, analyze-lora, compare-to-base, check-gradient-flow) |
+| `ta debug` | Debug utilities (check-gradient-flow) |
 | `ta runpod` | Remote training on RunPod (plan, up, wait, deploy, train, attach, eval, checkpoint) |
 | `ta dev` | Development tools (lint, format, type-check, test, check, precommit, ...) |
 
@@ -223,8 +224,8 @@ Every command follows the same rules, and `tests/test_cli_conventions.py` checks
 the built command tree:
 
 - Commands that *run* something (`eval`, `demo`, `runpod eval`, `dev handler`) take the model as
-  `--model/-m`. Commands that *inspect* a model or its eval runs (`analysis *`, `debug *`) take it
-  as the first positional argument.
+  `--model/-m`. Commands that *inspect* a model (`debug *`) take it as the first positional
+  argument.
 - `ta runpod` commands that talk to a pod take `<HOST> <PORT>` as their first two arguments.
 - Every option has an explicit `--long-name` and help text. Secrets and IDs that usually come from
   the environment (`HF_TOKEN`, `ASSEMBLYAI_API_KEY`, `WANDB_RUN_ID`, `MODEL_ID`, ...) are options
@@ -243,16 +244,13 @@ the built command tree:
 | `--num-workers` | `-w` | Parallel workers for API evaluations |
 | `--streaming` | `-s` | Streaming evaluation |
 | `--config` | `-c` | Dataset config override |
-| `--experiment` | `-e` | Experiment config (`ta runpod`) |
+| `--experiment` | `-e` | Experiment config (`ta train asr`, `ta runpod`) |
 | `--force` | `-f` | Kill an existing tmux session first (`ta runpod`) |
 | `--repo-id` | `-r` | Hub repo to push or deploy to |
 | `--branch` | `-b` | Hub branch (`ta push`) |
-| `--threshold` | `-t` | WER threshold (`ta analysis high-wer`) |
-| `--top-k` | `-k` | Most-drifted tensors (`ta debug compare-to-base`) |
 | `--list` | `-l` | List tmux sessions (`ta runpod attach`) |
 | `--port` | `-p` | Server port (`ta demo`) |
 | `--audio` | `-a` | Audio file (`ta dev handler`) |
-| `--verbose` | `-v` | Verbose output (`ta debug analyze-weights`) |
 
 ## Configuration
 
@@ -277,14 +275,10 @@ configs/
 ├── config.yaml                  # Main config (model defaults; imports data + training)
 ├── experiments/                 # Training recipes
 │   ├── stage_1.yaml             # Default: frozen encoder + projector + decoder trained jointly
-│   ├── encoder_train.yaml       # Trainable Whisper encoder + frozen decoder
-│   ├── granite_qwen.yaml        # Granite Speech encoder + Qwen3.5-2B decoder
-│   ├── granite_gemma.yaml       # Granite Speech encoder + Gemma 4 decoder
-│   ├── granite_gemma_smoke.yaml # granite_gemma on the LibriSpeech dummy set
+│   ├── granite_qwen_frozen.yaml # Published model: Granite Speech encoder + LoRA on a Qwen3.5 decoder
 │   └── mps_smoke.yaml           # Local CPU/MPS smoke test
 ├── data/
 │   ├── multiasr.yaml            # Ten-corpus training mix (default)
-│   ├── loquacious_medium.yaml   # LoquaciousSet medium
 │   └── librispeech_dummy.yaml   # 73-clip sample for smoke tests
 └── training/
     └── production.yaml          # Training hyperparameters
@@ -314,7 +308,7 @@ training:
   lr_scheduler_type: cosine_with_min_lr
 ```
 
-The encoder is frozen by the `freeze_audio_encoder` default in `ASRConfig`; `encoder_train.yaml` is the recipe that unfreezes it.
+The encoder is frozen by the `freeze_audio_encoder` default in `ASRConfig`; set `training.freeze_audio_encoder=false` (or `training.encoder_trainable_top_layers=N` for the top N blocks) to train it.
 
 ## Project Structure
 
@@ -328,20 +322,17 @@ tiny-audio/
 │   ├── projectors.py        # Projector architectures
 │   ├── alignment.py         # Forced alignment for word timestamps
 │   ├── diarization.py       # Speaker diarization
-│   ├── handler.py           # HF Inference Endpoints handler
-│   └── integrations/        # Voice agent integrations (Pipecat)
+│   └── handler.py           # HF Inference Endpoints handler
 ├── scripts/
 │   ├── train.py             # Training script (Hydra)
 │   ├── cli.py               # Unified CLI entry point
 │   ├── dev.py               # Development utilities
-│   ├── analysis.py          # WER analysis tools
-│   ├── itn.py               # Inverse text normalization for eval
 │   ├── eval/                # Evaluation framework
 │   │   ├── evaluators/      # ASR evaluators
 │   │   └── datasets.py      # Dataset loading
 │   ├── deploy/              # RunPod, run planning, HF Space deployment
 │   ├── hub/                 # HF Hub integration
-│   └── debug/               # Debug utilities
+│   └── debug/               # Gradient-flow check
 ├── configs/                 # Hydra configuration
 ├── tests/                   # Test suite
 └── docs/                    # Documentation and course
@@ -369,11 +360,26 @@ poetry run pytest -k "test_forward" -v    # By name pattern
 
 ```bash
 poetry run ta dev format      # Format code (black, ruff, mdformat)
-poetry run ta dev lint        # Lint + format check (poetry check --lock, ruff, black, yamllint, taplo)
+poetry run ta dev lint        # Lint + format check (poetry check --lock, ruff, black, yamllint, taplo,
+                              #   actionlint, zizmor, mdformat --check)
 poetry run ta dev type-check  # Type check (mypy, pyright)
-poetry run ta dev check       # Lint + type-check + security + dead code + docstrings
+poetry run ta dev check       # Lint + type-check + security + dead code + duplication + ratchets
+                              #   + deptry + docstrings
 poetry run ta dev precommit   # Full quality gate
 ```
+
+`ta dev check` and `ta dev test` also run three ratchets (`scripts/quality.py`), each against a
+baseline committed under `quality/` that may only improve:
+
+- **File length:** Python files are capped at 600 code lines; files already over it may not grow.
+- **Per-file coverage:** each file keeps its recorded line coverage, and new files need 50%. Runs
+  after the tests, from `coverage.json`.
+- **Test assertions:** every test must assert something (an `assert`, `pytest.raises`, a mock
+  `assert_*`, or a call to a guard such as `_require_*`).
+
+After an intended improvement, refresh a baseline with `ta dev quality file-length --update` or
+`ta dev quality coverage-floors --update` (record coverage floors from a run with Hub access) and
+commit the diff.
 
 ### Adding a New Projector
 

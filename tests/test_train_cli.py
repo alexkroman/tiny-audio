@@ -22,8 +22,6 @@ def calls(monkeypatch):
     ("recipe", "module", "preset"),
     [
         ("asr", "scripts.train", "+experiments=stage_1"),
-        ("turn-aware", "scripts.turn_aware.train", "+experiment=stage_1"),
-        ("speaker-asr", "scripts.speaker_asr.train", "+experiment=stage_1"),
     ],
 )
 def test_experiment_flag_spells_each_trees_preset_key(calls, recipe, module, preset):
@@ -33,10 +31,10 @@ def test_experiment_flag_spells_each_trees_preset_key(calls, recipe, module, pre
 
 
 def test_hydra_flags_and_plus_overrides_pass_through(calls):
-    args = ["+experiment=context", "--cfg", "job", "hub_model_id=null"]
-    result = runner.invoke(app, ["train", "speaker-asr", *args])
+    args = ["+experiments=mps_smoke", "--cfg", "job", "hub_model_id=null"]
+    result = runner.invoke(app, ["train", "asr", *args])
     assert result.exit_code == 0, result.output
-    assert calls == [[sys.executable, "-m", "scripts.speaker_asr.train", *args]]
+    assert calls == [[sys.executable, "-m", "scripts.train", *args]]
 
 
 def test_exit_code_is_the_trainers(monkeypatch):

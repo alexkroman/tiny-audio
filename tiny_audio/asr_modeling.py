@@ -10,7 +10,6 @@ from threading import Thread
 import torch
 import torch.nn as nn
 import torch.nn.functional as F  # noqa: N812
-from torch.nn.utils.rnn import pad_sequence
 from transformers import (
     AutoConfig,
     AutoModel,
@@ -24,9 +23,11 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 
 try:
     from .asr_config import ASRConfig, compute_encoder_output_length
+    from .asr_processing import left_pad_prompt_rows
     from .projectors import PROJECTOR_CLASSES
 except ImportError:
     from asr_config import ASRConfig, compute_encoder_output_length  # type: ignore[no-redef]
+    from asr_processing import left_pad_prompt_rows  # type: ignore[no-redef]
     from projectors import PROJECTOR_CLASSES  # type: ignore[no-redef]
 
 
@@ -1934,23 +1935,12 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         rows: list[torch.Tensor],
         device: torch.device,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Stack per-sample prompt rows into a left-padded batch.
+        """Stack per-sample prompt rows into a left-padded batch on `device`.
 
-        Left, not right: these feed `generate`, and right padding would sit
-        between the prompt and the first generated token. Pad positions never
-        collide with `audio_token_id`, so the masked_scatter below is unaffected.
+        See `left_pad_prompt_rows`; pad positions never collide with
+        `audio_token_id`, so the masked_scatter below is unaffected.
         """
-        pad_id = self.tokenizer.pad_token_id
-        if pad_id is None:
-            pad_id = self.tokenizer.eos_token_id or 0
-        input_ids = pad_sequence(
-            rows, batch_first=True, padding_value=int(pad_id), padding_side="left"
-        )
-        # The mask is padded from ones rather than derived from `input_ids !=
-        # pad_id`: a real token may equal `pad_id` when pad falls back to eos.
-        attention_mask = pad_sequence(
-            [torch.ones_like(row) for row in rows], batch_first=True, padding_side="left"
-        )
+        input_ids, attention_mask = left_pad_prompt_rows(rows, self.tokenizer)
         return input_ids.to(device), attention_mask.to(device)
 
     def _prepare_audio_inputs(

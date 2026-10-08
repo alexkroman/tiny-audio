@@ -2,7 +2,6 @@
 """Unified CLI for RunPod operations."""
 
 import io
-import re
 import shlex
 import subprocess
 import sys
@@ -232,11 +231,6 @@ def setup_remote_environment(conn: Connection) -> None:
     conn.run("apt-get update -qq || true")
     conn.run(
         "apt-get install -y -qq ffmpeg tmux rsync libsndfile1",
-    )
-    # portaudio19-dev is only needed for pyaudio runtime, never training;
-    # fall back gracefully on pods where it isn't available.
-    conn.run(
-        "apt-get install -y portaudio19-dev || true",
     )
     print("Remote environment setup complete!")
 
@@ -476,7 +470,7 @@ echo "Dependencies verified for $TA_PYTHON"
 def plan(
     experiment: Annotated[
         str, typer.Option("--experiment", "-e", help=EXPERIMENT_HELP)
-    ] = "granite_qwen",
+    ] = "granite_qwen_frozen",
     # 320, not 512: the measured granite_qwen sequence is 237 audio tokens at
     # the 19s collator ceiling plus prompt and transcript. This default
     # shadows plan_command's own, so the two have to be kept in sync -- it was
@@ -511,7 +505,7 @@ def plan(
 def up(
     experiment: Annotated[
         str, typer.Option("--experiment", "-e", help=EXPERIMENT_HELP)
-    ] = "granite_qwen",
+    ] = "granite_qwen_frozen",
     seq_len: Annotated[int, typer.Option("--seq-len", help=SEQ_LEN_HELP)] = 512,
     name: Annotated[
         str | None, typer.Option("--name", help="Pod name (default: derived from the experiment)")
@@ -800,7 +794,7 @@ def train(
     port: PortArg,
     experiment: Annotated[
         str, typer.Option("--experiment", "-e", help=EXPERIMENT_HELP)
-    ] = "granite_qwen",
+    ] = "granite_qwen_frozen",
     session_name: Annotated[
         str | None, typer.Option("--session-name", help=SESSION_NAME_HELP)
     ] = None,
@@ -1048,369 +1042,6 @@ def eval_model(
             extra_args,
         ),
         f"/tmp/eval_{session_name}.sh",
-        no_attach,
-    )
-
-
-# ----------------------------------------------------------- turn-aware recipe
-#
-# The standalone Qwen3-ASR recipe (configs/turn_aware/, scripts/turn_aware/)
-# has its own commands rather than a special case inside `train`: its presets
-# are Hydra overrides (`+experiment=v2`) rather than configs/experiments/
-# entries, its data is built by `build-pool` first, and the disk planner
-# cannot size it. Both scripts pass the SAME overrides to build-pool and the
-# next step, and build-pool skips any split already built with those settings.
-
-# build-pool's base-model transcription is launch-bound at batch 32 on a 0.6B
-# model: per-token kernel launches cost the same at 32 or 128 clips, so a pod
-# gets ~4x the throughput for ~7 GB of KV cache at the 30 s worst case.
-TURN_AWARE_POOL_BATCH_SIZE = 128
-POOL_BATCH_HELP = "Decode batch for build-pool's base-model transcription"
-
-
-def _turn_aware_script(
-    hf_token: str,
-    exports: str,
-    splits: list[str],
-    overrides: list[str],
-    pool_batch_size: int,
-    then: str | None,
-    label: str,
-    recipe: str = "turn-aware",
-) -> str:
-    """Preamble, `ta <recipe> build-pool` for `splits`, then `then` (a command line), epilogue.
-
-    `then=None` stops after the pool (`build-speaker-asr-pool`).
-    """
-    quoted = " ".join(shlex.quote(o) for o in overrides)
-    split_args = " ".join(f"--split {s}" for s in splits)
-    after = f" \\\n    && {then}" if then else ""
-    body = f"""
-cd /workspace
-python -m scripts.cli {recipe} build-pool {split_args} --batch-size {pool_batch_size} {quoted}{after}"""
-    return (
-        _script_preamble(hf_token, extras=exports)
-        + body
-        + _script_epilogue(label, f"{label} script")
-    )
-
-
-def build_turn_aware_train_script(
-    hf_token: str,
-    wandb_run_id: str | None,
-    wandb_resume: str | None,
-    overrides: list[str],
-    pool_batch_size: int = TURN_AWARE_POOL_BATCH_SIZE,
-) -> str:
-    """build-pool (train + validation) then `scripts.turn_aware.train`, same overrides."""
-    quoted = " ".join(shlex.quote(o) for o in overrides)
-    return _turn_aware_script(
-        hf_token,
-        _training_exports(wandb_run_id, wandb_resume),
-        ["train", "validation"],
-        overrides,
-        pool_batch_size,
-        f"python -m scripts.turn_aware.train {quoted}",
-        "Turn-aware training",
-    )
-
-
-def build_turn_aware_eval_script(
-    hf_token: str,
-    model: str,
-    split: str,
-    max_samples: int,
-    batch_size: int,
-    pool_batch_size: int = TURN_AWARE_POOL_BATCH_SIZE,
-    context: str = "pool",
-) -> str:
-    """Build the recipe-neutral `+experiment=eval` pool for `split`, then score `model` on it.
-
-    One pool for every model scored: one copy per hold, verbatim base-model
-    targets (so text_wer reads drift from the base), mined pauses included.
-    Results land under the WHOLE model path, flattened -- local checkpoints
-    all end in `final`, so the last component alone would collide.
-    """
-    overrides = ["+experiment=eval"]
-    model_slug = re.sub(r"[^A-Za-z0-9._-]+", "_", model.strip("/"))
-    suffix = "" if context == "pool" else f"_ctx-{context}"
-    out_dir = shlex.quote(f"/workspace/outputs/turn_aware/eval/{model_slug}_{split}{suffix}")
-    exports = (
-        "export TOKENIZERS_PARALLELISM=false\n"
-        'export HF_DATASETS_AUDIO_DECODER="soundfile"\n'
-        "export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True\n"
-    )
-    evaluate = (
-        f"python -m scripts.cli turn-aware evaluate -m {shlex.quote(model)} {overrides[0]} "
-        f"--split {split} -n {max_samples} --batch-size {batch_size} --context {context} "
-        f"-o {out_dir}"
-    )
-    return _turn_aware_script(
-        hf_token, exports, [split], overrides, pool_batch_size, evaluate, "Turn-aware evaluation"
-    )
-
-
-@app.command("train-turn-aware")
-def train_turn_aware(
-    host: HostArg,
-    port: PortArg,
-    session_name: Annotated[
-        str | None, typer.Option("--session-name", help=SESSION_NAME_HELP)
-    ] = None,
-    no_attach: Annotated[bool, typer.Option("--no-attach", help=NO_ATTACH_HELP)] = False,
-    force: Annotated[bool, typer.Option("--force", "-f", help=FORCE_HELP)] = False,
-    pool_batch_size: Annotated[
-        int, typer.Option("--pool-batch-size", help=POOL_BATCH_HELP)
-    ] = TURN_AWARE_POOL_BATCH_SIZE,
-    wandb_run_id: Annotated[
-        str | None,
-        typer.Option("--wandb-run-id", envvar="WANDB_RUN_ID", help="W&B run ID to resume"),
-    ] = None,
-    wandb_resume: Annotated[
-        str | None,
-        typer.Option(
-            "--wandb-resume", envvar="WANDB_RESUME", help="W&B resume mode: must, allow, or never"
-        ),
-    ] = None,
-    hf_token: Annotated[
-        str, typer.Option("--hf-token", envvar="HF_TOKEN", help=HF_TOKEN_HELP)
-    ] = "",
-    overrides: Annotated[list[str] | None, typer.Argument(help=OVERRIDES_HELP)] = None,
-):
-    """Build the pool and train the turn-aware recipe, e.g. `+experiment=v2`.
-
-    Needs ~40 GB on /workspace (train turns as parquet + arrow, the model,
-    LoRA checkpoints); the disk planner only sizes configs/experiments/.
-    """
-    conn = connect(host, port)
-    overrides = list(overrides or [])
-    session_name = _prepare_session(
-        conn, session_name or _auto_session_name("train_turn_aware"), force, hf_token
-    )
-    print(f"\nStarting turn-aware training session '{session_name}'...")
-    if overrides:
-        print(f"Hydra overrides: {' '.join(overrides)}")
-    _start_remote_tmux_script(
-        conn,
-        host,
-        port,
-        session_name,
-        build_turn_aware_train_script(
-            hf_token, wandb_run_id, wandb_resume, overrides, pool_batch_size
-        ),
-        f"/tmp/train_{session_name}.sh",
-        no_attach,
-    )
-
-
-@app.command("eval-turn-aware")
-def eval_turn_aware(
-    host: HostArg,
-    port: PortArg,
-    model: Annotated[
-        str, typer.Option("--model", "-m", help="Trained turn-aware model: Hub ID or pod path")
-    ],
-    split: Annotated[str, typer.Option("--split", help="Dataset split to score")] = "test",
-    max_samples: Annotated[
-        int,
-        typer.Option("--max-samples", "-n", help="Schema-balanced sample size (0 = every example)"),
-    ] = 0,
-    batch_size: Annotated[int, typer.Option("--batch-size", help="Decode batch size")] = 64,
-    pool_batch_size: Annotated[
-        int, typer.Option("--pool-batch-size", help=POOL_BATCH_HELP)
-    ] = TURN_AWARE_POOL_BATCH_SIZE,
-    context: Annotated[
-        str,
-        typer.Option(
-            "--context", help="Agent question as context: 'pool' (manifest mix), 'always', 'never'"
-        ),
-    ] = "pool",
-    session_name: Annotated[
-        str | None, typer.Option("--session-name", help=SESSION_NAME_HELP)
-    ] = None,
-    no_attach: Annotated[bool, typer.Option("--no-attach", help=NO_ATTACH_HELP)] = False,
-    force: Annotated[bool, typer.Option("--force", "-f", help=FORCE_HELP)] = False,
-    hf_token: Annotated[
-        str, typer.Option("--hf-token", envvar="HF_TOKEN", help=HF_TOKEN_HELP)
-    ] = "",
-):
-    """Score a turn-aware model's end-of-turn decisions on a RunPod instance.
-
-    Examples:
-        ta runpod eval-turn-aware <HOST> <PORT> -m mazesmazes/tiny-audio-turn-aware-qwen3-asr-v2
-        ta runpod eval-turn-aware <HOST> <PORT> -m outputs/turn_aware/v2/final -n 2000
-    """
-    conn = connect(host, port)
-    session_name = _prepare_session(
-        conn, session_name or _auto_session_name(f"eval_turn_aware_{split}"), force, hf_token
-    )
-    print(f"\nStarting turn-aware eval session '{session_name}'...")
-    print(f"Model: {model}  split: {split}  samples: {max_samples or 'all'}")
-    _start_remote_tmux_script(
-        conn,
-        host,
-        port,
-        session_name,
-        build_turn_aware_eval_script(
-            hf_token, model, split, max_samples, batch_size, pool_batch_size, context
-        ),
-        f"/tmp/eval_{session_name}.sh",
-        no_attach,
-    )
-
-
-# ---------------------------------------------------------- speaker-asr recipe
-#
-# Same shape as turn-aware (configs/speaker_asr/, scripts/speaker_asr/):
-# build-pool self-transcribes every AMI utterance used in a window, then
-# training runs with the same overrides.
-
-
-def build_speaker_asr_train_script(
-    hf_token: str,
-    wandb_run_id: str | None,
-    wandb_resume: str | None,
-    overrides: list[str],
-    pool_batch_size: int = TURN_AWARE_POOL_BATCH_SIZE,
-) -> str:
-    """build-pool (train + validation) then `scripts.speaker_asr.train`, same overrides."""
-    quoted = " ".join(shlex.quote(o) for o in overrides)
-    return _turn_aware_script(
-        hf_token,
-        _training_exports(wandb_run_id, wandb_resume),
-        ["train", "validation"],
-        overrides,
-        pool_batch_size,
-        f"python -m scripts.speaker_asr.train {quoted}",
-        "Speaker-ASR training",
-        recipe="speaker-asr",
-    )
-
-
-def build_speaker_asr_pool_script(
-    hf_token: str,
-    splits: list[str],
-    overrides: list[str],
-    pool_batch_size: int = TURN_AWARE_POOL_BATCH_SIZE,
-) -> str:
-    """`ta speaker-asr build-pool` for `splits` and nothing else."""
-    exports = (
-        "export TOKENIZERS_PARALLELISM=false\n"
-        'export HF_DATASETS_AUDIO_DECODER="soundfile"\n'
-        "export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True\n"
-    )
-    return _turn_aware_script(
-        hf_token,
-        exports,
-        splits,
-        overrides,
-        pool_batch_size,
-        None,
-        "Speaker-ASR pool build",
-        recipe="speaker-asr",
-    )
-
-
-@app.command("build-speaker-asr-pool")
-def build_speaker_asr_pool(
-    host: HostArg,
-    port: PortArg,
-    splits: Annotated[
-        list[str] | None,
-        typer.Option(
-            "--split",
-            help="Split(s) to build; repeat for several (default: train, validation, test)",
-        ),
-    ] = None,
-    session_name: Annotated[
-        str | None, typer.Option("--session-name", help=SESSION_NAME_HELP)
-    ] = None,
-    no_attach: Annotated[bool, typer.Option("--no-attach", help=NO_ATTACH_HELP)] = False,
-    force: Annotated[bool, typer.Option("--force", "-f", help=FORCE_HELP)] = False,
-    pool_batch_size: Annotated[
-        int, typer.Option("--pool-batch-size", help=POOL_BATCH_HELP)
-    ] = TURN_AWARE_POOL_BATCH_SIZE,
-    hf_token: Annotated[
-        str, typer.Option("--hf-token", envvar="HF_TOKEN", help=HF_TOKEN_HELP)
-    ] = "",
-    overrides: Annotated[list[str] | None, typer.Argument(help=OVERRIDES_HELP)] = None,
-):
-    """Build (and, with pool.hub_repo, publish) the speaker-ASR pool on a pod; no training.
-
-    The self-transcription pass is the GPU-bound step. With the presets'
-    pool.hub_repo the result is pushed to the Hub, so any later
-    `build-pool` or `train-speaker-asr` with the same overrides pulls it.
-    HF_TOKEN needs write access to that repo.
-    """
-    conn = connect(host, port)
-    overrides = list(overrides or [])
-    splits = list(splits or ["train", "validation", "test"])
-    session_name = _prepare_session(
-        conn, session_name or _auto_session_name("speaker_asr_pool"), force, hf_token
-    )
-    print(f"\nStarting speaker-ASR pool build '{session_name}' ({', '.join(splits)})...")
-    if overrides:
-        print(f"Hydra overrides: {' '.join(overrides)}")
-    _start_remote_tmux_script(
-        conn,
-        host,
-        port,
-        session_name,
-        build_speaker_asr_pool_script(hf_token, splits, overrides, pool_batch_size),
-        f"/tmp/pool_{session_name}.sh",
-        no_attach,
-    )
-
-
-@app.command("train-speaker-asr")
-def train_speaker_asr(
-    host: HostArg,
-    port: PortArg,
-    session_name: Annotated[
-        str | None, typer.Option("--session-name", help=SESSION_NAME_HELP)
-    ] = None,
-    no_attach: Annotated[bool, typer.Option("--no-attach", help=NO_ATTACH_HELP)] = False,
-    force: Annotated[bool, typer.Option("--force", "-f", help=FORCE_HELP)] = False,
-    pool_batch_size: Annotated[
-        int, typer.Option("--pool-batch-size", help=POOL_BATCH_HELP)
-    ] = TURN_AWARE_POOL_BATCH_SIZE,
-    wandb_run_id: Annotated[
-        str | None,
-        typer.Option("--wandb-run-id", envvar="WANDB_RUN_ID", help="W&B run ID to resume"),
-    ] = None,
-    wandb_resume: Annotated[
-        str | None,
-        typer.Option(
-            "--wandb-resume", envvar="WANDB_RESUME", help="W&B resume mode: must, allow, or never"
-        ),
-    ] = None,
-    hf_token: Annotated[
-        str, typer.Option("--hf-token", envvar="HF_TOKEN", help=HF_TOKEN_HELP)
-    ] = "",
-    overrides: Annotated[list[str] | None, typer.Argument(help=OVERRIDES_HELP)] = None,
-):
-    """Build the AMI window pool and train the speaker-ASR recipe, e.g. `+experiment=v1`.
-
-    Needs ~40 GB on /workspace (AMI ihm train + validation parquet and arrow,
-    the model, LoRA checkpoints); the disk planner only sizes configs/experiments/.
-    """
-    conn = connect(host, port)
-    overrides = list(overrides or [])
-    session_name = _prepare_session(
-        conn, session_name or _auto_session_name("train_speaker_asr"), force, hf_token
-    )
-    print(f"\nStarting speaker-ASR training session '{session_name}'...")
-    if overrides:
-        print(f"Hydra overrides: {' '.join(overrides)}")
-    _start_remote_tmux_script(
-        conn,
-        host,
-        port,
-        session_name,
-        build_speaker_asr_train_script(
-            hf_token, wandb_run_id, wandb_resume, overrides, pool_batch_size
-        ),
-        f"/tmp/train_{session_name}.sh",
         no_attach,
     )
 

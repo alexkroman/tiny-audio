@@ -336,7 +336,8 @@ class TestCreateOrUpdateModelCard:
         """A stale peft README from an earlier run must not take the save down."""
         fake = SimpleNamespace(language_model=SimpleNamespace())
 
-        ASRModel.create_or_update_model_card(fake, tmp_path)
+        assert ASRModel.create_or_update_model_card(fake, tmp_path) is None
+        assert list(tmp_path.iterdir()) == []  # nothing written without an adapter
 
     def test_method_is_reachable_on_the_class(self):
         """nn.Module.__getattr__ is what raised; guard the attribute itself."""

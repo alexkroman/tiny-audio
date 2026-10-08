@@ -46,8 +46,8 @@ DATASET_REGISTRY: dict[str, DatasetConfig] = {
         text_field="text",
     ),
     # Multi-speaker AMI windows (headset segments re-mixed on the meeting
-    # timeline) with AMI's human transcripts as `<SPK_n>` references. Built by
-    # `ta speaker-asr export-windows --split test -r mazesmazes/ami-speaker-windows`.
+    # timeline) with AMI's human transcripts as `<SPK_n>` references (a
+    # prebuilt Hub dataset).
     "ami-speakers": DatasetConfig(
         path="mazesmazes/ami-speaker-windows",
         audio_field="audio",
@@ -56,8 +56,8 @@ DATASET_REGISTRY: dict[str, DatasetConfig] = {
     ),
     # Whole AMI test meetings (~20-50 min each) re-mixed from headset
     # segments, references as `<SPK_n>` turns over the meeting: cpWER here
-    # measures linking speakers across an entire recording. Built by
-    # `ta speaker-asr export-meetings --split test -r mazesmazes/ami-speaker-meetings`.
+    # measures linking speakers across an entire recording (a prebuilt Hub
+    # dataset).
     "ami-speakers-long": DatasetConfig(
         path="mazesmazes/ami-speaker-meetings",
         audio_field="audio",

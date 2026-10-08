@@ -2,7 +2,7 @@
 
 The commands and numbers from the course on one page.
 
----
+______________________________________________________________________
 
 ## Essential Commands
 
@@ -78,17 +78,12 @@ Results: `outputs/<timestamp>_<short-name>_<dataset>/{results.txt,metrics.txt}`
 
 ### Analysis
 
-The model argument is the **short name** (text after the last `/`), matched exactly.
-
 ```bash
-poetry run ta analysis high-wer <short-name> --threshold 50 [--latest] [--output-file file.md]
-poetry run ta analysis compare <short-name> tiny-audio assemblyai
-poetry run ta analysis extract-entities               # build outputs/keywords.json first
-poetry run ta analysis entity-errors <short-name> [--entity-type PERSON]
+# Worst samples of a run
+grep -h "WER:" outputs/*_<short-name>_<dataset>/results.txt | sort -t: -k2 -rn | head -20
+# Corpus WER of every run on a dataset
+grep -H "^wer:" outputs/*_<dataset>/metrics.txt
 
-poetry run ta debug analyze-weights <model>
-poetry run ta debug compare-to-base <model> [--per-layer]
-poetry run ta debug analyze-lora <model>
 poetry run ta debug check-gradient-flow <model>
 ```
 
@@ -102,7 +97,7 @@ poetry run ta deploy --repo-id <user>/<space>         # upload demo/ to a Gradio
 # then set MODEL_ID=<model> in the Space's Settings → Variables
 ```
 
----
+______________________________________________________________________
 
 ## Architecture
 
@@ -131,17 +126,14 @@ Audio → GLM-ASR encoder (frozen) → MLP projector (trained) → Qwen3-0.6B (f
 **Prompt the decoder sees**: `<audio>…<audio> Transcribe the speech to text` as the user turn,
 transcript as the assistant turn, via Qwen3's chat template.
 
----
+______________________________________________________________________
 
 ## Experiments (`configs/experiments/`)
 
 | Config | Encoder | Decoder | Trains | Data |
 |--------|---------|---------|--------|------|
 | `stage_1` | GLM-ASR-Nano (frozen) | Qwen3-0.6B | Projector + decoder + embeddings | `multiasr` |
-| `encoder_train` | Whisper-medium.en (trained) | Qwen3-0.6B (frozen) | Projector + encoder | `multiasr` |
-| `granite_qwen` | Granite Speech 470M | Qwen3.5-2B | Projector + decoder | `multiasr` |
-| `granite_gemma` | Granite Speech 470M | Gemma 4 E2B (frozen) | Projector | `loquacious_medium` |
-| `granite_gemma_smoke` | as above | as above | 50 steps | `librispeech_dummy` |
+| `granite_qwen_frozen` | Granite Speech 470M | Qwen3.5-4B (frozen) | Projector + decoder LoRA | `multiasr` |
 | `mps_smoke` | GLM-ASR-Nano | Qwen3-0.6B | 10 steps, batch 1 | `librispeech_dummy` |
 
 ### Freeze Flags
@@ -154,7 +146,7 @@ transcript as the assistant turn, via Qwen3's chat template.
 | `training.freeze_projector` | `false` | `true` = LoRA-only training |
 | `training.use_lora` | `false` | LoRA adapters (rank 8, alpha 32) instead of full fine-tune |
 
----
+______________________________________________________________________
 
 ## Key Hyperparameters
 
@@ -175,7 +167,7 @@ transcript as the assistant turn, via Qwen3's chat template.
 | `model.projector_hidden_dim` | `1024` | |
 | `model.label_smoothing` | `0.1` | `stage_1`: 0.0 |
 
----
+______________________________________________________________________
 
 ## Evaluation Datasets (`-d`)
 
@@ -193,7 +185,7 @@ transcript as the assistant turn, via Qwen3's chat template.
 | `ami`, `ami-sdm` | Meetings (headset / distant mic) |
 | `expresso` | Expressive speech |
 
----
+______________________________________________________________________
 
 ## Training Metrics
 
@@ -203,7 +195,7 @@ transcript as the assistant turn, via Qwen3's chat template.
 | `eval/loss` | Tracks training loss | Rising while training loss falls (overfit) |
 | `train/grad_norm` | 1-3 after warmup | Spikes over 100 |
 
----
+______________________________________________________________________
 
 ## Config Layout
 
@@ -211,14 +203,14 @@ transcript as the assistant turn, via Qwen3's chat template.
 configs/
 ├── config.yaml               # model defaults, imports data + training
 ├── training/production.yaml  # trainer defaults
-├── data/                     # multiasr, loquacious_medium, librispeech_dummy, (your own)
+├── data/                     # multiasr, librispeech_dummy, (your own)
 └── experiments/              # recipes; use with +experiments=<name>
 ```
 
 Override syntax is `key=value` (Hydra), never `--key value`. Experiment files start with
 `# @package _global_`.
 
----
+______________________________________________________________________
 
 ## Common Options
 
@@ -229,11 +221,10 @@ Override syntax is `key=value` (Hydra), never `--key value`. Experiment files st
 | `--max-samples` | `-n` | `eval` |
 | `--num-workers` | `-w` | `eval` with API backends |
 | `--output-dir` | `-o` | `eval` (default `outputs`) |
-| `--threshold` | `-t` | `analysis high-wer` |
-| `--experiment` | `-e` | `runpod plan`, `runpod train`, `runpod up` |
-| `--repo-id` | `-r` | `push`, `deploy`, `debug analyze-lora` |
+| `--experiment` | `-e` | `train asr`, `runpod plan`, `runpod train`, `runpod up` |
+| `--repo-id` | `-r` | `push`, `deploy` |
 
----
+______________________________________________________________________
 
 ## tmux (on the pod)
 
@@ -243,7 +234,7 @@ Override syntax is `key=value` (Hydra), never `--key value`. Experiment files st
 | Scroll | `Ctrl+B`, then `[`; `q` to exit |
 | Stop training | `Ctrl+C` |
 
----
+______________________________________________________________________
 
 ## Environment Variables
 
@@ -258,7 +249,7 @@ pairing as `[env var: ...]`. Pass the flag to override the environment for one r
 | `MODEL_ID` | Model served by the Gradio demo / Space | `ta demo --model` |
 | `ASSEMBLYAI_API_KEY`, `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY` | Commercial API baselines | `ta eval --assemblyai-api-key / --deepgram-api-key / --elevenlabs-api-key` |
 
----
+______________________________________________________________________
 
 ## Common Issues
 
@@ -274,7 +265,7 @@ pairing as `[env var: ...]`. Pass the flag to override the environment for one r
 | `analysis` finds no results | Use the short model name (after the last `/`); it must match exactly |
 | Space serves the wrong model | Set `MODEL_ID` in the Space's variables |
 
----
+______________________________________________________________________
 
 ## Formulas
 
@@ -283,6 +274,6 @@ pairing as `[env var: ...]`. Pass the flag to override the environment for one r
 **WER**: `(Substitutions + Insertions + Deletions) / Reference words`, after Whisper text
 normalization on both sides.
 
----
+______________________________________________________________________
 
 [← Class 3: Evaluation](./3-evaluation-and-deployment.md) | [Glossary →](./5-glossary.md)

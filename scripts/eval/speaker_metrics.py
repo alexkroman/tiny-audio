@@ -1,8 +1,8 @@
 """Speaker-attributed transcripts: the `<SPK_n>` format and cpWER.
 
 Kept free of torch/datasets so `ta eval` can score any system's
-speaker-labelled output (AssemblyAI's utterances, this recipe's decodes)
-without loading the training stack.
+speaker-labelled output (AssemblyAI's utterances, the tiny-audio pipeline's
+`return_speakers` turns) without loading the training stack.
 """
 
 from __future__ import annotations
@@ -13,15 +13,9 @@ import numpy as np
 
 SPEAKER_TOKEN = "<SPK_{}>"
 _SPEAKER_RE = re.compile(r"<SPK_(\d+)>")
-# Ends a labelled prefix (voice samples + the previous chunk's tail) in the
-# assistant turn; everything after it is the new audio's transcript. See
-# scripts/speaker_asr/context.py.
+# Ends a labelled context prefix in a transcript; `parse_turns` treats it as a
+# word boundary so a hypothesis that still carries it scores cleanly.
 CONTEXT_END = "<CONTINUE>"
-
-
-def speaker_tokens(n: int) -> list[str]:
-    """`<SPK_1>` .. `<SPK_n>`."""
-    return [SPEAKER_TOKEN.format(i) for i in range(1, n + 1)]
 
 
 def has_speakers(text: str) -> bool:
@@ -109,30 +103,13 @@ def cp_errors(ref: str, hyp: str, normalize=lambda s: s) -> tuple[int, int]:
     return int(cost[rows, cols].sum()), sum(len(a) for a in r)
 
 
-def sa_errors(ref: str, hyp: str, normalize=lambda s: s) -> tuple[int, int]:
-    """(errors, reference words) with labels taken AS GIVEN: SPK_k vs SPK_k.
-
-    Unlike cpWER this does not search for the best pairing, so it measures
-    whether a model kept the labels a context prefix assigned -- the point of
-    long-form decoding -- not just whether it separated the voices.
-    """
-    r = _speaker_words(ref, normalize)
-    h = _speaker_words(hyp, normalize)
-    errors = sum(word_errors(r.get(k, []), h.get(k, [])) for k in set(r) | set(h))
-    return errors, sum(len(words) for words in r.values())
-
-
-def speaker_metrics(
-    refs: list[str], hyps: list[str], normalize=lambda s: s, fixed_labels: bool = False
-) -> dict:
+def speaker_metrics(refs: list[str], hyps: list[str], normalize=lambda s: s) -> dict:
     """WER (speakers ignored), cpWER, their gap, and speaker-count accuracy.
 
     `cpwer - wer` is what speaker attribution costs on top of recognition;
-    by speaker count (`cpwer_<k>spk`) shows where it breaks down. With
-    `fixed_labels`, also `sawer`: errors with labels compared as given (see
-    `sa_errors`), for references whose numbering a context prefix fixed.
+    by speaker count (`cpwer_<k>spk`) shows where it breaks down.
     """
-    wer_err = cp_err = sa_err = n_words = count_hits = count_abs = 0
+    wer_err = cp_err = n_words = count_hits = count_abs = 0
     by_count: dict[int, list[int]] = {}
     for ref, hyp in zip(refs, hyps, strict=True):
         ref_words = normalize(plain_text(ref)).split()
@@ -140,8 +117,6 @@ def speaker_metrics(
         errors, words = cp_errors(ref, hyp, normalize)
         cp_err += errors
         n_words += words
-        if fixed_labels:
-            sa_err += sa_errors(ref, hyp, normalize)[0]
         n_ref = len({label for label, _ in parse_turns(ref)})
         n_hyp = len({label for label, _ in parse_turns(hyp)})
         count_hits += n_ref == n_hyp
@@ -158,8 +133,6 @@ def speaker_metrics(
         "n": len(refs),
     }
     out["attribution_gap"] = out["cpwer"] - out["wer"]
-    if fixed_labels:
-        out["sawer"] = sa_err / max(n_words, 1)
     for k in sorted(by_count):
         out[f"cpwer_{k}spk"] = by_count[k][0] / max(by_count[k][1], 1)
     return out

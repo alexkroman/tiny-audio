@@ -1,70 +1,7 @@
 #!/usr/bin/env python3
 """Shared utilities for scripts."""
 
-import re
 from pathlib import Path
-
-
-def parse_results_file(results_path: Path) -> list[dict]:
-    """Parse a results.txt file and return list of samples.
-
-    Args:
-        results_path: Path to a results.txt file from evaluation.
-
-    Returns:
-        List of dicts with keys: sample_num, ground_truth, prediction, wer,
-        word_count, ground_truth_raw, prediction_raw. The `_raw` values are the
-        un-normalized transcripts; they are `None` for runs written before
-        those lines existed, so formatting metrics must skip such samples
-        rather than silently score normalized text.
-    """
-    samples = []
-    content = results_path.read_text()
-    blocks = content.split("-" * 80)
-
-    for block in blocks:
-        # `(.*)`, not `(.+?)`: an empty value is a real datum, not a parse
-        # failure. `save_results` writes `Ground Truth: ` / `Prediction: ` with
-        # nothing after the space when a reference normalizes away or a model
-        # returns no transcript, and the old `Ground Truth: (.+?)` needed one
-        # character -- so those rows vanished. Measured across outputs/: 7,923
-        # rows in 600 of 2,087 results.txt files.
-        #
-        # This does NOT move any WER: every one of those 7,923 has an empty
-        # reference, and both scorers already exclude empty references
-        # (`_corpus_wer`'s `if r.norm_reference`, and `if ref:` in
-        # analysis.collect_model_metrics). It matters for the row counts and
-        # for the formatting/ITN scorers, which should see an empty hypothesis
-        # as a miss rather than never see the sample.
-        #
-        # The Match object stays truthy when the group is empty, so the
-        # presence check below still distinguishes "line absent"
-        # (pre-raw-transcript runs -> None) from "line present but empty".
-        sample_match = re.search(r"Sample (\d+) - WER: ([\d.]+)%", block)
-        gt_match = re.search(r"^Ground Truth:[ \t]*(.*)$", block, re.MULTILINE)
-        pred_match = re.search(r"^Prediction:[ \t]*(.*)$", block, re.MULTILINE)
-        gt_raw_match = re.search(r"^Ground Truth Raw:[ \t]*(.*)$", block, re.MULTILINE)
-        pred_raw_match = re.search(r"^Prediction Raw:[ \t]*(.*)$", block, re.MULTILINE)
-
-        if sample_match and gt_match and pred_match:
-            wer = float(sample_match.group(2))
-            ground_truth = gt_match.group(1).strip()
-            prediction = pred_match.group(1).strip()
-            word_count = len(ground_truth.split())
-
-            samples.append(
-                {
-                    "sample_num": int(sample_match.group(1)),
-                    "ground_truth": ground_truth,
-                    "prediction": prediction,
-                    "wer": wer,
-                    "word_count": word_count,
-                    "ground_truth_raw": (gt_raw_match.group(1).strip() if gt_raw_match else None),
-                    "prediction_raw": (pred_raw_match.group(1).strip() if pred_raw_match else None),
-                }
-            )
-
-    return samples
 
 
 def _extract_model_from_dir(dir_name: str) -> str:
@@ -132,16 +69,3 @@ def find_model_dirs(
 def get_project_root() -> Path:
     """Get the project root directory."""
     return Path(__file__).resolve().parent.parent
-
-
-def load_data_config(name: str = "multiasr") -> list[dict]:
-    """Return the `datasets` list from `configs/data/<name>.yaml`.
-
-    Loaded through OmegaConf, the same parser Hydra uses for the training
-    configs, so the debug probes read the file exactly as `ta train` does.
-    Interpolations elsewhere in the file are left unresolved.
-    """
-    from omegaconf import OmegaConf
-
-    cfg = OmegaConf.load(get_project_root() / "configs" / "data" / f"{name}.yaml")
-    return OmegaConf.to_container(cfg["datasets"])

@@ -198,8 +198,8 @@ _WHITESPACE_RE = re.compile(r"\s+")
 # there. Meanwhile TEDLIUM is the one dataset where the decoder measurably
 # beats the frozen encoder (+6.18 WER), and this filter was cutting it 41%.
 #
-# To re-justify the trailing half, run the leading/trailing-deletion-run
-# analysis in scripts/analysis.py against the TEDLIUM eval; if trailing runs
+# To re-justify the trailing half, measure leading/trailing deletion runs
+# on the TEDLIUM eval's results.txt; if trailing runs
 # are elevated over baseline, restore the `|<(?:unk|foreign|overlap)>\s*$`
 # alternation.
 _EDGE_CONTENT_TAG_RE = re.compile(r"^\s*<(?:unk|foreign|overlap)>", re.IGNORECASE)
@@ -424,7 +424,7 @@ def _normalize_label(raw_text: str, text_case: str | None = None) -> str:
        and which misclassifies lowercase fragments of cased sources.
 
     A prior revision of step 4 also ran `text.replace("%", " percent")`, to
-    mirror an eval-side rule in scripts/analysis.py. That was removed
+    mirror an eval-side analysis rule. That was removed
     (2026-09-18) because it destroyed the `%` character in 100% of training
     targets: only Earnings22 and SPGISpeech ship `%` natively (~6,188 rows of
     the ~3.09M mix) and both were rewritten, so the decoder emitted 0 `%` in
@@ -443,9 +443,8 @@ def _normalize_label(raw_text: str, text_case: str | None = None) -> str:
         less supervision than `%` would have had. So the cause was the
         rewrite, not the data volume.
 
-    The eval-side copy in scripts/analysis.py is correct and should stay: it
-    is applied to both sides at scoring time, which is canonicalization
-    rather than label destruction.
+    An eval-side copy of that rule is fine: applied to both sides at scoring
+    time, it is canonicalization rather than label destruction.
 
     Output target format is cased text with punctuation where available —
     aligning the dominant training label distribution to the Qwen3

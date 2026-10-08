@@ -74,11 +74,11 @@ class TestCommandWiring:
     def test_check_runs_every_check_in_order(self, recorded_runs):
         result = runner.invoke(dev.app, ["check"])
         assert result.exit_code == 0
-        assert recorded_runs == [tuple(cmd) for cmd in dev.CHECK_COMMANDS]
+        assert recorded_runs == [tuple(cmd) for cmd in dev.check_commands()]
 
     def test_lint_runs_lint_commands(self, recorded_runs):
         assert runner.invoke(dev.app, ["lint"]).exit_code == 0
-        assert recorded_runs == [tuple(cmd) for cmd in dev.LINT_COMMANDS]
+        assert recorded_runs == [tuple(cmd) for cmd in dev.lint_commands()]
 
     def test_type_check_runs_both_checkers(self, recorded_runs):
         assert runner.invoke(dev.app, ["type-check"]).exit_code == 0
@@ -86,11 +86,14 @@ class TestCommandWiring:
 
     def test_test_enforces_coverage(self, recorded_runs):
         assert runner.invoke(dev.app, ["test"]).exit_code == 0
-        (cmd,) = recorded_runs
+        cmd, floors = recorded_runs
         assert cmd[0] == "pytest"
         assert "--cov=tiny_audio" in cmd
         assert "--cov=scripts" in cmd
         assert "--cov-report=xml" in cmd
+        # The per-file floors read the JSON report the test run just wrote.
+        assert "--cov-report=json" in cmd
+        assert floors == tuple(dev.COVERAGE_FLOORS_COMMAND)
 
     def test_coverage_adds_html_report(self, recorded_runs):
         assert runner.invoke(dev.app, ["coverage"]).exit_code == 0
@@ -103,10 +106,25 @@ class TestCommandWiring:
         assert runner.invoke(dev.app, ["precommit"]).exit_code == 0
         assert recorded_runs[0] == ("<format>",)
         assert recorded_runs[1:] == [
-            *(tuple(cmd) for cmd in dev.CHECK_COMMANDS),
+            *(tuple(cmd) for cmd in dev.check_commands()),
             tuple(dev.TEST_COMMAND),
-            ("poetry", "build"),
+            tuple(dev.COVERAGE_FLOORS_COMMAND),
+            tuple(dev.BUILD_COMMAND),
+            *(tuple(cmd) for cmd in dev.dist_check_commands()),
         ]
+
+    def test_build_validates_what_it_built(self, recorded_runs):
+        assert runner.invoke(dev.app, ["build"]).exit_code == 0
+        assert recorded_runs == [
+            tuple(dev.BUILD_COMMAND),
+            *(tuple(cmd) for cmd in dev.dist_check_commands()),
+        ]
+
+    def test_failed_build_skips_the_artifact_checks(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(dev, "run", lambda *args: calls.append(args) or 1)
+        assert runner.invoke(dev.app, ["build"]).exit_code == 1
+        assert calls == [tuple(dev.BUILD_COMMAND)]
 
     def test_docstrings_is_verbose(self, recorded_runs):
         assert runner.invoke(dev.app, ["docstrings"]).exit_code == 0
@@ -117,13 +135,21 @@ class TestCommandWiring:
         assert runner.invoke(dev.app, ["dead-code"]).exit_code == 0
         assert recorded_runs == [tuple(dev.DEAD_CODE_COMMAND)]
 
+    def test_duplication_uses_the_shared_command(self, recorded_runs):
+        assert runner.invoke(dev.app, ["duplication"]).exit_code == 0
+        assert recorded_runs == [tuple(dev.DUPLICATION_COMMAND)]
+
+    def test_deps_uses_the_shared_command(self, recorded_runs):
+        assert runner.invoke(dev.app, ["deps"]).exit_code == 0
+        assert recorded_runs == [tuple(dev.DEPS_COMMAND)]
+
     def test_failure_exit_code_propagates(self, monkeypatch):
         monkeypatch.setattr(dev, "run", lambda *args: 5)
         assert runner.invoke(dev.app, ["lint"]).exit_code == 5
 
 
 class TestFormatCode:
-    """Markdown formatting only touches tracked files outside the excluded set."""
+    """Markdown formatting touches tracked files except the front-matter ones."""
 
     def test_only_tracked_unexcluded_markdown_is_formatted(self, recorded_runs, monkeypatch):
         listing = (
@@ -132,7 +158,7 @@ class TestFormatCode:
         monkeypatch.setattr(dev.subprocess, "run", lambda *a, **kw: SimpleNamespace(stdout=listing))
         dev.format_code()
         md_calls = [c for c in recorded_runs if c[0] == "mdformat"]
-        assert md_calls == [("mdformat", "README.md", "docs/QUICKSTART.md")]
+        assert md_calls == [("mdformat", "README.md", "docs/course/01.md", "docs/QUICKSTART.md")]
         assert [c[0] for c in recorded_runs[:3]] == ["black", "ruff", "ruff"]
 
     def test_no_markdown_means_no_mdformat_call(self, recorded_runs, monkeypatch):
@@ -148,13 +174,23 @@ class TestQualityGateContents:
         assert ["ruff", "format", "--check", *dev.CODE_PATHS] in dev.LINT_COMMANDS
         assert ["black", "--check", *dev.CODE_PATHS] in dev.LINT_COMMANDS
 
+    def test_lint_checks_tracked_markdown_except_front_matter_files(self):
+        *_, markdown = dev.lint_commands()
+        assert markdown[:2] == ["mdformat", "--check"]
+        assert "README.md" in markdown
+        assert not set(markdown) & dev.MARKDOWN_SKIP
+
     def test_lint_verifies_the_lock_file(self):
         assert ["poetry", "check", "--lock"] in dev.LINT_COMMANDS
 
-    def test_check_includes_dead_code_and_docstrings(self):
-        assert dev.DEAD_CODE_COMMAND in dev.CHECK_COMMANDS
+    def test_check_includes_static_analysis_gates(self):
+        assert dev.DEAD_CODE_COMMAND in dev.check_commands()
+        assert dev.DEPS_COMMAND in dev.check_commands()
+        assert dev.DUPLICATION_COMMAND in dev.check_commands()
+        assert dev.FILE_LENGTH_COMMAND in dev.check_commands()
+        assert dev.TEST_ASSERTIONS_COMMAND in dev.check_commands()
         for cmd in dev.DOCSTRINGS_COMMANDS:
-            assert cmd in dev.CHECK_COMMANDS
+            assert cmd in dev.check_commands()
 
     def test_check_covers_both_packages_with_interrogate(self):
         targets = {cmd[1] for cmd in dev.DOCSTRINGS_COMMANDS}
@@ -254,3 +290,23 @@ class TestLazyRegistration:
 
 def test_project_root_has_pyproject():
     assert (Path(get_project_root()) / "pyproject.toml").is_file()
+
+
+class TestDistChecks:
+    """`dist_check_commands` points the checkers at exactly what is in dist/."""
+
+    def test_checks_every_artifact_and_the_wheel(self, monkeypatch, tmp_path):
+        for name in ("pkg-0.1-py3-none-any.whl", "pkg-0.1.tar.gz"):
+            (tmp_path / name).touch()
+        monkeypatch.setattr(dev, "DIST_DIR", tmp_path)
+        wheel_check, twine_check = dev.dist_check_commands()
+        assert wheel_check[0] == "check-wheel-contents"
+        assert wheel_check[-1] == str(tmp_path / "pkg-0.1-py3-none-any.whl")
+        assert twine_check[:3] == ["twine", "check", "--strict"]
+        assert twine_check[3:] == sorted(str(p) for p in tmp_path.iterdir())
+
+    def test_missing_dist_dir_yields_no_artifacts(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(dev, "DIST_DIR", tmp_path / "missing")
+        wheel_check, twine_check = dev.dist_check_commands()
+        assert not any(arg.endswith(".whl") for arg in wheel_check)
+        assert twine_check == ["twine", "check", "--strict"]

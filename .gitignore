@@ -54,6 +54,7 @@ htmlcov/
 .cache
 nosetests.xml
 coverage.xml
+coverage.json
 *.cover
 *.py,cover
 .hypothesis/
@@ -177,7 +178,7 @@ checkpoints/
 models/
 outputs/
 samples/
-# local dataset caches: turn-aware pools + transcript caches, speaker-ASR alignments
+# local dataset caches
 /data/
 
 # Weights & Biases

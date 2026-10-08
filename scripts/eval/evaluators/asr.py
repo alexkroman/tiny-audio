@@ -337,7 +337,7 @@ class LocalEvaluator(Evaluator):
         scored -- the same call a user makes. An alignment or diarization
         error is raised, not scored as an unlabelled transcript.
         """
-        from scripts.speaker_asr.metrics import serialize_turns
+        from scripts.eval.speaker_metrics import serialize_turns
 
         start = time.time()
         result = self.pipe(audio, user_prompt=self.user_prompt, return_speakers=True)
@@ -519,142 +519,14 @@ class AssemblyAIEvaluator(Evaluator):
         return transcript.text or "", elapsed, None
 
 
-class AssemblyAINemotronEvaluator(Evaluator):
-    """AssemblyAI words, Nemotron-3-Diarization speakers (scripts/speaker_asr/nemotron.py).
-
-    The recording is transcribed in one request without `speaker_labels`, so
-    the words -- and WER -- are the ones the native-diarization run
-    (AssemblyAIEvaluator) scores; only who-said-what differs. Words are
-    re-timed by Qwen3-ForcedAligner and assigned to Nemotron speakers exactly
-    as for nemotron-qwen3-asr and the tiny-audio pipeline. With
-    `api_word_times`, the API's own word times are used instead of re-timing.
-    """
-
-    # `-w N` overlaps the API requests; Nemotron and the aligner share one
-    # device, and concurrent Metal encoding segfaults on MPS, so the local half
-    # runs one recording at a time.
-    _local_lock = threading.Lock()
-
-    def __init__(
-        self,
-        api_key: str,
-        model: str = "universal-3-5-pro",
-        base_url: str | None = None,
-        api_word_times: bool = False,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-        self.transcriber = setup_assemblyai(api_key, model, base_url=base_url)
-        self.api_word_times = api_word_times
-
-    def transcribe(self, audio) -> tuple[str, float, dict | None]:
-        from scripts.speaker_asr.nemotron import diarize_transcript
-
-        array = np.asarray(as_16k_array(audio), dtype=np.float32)
-        start = time.time()
-        transcript = self.transcriber.transcribe(io.BytesIO(prepare_wav_bytes(audio)))
-        words = [(w.text, w.start / 1000, w.end / 1000) for w in transcript.words or []]
-        if not self.speakers:
-            return transcript.text or "", time.time() - start, None
-        if not words:
-            return "", time.time() - start, None
-        with self._local_lock:
-            text = diarize_transcript(words, array, realign=not self.api_word_times).text
-        return text, time.time() - start, None
-
-
 def speaker_text(transcript) -> str:
     """An AssemblyAI transcript's utterances as `<SPK_n>` text (plain text if none)."""
-    from scripts.speaker_asr.metrics import serialize_turns
+    from scripts.eval.speaker_metrics import serialize_turns
 
     utterances = transcript.utterances or []
     if not utterances:
         return transcript.text or ""
     return serialize_turns((u.speaker, u.text) for u in utterances)
-
-
-class SpeakerASREvaluator(Evaluator):
-    """A Qwen3-ASR checkpoint, base or speaker-ASR (scripts/speaker_asr).
-
-    A speaker-ASR checkpoint writes `<SPK_n>` turns; the base model writes
-    plain text, which scores as one speaker -- the "no diarization" floor for
-    cpWER on `ami-speakers`. The number of speaker tokens is read off the
-    checkpoint's tokenizer.
-
-    Audio longer than one chunk (`ami-speakers-long`, any recording) goes
-    through clustered long-form decoding (scripts/speaker_asr/clustered.py):
-    3-8 s chunks labelled by the model, linked across the recording by ECAPA
-    embeddings + spectral clustering. On the 16 ami-speakers-long test
-    meetings: cpWER 23.35 (WER 20.48), vs 104 for context-prefix linking.
-    """
-
-    MAX_NEW_TOKENS = 320
-
-    def __init__(self, model_path: str, **kwargs):
-        super().__init__(**kwargs)
-        from transformers import AutoProcessor
-
-        from scripts.speaker_asr.context import ContextConfig
-        from scripts.speaker_asr.model import n_speaker_tokens, register_speaker_tokens
-        from tiny_audio.turns import load_model
-
-        self.processor = AutoProcessor.from_pretrained(model_path)
-        self.n_speakers = n_speaker_tokens(self.processor) or 4
-        register_speaker_tokens(self.processor, self.n_speakers)  # base model: never emitted
-        self.model = load_model(model_path).eval()
-        # Every decode here is batch 1 (no left padding, so no fully-masked
-        # rows): sdpa is safe on MPS despite load_model's eager default.
-        self.model.set_attn_implementation("sdpa")
-        self.context = ContextConfig()
-
-    def transcribe(self, audio) -> tuple[str, float, dict | None]:
-        from scripts.speaker_asr.clustered import ClusterConfig, transcribe_clustered
-        from scripts.speaker_asr.model import transcribe_speakers
-
-        array = np.asarray(as_16k_array(audio), dtype=np.float32)
-        start = time.time()
-        if len(array) > self.context.chunk_s * 16000:
-            cfg = ClusterConfig(max_new_tokens=self.MAX_NEW_TOKENS)
-            text = transcribe_clustered(self.model, self.processor, array, cfg).text
-        else:
-            (text,) = transcribe_speakers(
-                self.model, self.processor, [array], self.n_speakers, self.MAX_NEW_TOKENS
-            )
-        return text, time.time() - start, None
-
-
-class NemotronQwenEvaluator(Evaluator):
-    """Stock Qwen3-ASR words, speakers from Nemotron-3-Diarization: the off-the-shelf baseline.
-
-    See scripts/speaker_asr/nemotron.py. A tiny-audio checkpoint needs no
-    evaluator of its own for this: LocalEvaluator calls its pipeline with
-    `return_speakers=True` on speaker datasets. Short windows and whole meetings go
-    through the same path: Nemotron is recording-level, so no linking.
-    """
-
-    ASR_MODEL_ID = "Qwen/Qwen3-ASR-0.6B-hf"
-    MAX_NEW_TOKENS = 320
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        from transformers import AutoProcessor
-
-        from scripts.speaker_asr.nemotron import qwen3_asr_transcriber
-        from tiny_audio.turns import load_model
-
-        processor = AutoProcessor.from_pretrained(self.ASR_MODEL_ID)
-        model = load_model(self.ASR_MODEL_ID).eval()
-        # Batch 1, no left padding: sdpa is safe on MPS (see SpeakerASREvaluator).
-        model.set_attn_implementation("sdpa")
-        self.asr = qwen3_asr_transcriber(model, processor, self.MAX_NEW_TOKENS)
-
-    def transcribe(self, audio) -> tuple[str, float, dict | None]:
-        from scripts.speaker_asr.nemotron import transcribe_diarized
-
-        array = np.asarray(as_16k_array(audio), dtype=np.float32)
-        start = time.time()
-        result = transcribe_diarized(self.asr, array)
-        return result.text, time.time() - start, None
 
 
 class AssemblyAIStreamingEvaluator(Evaluator):

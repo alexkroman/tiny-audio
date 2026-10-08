@@ -9,7 +9,7 @@ and launch a real training run.
 > W&B account, and a RunPod account with credit. Have `configs/experiments/stage_1.yaml` open;
 > the lecture refers to it.
 
----
+______________________________________________________________________
 
 ## Part A: Lecture (20 min)
 
@@ -18,22 +18,22 @@ and launch a real training run.
 1. **Loads the two pretrained models** from the Hub: the GLM-ASR encoder and Qwen3-0.6B.
    The decoder's master weights are kept in float32 so tiny updates aren't rounded away;
    compute runs in bfloat16.
-2. **Builds a fresh projector** and calibrates its output scale against the decoder's
+1. **Builds a fresh projector** and calibrates its output scale against the decoder's
    embedding table.
-3. **Loads the datasets** listed in the data config. This is a normal `load_dataset()` in map
+1. **Loads the datasets** listed in the data config. This is a normal `load_dataset()` in map
    mode, not streaming: everything is downloaded and cached to disk, and `datasets` keeps two
    copies (the Hub download plus its own Arrow tables). Budget about twice the download size.
-4. **Normalizes labels.** Corpora that ship all-lowercase or all-uppercase transcripts are
+1. **Normalizes labels.** Corpora that ship all-lowercase or all-uppercase transcripts are
    re-cased with a statistical truecaser so the decoder sees one consistent format. Unicode is
    cleaned up. Clips shorter than 0.8 s or longer than 19 s are dropped, as are rows whose
    label normalizes to nothing.
-5. **Collates batches** into chat-template conversations (see Class 1): audio placeholders
+1. **Collates batches** into chat-template conversations (see Class 1): audio placeholders
    plus a prompt in the user turn, the transcript in the assistant turn. Loss is computed on
    the assistant turn only.
-6. **Trains** with the Hugging Face `Trainer` and AdamW. Three parameter groups get three
+1. **Trains** with the Hugging Face `Trainer` and AdamW. Three parameter groups get three
    learning rates: projector 1e-3, decoder 2e-5, encoder none (frozen). Cosine schedule with
    warmup, gradient clipping, bf16.
-7. **Evaluates and checkpoints** every 2,000 steps. With `push_to_hub: true` every checkpoint
+1. **Evaluates and checkpoints** every 2,000 steps. With `push_to_hub: true` every checkpoint
    is uploaded to your Hub repo as it is saved, so you can evaluate mid-run from any machine.
 
 ### Key Metrics
@@ -76,9 +76,7 @@ same shape stretched or compressed along the step axis.
 | Experiment | Encoder | Decoder | What trains | Data |
 |------------|---------|---------|-------------|------|
 | `stage_1` | GLM-ASR-Nano (frozen) | Qwen3-0.6B | Projector + decoder + embeddings | `multiasr` |
-| `encoder_train` | Whisper-medium.en (**trained**) | Qwen3-0.6B (frozen) | Projector + encoder | `multiasr` |
-| `granite_qwen` | Granite Speech 470M (frozen) | Qwen3.5-2B | Projector + decoder | `multiasr` |
-| `granite_gemma` | Granite Speech 470M (frozen) | Gemma 4 E2B (frozen) | Projector only | `loquacious_medium` |
+| `granite_qwen_frozen` | Granite Speech 470M (frozen) | Qwen3.5-4B (frozen) | Projector + decoder LoRA | `multiasr` |
 | `mps_smoke` | GLM-ASR-Nano (frozen) | Qwen3-0.6B | Projector + decoder, 10 steps | `librispeech_dummy` |
 
 Every recipe is the same code with different freeze flags and model IDs. The flags:
@@ -101,7 +99,7 @@ when you want to preserve the decoder exactly:
 poetry run python scripts/train.py +experiments=stage_1 training.use_lora=true
 ```
 
----
+______________________________________________________________________
 
 ## Part B: Hands-On (40 min)
 
@@ -207,17 +205,17 @@ Note the recommended GPU and the disk figure. Both go into the next step.
 ### Exercise 4: Set Up RunPod (10 min)
 
 1. Sign up at [runpod.io](https://runpod.io) and add credit.
-2. Add your SSH key under Settings → SSH Public Keys:
+1. Add your SSH key under Settings → SSH Public Keys:
    ```bash
    ssh-keygen -t ed25519 -C "your_email@example.com"
    cat ~/.ssh/id_ed25519.pub
    ```
-3. Deploy a pod:
+1. Deploy a pod:
    - GPU: what `ta runpod plan` recommended (an A40 or A6000 class 48 GB card is typical for
      this run; drop batch size or add `training.use_lora=true` for a 24 GB card)
    - Template: **RunPod PyTorch** (the code expects the image's CUDA-enabled PyTorch)
    - Container disk: at least the disk figure from the plan, with headroom
-4. Once it's running, copy the **SSH host** and **port** from the pod's Connect panel.
+1. Once it's running, copy the **SSH host** and **port** from the pod's Connect panel.
 
 Optional shortcut: if you install `runpodctl` and set your RunPod API key,
 `ta runpod up --experiment my_run` sizes the config and creates the pod for you, and
@@ -279,7 +277,7 @@ you set `eval_steps: 500`, the first eval loss arrives at step 500.
 Your checkpoints are already on the Hub (`push_to_hub`), so there is nothing to lose by
 terminating. Re-deploying takes 5-10 minutes if you want to train again.
 
----
+______________________________________________________________________
 
 ## Local Training (Optional)
 
@@ -301,7 +299,7 @@ poetry run python scripts/train.py +experiments=my_run \
 Hydra changes into a fresh `outputs/<date>/<time>/` directory for each run, so checkpoints land
 under that directory rather than in the repo root.
 
----
+______________________________________________________________________
 
 ## Configuration Reference
 
@@ -336,28 +334,28 @@ under that directory rather than in the repo root.
 | `model.label_smoothing` | `0.1` | Applied inside the loss during training (`stage_1` sets 0.0) |
 | `model.model_dtype` | `float32` | Master weight precision |
 
----
+______________________________________________________________________
 
 ## Key Takeaways
 
 1. Training is a normal `Trainer` run with a frozen encoder and two learning rates: hot for the
    fresh projector, cool for the pretrained decoder.
-2. Data is downloaded and cached, not streamed. Plan disk at twice the download size.
-3. `ta runpod plan` replaces guesswork about GPU and disk.
-4. The loss falls hardest in the first 500 steps; the rest is refinement.
-5. **Terminate the pod when you're done.** Your checkpoints are already on the Hub.
+1. Data is downloaded and cached, not streamed. Plan disk at twice the download size.
+1. `ta runpod plan` replaces guesswork about GPU and disk.
+1. The loss falls hardest in the first 500 steps; the rest is refinement.
+1. **Terminate the pod when you're done.** Your checkpoints are already on the Hub.
 
 ## Before Class 3
 
 - [ ] Your run has pushed at least one checkpoint: check `https://huggingface.co/<hub_model_id>`
-      for `model.safetensors`
+  for `model.safetensors`
 - [ ] You've glanced at the W&B curves and can say whether the loss dropped in the first 500
-      steps
+  steps
 - [ ] The pod is stopped or terminated (or you know exactly why it's still running)
 
 If the run isn't finished by class time, that's fine. Class 3 works on any checkpoint that has
 been pushed, and falls back to the published model if you have none.
 
----
+______________________________________________________________________
 
 [← Class 1](./1-introduction-and-setup.md) | [Class 3: Evaluation →](./3-evaluation-and-deployment.md)

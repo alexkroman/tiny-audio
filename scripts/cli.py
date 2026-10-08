@@ -8,7 +8,7 @@ import typer.core
 import typer.main
 
 # Subcommands, as name -> module. Each module exposes a Typer named `app`: a
-# multi-command module (train, analysis, runpod, debug, dev) mounts as a group, and a
+# multi-command module (train, runpod, debug, dev) mounts as a group, and a
 # module with one `@app.command()` (eval, demo, deploy, push) mounts as a plain
 # command. Help text comes from the module itself, so it is written once.
 #
@@ -19,15 +19,12 @@ import typer.main
 SUBCOMMANDS: dict[str, str] = {
     "train": "scripts.train_cli",
     "eval": "scripts.eval.cli",
-    "analysis": "scripts.analysis",
     "deploy": "scripts.deploy.hf_space",
     "push": "scripts.hub.push",
     "runpod": "scripts.deploy.runpod",
     "debug": "scripts.debug.cli",
     "demo": "demo.app",
     "dev": "scripts.dev",
-    "turn-aware": "scripts.turn_aware.cli",
-    "speaker-asr": "scripts.speaker_asr.cli",
 }
 
 

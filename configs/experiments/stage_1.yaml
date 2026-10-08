@@ -116,7 +116,7 @@ training:
   # zeroes the WD pull on the rare-token tail.
   #
   # Verification: at end of this run, compare `embed_tokens` drift vs base
-  # via scripts/debug/analyze_weights.py. Healthy: drift concentrated on
+  # (per-token-row L2 of trained minus base weights). Healthy: drift concentrated on
   # common tokens, rare-Unicode token IDs (90k+) preserved. Unhealthy: max
   # drift dominates mean by >100× (rare-token-drift signature).
   freeze_text_embed_tokens: false

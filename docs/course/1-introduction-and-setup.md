@@ -5,7 +5,7 @@
 **Goal**: Understand the architecture well enough to predict tensor shapes, then get the
 published model running on your machine.
 
----
+______________________________________________________________________
 
 ## Part A: Lecture (40 min)
 
@@ -88,7 +88,7 @@ Two ideas to remember:
    With `k = 4`, 500 encoder frames become 125 audio tokens. Fewer tokens means the decoder
    does less work and its attention sees a shorter sequence.
 
-2. **Output scale**. The last linear layer's output is multiplied by a fixed constant that is
+1. **Output scale**. The last linear layer's output is multiplied by a fixed constant that is
    calibrated once, at model creation, so the projector's output has the same magnitude as
    Qwen3's word embeddings. Without it the audio tokens arrive about 13x too "loud" and the
    decoder's layers barely modify them.
@@ -116,7 +116,7 @@ the assistant turn.
 This is why the chat template matters: Qwen3-0.6B ships with one, and the training collator
 depends on it.
 
----
+______________________________________________________________________
 
 ## Part B: Hands-On (50 min)
 
@@ -213,8 +213,7 @@ The `ta` command (short for `tiny-audio`) groups every tool in the repo:
 ```bash
 poetry run ta --help            # all command groups
 poetry run ta eval --help       # evaluation options
-poetry run ta analysis --help   # high-wer, compare, entity-errors
-poetry run ta debug --help      # weight and gradient inspection
+poetry run ta debug --help      # gradient-flow check
 poetry run ta runpod --help     # cloud training (Class 2)
 poetry run ta dev --help        # lint, test, format
 ```
@@ -244,7 +243,7 @@ It writes `docs/course/examples/data_trace.html`. Open it in a browser and check
 against the table in the lecture. (A pre-generated copy is checked in if you'd rather just
 read it.)
 
----
+______________________________________________________________________
 
 ## Understanding the Code
 
@@ -287,20 +286,17 @@ configs/
 ├── training/production.yaml  # Trainer defaults: LRs, batch size, schedule, checkpointing
 ├── data/
 │   ├── multiasr.yaml         # Production mix: 10 corpora, ~3M clips
-│   ├── loquacious_medium.yaml
 │   └── librispeech_dummy.yaml  # 73 clips, for smoke tests
 └── experiments/
     ├── stage_1.yaml          # Production recipe (frozen encoder, joint projector + decoder)
-    ├── encoder_train.yaml    # Trains a Whisper encoder instead, decoder frozen
-    ├── granite_qwen.yaml     # Granite Speech encoder + Qwen3.5-2B
-    ├── granite_gemma.yaml    # Granite Speech encoder + Gemma 4
+    ├── granite_qwen_frozen.yaml  # Published model: Granite Speech encoder + LoRA on Qwen3.5
     └── mps_smoke.yaml        # 10 steps on a laptop
 ```
 
 The comments in these YAML files are unusually detailed. They record why each value is what
 it is and which experiment changed it. Read `configs/experiments/stage_1.yaml` before Class 2.
 
----
+______________________________________________________________________
 
 ## Troubleshooting
 
@@ -314,15 +310,15 @@ it is and which experiment changed it. Read `configs/experiments/stage_1.yaml` b
 | Slow inference on a laptop | Normal on CPU. Apple Silicon uses MPS automatically |
 | `flash_attention_2` warning | Expected off CUDA. The model falls back to SDPA attention |
 
----
+______________________________________________________________________
 
 ## Key Takeaways
 
 1. **Architecture**: frozen encoder, projector trained from scratch, decoder fine-tuned
    gently.
-2. **Shapes**: 50 encoder frames/s at 1280 dims become 12.5 audio tokens/s at 1024 dims.
-3. **The trick**: the decoder sees a chat whose user turn is audio tokens plus a prompt.
-4. **Tools**: the `ta` CLI wraps evaluation, analysis, training, and deployment.
+1. **Shapes**: 50 encoder frames/s at 1280 dims become 12.5 audio tokens/s at 1024 dims.
+1. **The trick**: the decoder sees a chat whose user turn is audio tokens plus a prompt.
+1. **Tools**: the `ta` CLI wraps evaluation, analysis, training, and deployment.
 
 ## Before Class 2
 
@@ -337,10 +333,10 @@ To prepare:
 - [ ] Read the comment block at the top of `configs/experiments/stage_1.yaml`
 - [ ] Create a RunPod account and add credit for a few GPU-hours
 - [ ] Create a Hugging Face **write** token (Settings → Access Tokens); Class 2 pushes
-      checkpoints to your account
+  checkpoints to your account
 - [ ] Decide which budget tier from the [course overview](./0-course-overview.md#budget)
-      you'll run
+  you'll run
 
----
+______________________________________________________________________
 
 [← Course Overview](./0-course-overview.md) | [Class 2: Training →](./2-training.md)

@@ -19,7 +19,6 @@ from scripts.eval.evaluators import (
     AppleSpeechEvaluator,
     AssemblyAIEvaluator,
     AssemblyAIModel,
-    AssemblyAINemotronEvaluator,
     AssemblyAIStreamingEvaluator,
     DeepgramEvaluator,
     ElevenLabsEvaluator,
@@ -28,9 +27,7 @@ from scripts.eval.evaluators import (
     Evaluator,
     LocalEvaluator,
     LocalStreamingEvaluator,
-    NemotronQwenEvaluator,
     SmallestEvaluator,
-    SpeakerASREvaluator,
     SwiftSDKEvaluator,
 )
 
@@ -77,10 +74,10 @@ def _dir_segment(value: str) -> str:
 
     Run directories are `{date}_{time}_{model}[_{endpoint}]_{dataset}`, and
     every consumer splits them on `_` (`scripts.utils._extract_model_from_dir`
-    takes field 2, `scripts.analysis.extract_dataset_name` takes the last).
-    An underscore inside a field silently shifts all the others: with
-    `--model-name granite_qwen` the model parses as "granite", so
-    `ta analysis compare granite_qwen` can never find the run it just wrote.
+    takes field 2, the dataset is the last). An underscore inside a field
+    silently shifts all the others: with `--model-name granite_qwen` the
+    model parses as "granite", so the run it just wrote can never be found
+    by that label.
     """
     return _DIR_SEGMENT_RE.sub("-", value).strip("-") or "unknown"
 
@@ -208,31 +205,13 @@ def expand_datasets(datasets: list[str]) -> list[str]:
 _NON_LOCAL_MODELS = frozenset(
     {
         "assemblyai",
-        "assemblyai-nemotron",
         "deepgram",
         "elevenlabs",
         "smallest",
         "apple-speech",
         "swift",
-        "nemotron-qwen3-asr",
     }
 )
-
-
-def _is_qwen3_asr(model: str) -> bool:
-    """True for a Qwen3-ASR checkpoint (base or `ta speaker-asr` trained), not an ASRModel.
-
-    Reads config.json alone (no remote code): Qwen3-ASR is a stock
-    transformers architecture, while ASRModel checkpoints declare their own
-    model_type through auto_map.
-    """
-    try:
-        from transformers import PretrainedConfig
-
-        config, _ = PretrainedConfig.get_config_dict(model)
-    except Exception:  # not a transformers checkpoint, or no config to read
-        return False
-    return config.get("model_type") == "qwen3_asr"
 
 
 def _build_evaluator(
@@ -250,7 +229,6 @@ def _build_evaluator(
     num_workers: int,
     user_prompt: str | None,
     local_code: bool = False,
-    api_word_times: bool = False,
 ) -> tuple[str, Evaluator]:
     """Construct the evaluator once for a whole sweep. Returns (model_id, evaluator).
 
@@ -272,12 +250,7 @@ def _build_evaluator(
     # no-op would be the worse failure: --local-code exists to make a working
     # tree edit visible in the WER, and ignoring it on a backend that has no
     # local code at all would read as "my change did nothing".
-    if local_code and (
-        endpoint
-        or model in _NON_LOCAL_MODELS
-        or model.startswith("swift://")
-        or _is_qwen3_asr(model)
-    ):
+    if local_code and (endpoint or model in _NON_LOCAL_MODELS or model.startswith("swift://")):
         raise typer.BadParameter(
             f"--local-code has no meaning for --model {model!r}: it swaps the "
             "modeling code bundled with a checkpoint for this checkout's, and "
@@ -301,18 +274,6 @@ def _build_evaluator(
                 base_url=base_url,
                 num_workers=num_workers,
             )
-    elif model == "assemblyai-nemotron":
-        if streaming:
-            raise typer.BadParameter("assemblyai-nemotron is evaluated offline: drop --streaming.")
-        api_key = _require_api_key(assemblyai_api_key, "--assemblyai-api-key", "ASSEMBLYAI_API_KEY")
-        model_id = f"{assemblyai_model.value}-nemotron" + ("-api-times" if api_word_times else "")
-        evaluator = AssemblyAINemotronEvaluator(
-            api_key=api_key,
-            model=assemblyai_model.value,
-            base_url=base_url,
-            api_word_times=api_word_times,
-            num_workers=num_workers,
-        )
     elif model == "deepgram":
         api_key = _require_api_key(deepgram_api_key, "--deepgram-api-key", "DEEPGRAM_API_KEY")
         model_id = "nova-3"
@@ -380,19 +341,6 @@ def _build_evaluator(
         evaluator = EndpointEvaluator(
             endpoint_url=model,
         )
-    elif model == "nemotron-qwen3-asr":
-        if streaming:
-            raise typer.BadParameter("nemotron-qwen3-asr is evaluated offline: drop --streaming.")
-        model_id = model
-        evaluator = NemotronQwenEvaluator()
-    elif _is_qwen3_asr(model):
-        if streaming:
-            raise typer.BadParameter(
-                "Qwen3-ASR checkpoints (base or speaker-ASR) are evaluated offline: "
-                "drop --streaming."
-            )
-        model_id = get_model_name(model)
-        evaluator = SpeakerASREvaluator(model_path=model)
     elif streaming:
         model_id = get_model_name(model)
         evaluator = LocalStreamingEvaluator(
@@ -421,7 +369,7 @@ def main(
         typer.Option(
             "--model",
             "-m",
-            help="Model path/ID, 'assemblyai', 'deepgram', 'elevenlabs', 'smallest', 'apple-speech', 'nemotron-qwen3-asr', or 'assemblyai-nemotron' (--assemblyai-model words, Nemotron speakers)",
+            help="Model path/ID, 'assemblyai', 'deepgram', 'elevenlabs', 'smallest', or 'apple-speech'",
         ),
     ],
     datasets: Annotated[
@@ -507,20 +455,12 @@ def main(
             "Local models only.",
         ),
     ] = False,
-    api_word_times: Annotated[
-        bool,
-        typer.Option(
-            "--api-word-times",
-            help="assemblyai-nemotron only: assign Nemotron speakers on the API's own "
-            "word times instead of re-timing words with Qwen3-ForcedAligner.",
-        ),
-    ] = False,
     model_name: Annotated[
         str | None,
         typer.Option(
             "--model-name",
             help="Override the auto-derived model label used in output dir names "
-            "and downstream `ta analysis` matching (otherwise derived from --model).",
+            "(otherwise derived from --model).",
         ),
     ] = None,
     run_id: Annotated[
@@ -528,15 +468,15 @@ def main(
         typer.Option(
             "--run-id",
             help="Reuse an existing sweep's Run ID (from its metrics.txt) to finish "
-            "datasets a crashed or truncated sweep never reached, so `ta analysis` "
-            "groups the new results with the old ones. Must match that sweep's "
+            "datasets a crashed or truncated sweep never reached, so the new "
+            "results group with the old ones. Must match that sweep's "
             "--model and --max-samples.",
         ),
     ] = None,
 ):
     """Evaluate ASR models on standard datasets."""
-    # One id for the whole sweep, written into every dataset's metrics.txt.
-    # See save_results for why `ta analysis` needs it.
+    # One id for the whole sweep, written into every dataset's metrics.txt so
+    # the datasets of one sweep can be grouped together afterwards.
     run_id = run_id or uuid.uuid4().hex[:12]
 
     # Built once, before the loop: model load / Swift build / API client setup
@@ -555,7 +495,6 @@ def main(
         num_workers=num_workers,
         user_prompt=user_prompt,
         local_code=local_code,
-        api_word_times=api_word_times,
     )
 
     for dataset_name in expand_datasets([d.value for d in datasets]):

@@ -24,11 +24,12 @@ You reuse two pretrained models and teach them to talk to each other. The projec
 only part built from nothing; the decoder gets a gentle fine-tune so it learns to read audio
 tokens. Then you publish the result to the Hugging Face Hub and put a live demo on the web.
 
----
+______________________________________________________________________
 
 ## Course Structure
 
 ### [Class 1: Introduction and Setup](./1-introduction-and-setup.md)
+
 *1.5 hours*
 
 - How an encoder, a projector, and a decoder turn audio into text
@@ -37,6 +38,7 @@ tokens. Then you publish the result to the Hugging Face Hub and put a live demo 
 - Running inference with the published model and exploring the `ta` CLI
 
 ### [Class 2: Training](./2-training.md)
+
 *1 hour, then training runs on its own*
 
 - What `scripts/train.py` does, step by step
@@ -46,6 +48,7 @@ tokens. Then you publish the result to the Hugging Face Hub and put a live demo 
 - Reading the loss and gradient curves
 
 ### [Class 3: Evaluation and Deployment](./3-evaluation-and-deployment.md)
+
 *1 hour*
 
 - Word Error Rate (WER) and text normalization
@@ -69,7 +72,7 @@ Commands, hyperparameters, troubleshooting.
 
 Key terms defined.
 
----
+______________________________________________________________________
 
 ## Budget
 
@@ -84,7 +87,7 @@ The cost of Class 2 is entirely yours to choose. Three tiers:
 `ta runpod plan` measures the GPU memory and disk any config needs before you rent anything.
 Class 2 shows you how to use it.
 
----
+______________________________________________________________________
 
 ## Requirements
 
@@ -97,15 +100,15 @@ a tiny dataset.
 
 **Cloud training (Class 2):** a RunPod account and a GPU. The class sizes it for you.
 
----
+______________________________________________________________________
 
 ## Accounts Needed
 
 1. [GitHub](https://github.com)
-2. [Hugging Face](https://huggingface.co) (create a write token for pushing checkpoints)
-3. [Weights & Biases](https://wandb.ai) (training curves)
-4. [RunPod](https://runpod.io) (Class 2 only)
+1. [Hugging Face](https://huggingface.co) (create a write token for pushing checkpoints)
+1. [Weights & Biases](https://wandb.ai) (training curves)
+1. [RunPod](https://runpod.io) (Class 2 only)
 
----
+______________________________________________________________________
 
 [Start Class 1 →](./1-introduction-and-setup.md)

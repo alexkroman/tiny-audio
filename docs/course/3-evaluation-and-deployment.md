@@ -15,7 +15,7 @@
 > The commands below refer to `$MODEL`, and to `$NAME` for its short name (the part after the
 > slash, e.g. `tiny-audio-yourname`), which is how the analysis tools identify it.
 
----
+______________________________________________________________________
 
 ## Part A: Lecture (15 min)
 
@@ -84,7 +84,7 @@ An aggregate WER tells you *how much* the model fails. To improve it you need to
 | **Inference Endpoints** | Paid GPU | A production HTTP API; the repo ships the handler |
 | **Local server** | Your hardware | Privacy, or wiring into your own app |
 
----
+______________________________________________________________________
 
 ## Part B: Hands-On (45 min)
 
@@ -117,7 +117,7 @@ Results land in `outputs/<timestamp>_<short-name>_<dataset>/`:
   raw (unnormalized) pair
 - `metrics.txt`: the corpus-level numbers
 
-The analysis commands read these directories, so don't delete them.
+Keep these directories: they are how you compare runs later.
 
 Score the published model on the same datasets so you have a comparison point:
 
@@ -127,40 +127,29 @@ poetry run ta eval -m mazesmazes/tiny-audio -n 200
 
 ### Exercise 2: Analyze Errors (15 min)
 
-**Worst samples.** The model pattern is the short name, matched exactly:
+**Worst samples.** Every sample in `results.txt` starts with a `Sample N - WER: X%` line, so
+the worst ones are a sort away:
 
 ```bash
-poetry run ta analysis high-wer $NAME --threshold 50
-poetry run ta analysis high-wer $NAME --threshold 30 --latest --output-file worst.md
+grep -h "WER:" outputs/*_${NAME}_loquacious/results.txt | sort -t: -k2 -rn | head -20
 ```
 
-Read a dozen of the worst. Sort them into buckets: bad audio, bad reference label, rare
-vocabulary, model mode failure. The bucket that dominates tells you what to fix.
+Open `results.txt` and read a dozen of the worst. Sort them into buckets: bad audio, bad
+reference label, rare vocabulary, model mode failure. The bucket that dominates tells you what
+to fix.
 
-**Compare models.** Any models you've evaluated, by short name:
+**Compare models.** Evaluate the published model on the same datasets and sample count, then
+read the corpus WER from each run's `metrics.txt`:
 
 ```bash
-poetry run ta analysis compare $NAME tiny-audio
+grep -H "^wer:" outputs/*_loquacious/metrics.txt
 ```
 
-This prints a WER table per dataset, plus breakdowns by clip length and by entity type.
-
-**Entity errors.** Build the entity index from the references in your eval runs, then list the
-samples where your model got a named entity wrong:
+**Check the gradients.** If a run misbehaved, confirm that the parts you meant to train
+actually receive gradient (and the frozen ones don't):
 
 ```bash
-poetry run ta analysis extract-entities
-poetry run ta analysis entity-errors $NAME
-poetry run ta analysis entity-errors $NAME --entity-type PERSON
-```
-
-**Inspect the weights.** If a run misbehaved, check whether training moved the decoder a
-healthy amount and whether the projector's scale drifted:
-
-```bash
-poetry run ta debug analyze-weights $MODEL
-poetry run ta debug compare-to-base $MODEL     # drift from Qwen3-0.6B, layer by layer
-poetry run ta debug analyze-lora $MODEL        # only if you trained with LoRA
+poetry run ta debug check-gradient-flow $MODEL
 ```
 
 ### Exercise 3: Check Your Hub Repo (5 min)
@@ -203,13 +192,14 @@ environment variable, so the same code serves any Tiny Audio model.
 
 1. Edit `demo/README.md`. Its front matter is the Space's card: set `title`, and change the
    `models:` list and `preload_from_hub:` to your model ID.
-2. Deploy. The command creates the Space if it doesn't exist:
+
+1. Deploy. The command creates the Space if it doesn't exist:
 
    ```bash
    poetry run ta deploy --repo-id your-username/tiny-audio-demo
    ```
 
-3. In the Space's **Settings → Variables**, add `MODEL_ID` = `your-username/tiny-audio-yourname`.
+1. In the Space's **Settings → Variables**, add `MODEL_ID` = `your-username/tiny-audio-yourname`.
    The Space restarts. (Without this it serves the published model.)
 
 The first build takes a few minutes on the free CPU tier. Inference on CPU is slow but works.
@@ -227,15 +217,17 @@ For an HTTP API on a GPU, use Inference Endpoints. The repo's `handler.py` is up
 the custom code, so the endpoint knows how to load and warm up the model:
 
 1. On your model page, choose **Deploy → Inference Endpoints**
-2. Pick a GPU and a scaling policy (scale-to-zero keeps idle cost near nothing)
-3. Create it, then call it with any HTTP client, or evaluate through it by passing the
+
+1. Pick a GPU and a scaling policy (scale-to-zero keeps idle cost near nothing)
+
+1. Create it, then call it with any HTTP client, or evaluate through it by passing the
    endpoint URL as the model:
 
    ```bash
    poetry run ta eval -m https://<your-endpoint>.endpoints.huggingface.cloud --endpoint -n 50
    ```
 
----
+______________________________________________________________________
 
 ## Advanced Evaluation
 
@@ -255,8 +247,8 @@ poetry run ta eval -m elevenlabs -d loquacious -n 200 -w 4          # scribe-v2
 poetry run ta eval -m apple-speech -d loquacious -n 200
 ```
 
-`-w` runs API calls in parallel. Then `ta analysis compare $NAME assemblyai deepgram` puts them
-side by side.
+`-w` runs API calls in parallel. Each run's `metrics.txt` holds its corpus WER, so the
+`grep` from Exercise 2 puts them side by side.
 
 ### Every Dataset at Once
 
@@ -272,7 +264,7 @@ If you still have a RunPod instance up, evaluation is much faster there:
 poetry run ta runpod eval <HOST> <PORT> -m $MODEL -d loquacious -d ami -n 500
 ```
 
----
+______________________________________________________________________
 
 ## Debugging Poor Performance
 
@@ -281,12 +273,12 @@ poetry run ta runpod eval <HOST> <PORT> -m $MODEL -d loquacious -d ami -n 500
 | High WER everywhere | Undertrained | Check the loss curve; train longer or on more data |
 | High WER on one domain | Domain gap | Add that domain's data to your data config |
 | High WER on accented speech | Training data bias | Add CommonVoice or VoxPopuli to the mix |
-| Empty or one-word outputs | Audio too quiet, or the run collapsed | Inspect the clips; check `analyze-weights` |
+| Empty or one-word outputs | Audio too quiet, or the run collapsed | Inspect the clips; run `ta debug check-gradient-flow` |
 | Runaway repetition | Decoder loop | The pipeline truncates repeats; check `max_new_tokens`; more training usually fixes it |
 | Great eval loss, bad WER | Mismatch between eval split and test set | Compare label formats; check normalization |
 | Wrong casing or punctuation but good WER | Training labels lacked them | Expected with LoquaciousSet; add cased, punctuated data |
 
----
+______________________________________________________________________
 
 ## Congratulations
 
@@ -304,10 +296,8 @@ You now have:
 - Add a second dataset to your data config, targeting the domain where you failed worst
 - Read `configs/data/multiasr.yaml` to see how the production mix was assembled, and why
   corpora were added and removed
-- Try a different encoder or decoder; `granite_qwen.yaml` shows how little changes
-- Build something with the model: the `tiny_audio/integrations/` directory has a voice-agent
-  integration to start from
+- Try a different encoder or decoder; `granite_qwen_frozen.yaml` shows how little changes
 
----
+______________________________________________________________________
 
 [← Class 2](./2-training.md) | [Quick Reference →](./4-quick-reference.md)
