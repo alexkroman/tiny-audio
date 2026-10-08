@@ -297,19 +297,17 @@ class TestPipelineCall:
         assert result["words"] == []
         assert "model not loadable" in result["timestamp_error"]
 
-    def test_speakers_from_one_nemotron_pass(
+    def test_speakers_come_from_per_speaker_streams(
         self, pipeline: ASRPipeline, chunked: list[int], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Words take the Nemotron speaker active at their time; segments come back too."""
+        """Each Nemotron speaker is transcribed on its own turn; segments come back too."""
 
         def fake_align(
             chunks: Sequence[tuple[object, str]], sample_rate: int = 16000
         ) -> list[list[AlignedWord]]:
             return [
-                [
-                    {"word": "w0a", "start": 0.5, "end": 0.9},
-                    {"word": "w0b", "start": 3.1, "end": 3.5},
-                ]
+                [{"word": w, "start": 0.5, "end": 0.9} for w in text.split()[:1]]
+                for _, text in chunks
             ]
 
         monkeypatch.setattr(QwenForcedAligner, "align_chunks", fake_align)
@@ -327,7 +325,11 @@ class TestPipelineCall:
         result = pipeline(
             {"array": self._speech(5.0, 2.0), "sampling_rate": 16000}, return_speakers=True
         )
-        assert [w["speaker"] for w in result["words"]] == ["SPEAKER_0", "SPEAKER_1"]
+        assert chunked == [int(2.5 * 16000), int(2.5 * 16000)]  # one call per speaker turn
+        assert [(w["word"], w["speaker"]) for w in result["words"]] == [
+            ("w0a", "SPEAKER_0"),
+            ("w1a", "SPEAKER_1"),
+        ]
         assert result["speaker_segments"] == [
             {"speaker": "SPEAKER_0", "start": 0.0, "end": 2.5},
             {"speaker": "SPEAKER_1", "start": 2.5, "end": 5.0},

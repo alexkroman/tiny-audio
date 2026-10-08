@@ -127,7 +127,8 @@ for word in result["words"]:
 
 Pass `return_speakers=True` to label every word with who said it. It also turns on word timestamps.
 It works on recordings of any length, keeps speaker labels consistent across hour-long meetings, and
-handles overlapping speech and up to 8 speakers.
+handles up to 8 speakers. Each speaker is transcribed separately on audio where everyone else is
+silenced, so overlapping speech is only partly handled.
 
 Diarization needs transformers installed from `main` until the next release:
 
@@ -154,8 +155,8 @@ for w in result["words"]:
 ```
 
 Speakers are numbered by when they first speak. The number of speakers is detected automatically. If
-you know it, pass `num_speakers` (exact) or `max_speakers` (an upper bound); any extra voices' words
-go to the closest kept speaker:
+you know it, pass `num_speakers` (exact) or `max_speakers` (an upper bound); voices beyond the cap
+are not transcribed:
 
 ```python
 result = pipe("call.wav", return_speakers=True, num_speakers=2)

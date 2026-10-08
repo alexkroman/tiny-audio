@@ -18,18 +18,18 @@ if TYPE_CHECKING:
     from .alignment import QwenForcedAligner
     from .asr_modeling import ASRModel
     from .asr_processing import prepend_lead_in
-    from .diarization import NemotronDiarizer
+    from .diarization import NemotronDiarizer, StreamChunk, masked_audio, pack_spans
 else:
     try:
         from .alignment import QwenForcedAligner
         from .asr_modeling import ASRModel
         from .asr_processing import prepend_lead_in
-        from .diarization import NemotronDiarizer
+        from .diarization import NemotronDiarizer, StreamChunk, masked_audio, pack_spans
     except ImportError:  # flat layout on the Hub: sibling modules, no package
         from alignment import QwenForcedAligner
         from asr_modeling import ASRModel
         from asr_processing import prepend_lead_in
-        from diarization import NemotronDiarizer
+        from diarization import NemotronDiarizer, StreamChunk, masked_audio, pack_spans
 
 # Re-export for backwards compatibility
 __all__ = [
@@ -65,6 +65,19 @@ def chunk_bounds(
         start = cut
     bounds.append((start, n))
     return bounds
+
+
+def stream_chunks(
+    audio: npt.NDArray[np.float32],
+    spans: list[tuple[int, int]],
+    sample_rate: int,
+    max_s: float = CHUNK_MAX_S,
+) -> list[tuple[int, int]]:
+    """Ranges of at most `max_s` over one speaker's `spans`; long turns cut by `chunk_bounds`."""
+    pieces: list[tuple[int, int]] = []
+    for s, e in spans:
+        pieces.extend((s + a, s + b) for a, b in chunk_bounds(audio[s:e], sample_rate, max_s))
+    return pack_spans(pieces, int(max_s * sample_rate))
 
 
 # Below this RMS (-100 dBFS) a chunk is digital silence: exact zeros, as in
@@ -172,7 +185,9 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         Args:
             inputs: Audio input (file path, dict with array/sampling_rate, etc.)
             return_timestamps: If True, return word-level timestamps (Qwen3-ForcedAligner)
-            return_speakers: If True, label every word with a speaker (Nemotron-3-Diarization)
+            return_speakers: If True, transcribe each Nemotron-3-Diarization speaker on
+                audio with the others silenced and label words by speaker (see
+                `_transcribe_streams`). Implies return_timestamps.
             user_prompt: Custom transcription prompt (default: "Transcribe: ")
             num_speakers: Exact number of speakers, if known
             max_speakers: Upper bound on the number of speakers
@@ -283,14 +298,13 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         diarization_params: _DiarizationParams,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        """Transcribe in chunks, time every word, and label speakers if requested.
+        """Transcribe in chunks and time every word; per-speaker streams if requested.
 
         Chunks of 8-18 s cut at quiet points are transcribed one by one and each
         is aligned against its own transcript (batched), then offset onto the
         recording's timeline -- so audio of any length gets every word timed,
-        and the model never sees a clip longer than it trained on. Speakers come
-        from ONE Nemotron pass over the whole recording, so labels are
-        recording-level: chunking never touches speaker identity.
+        and the model never sees a clip longer than it trained on. Speakers
+        come from `_transcribe_streams`.
         """
         audio = self._extract_audio(inputs)
         if audio is None:
@@ -298,7 +312,14 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             raise ValueError(msg)
         array = np.asarray(audio["array"], dtype=np.float32)
         sr = audio.get("sampling_rate", 16000)
+        if return_speakers:
+            return self._transcribe_streams(array, sr, diarization_params, **kwargs)
+        return self._transcribe_aligned(array, sr, **kwargs)
 
+    def _transcribe_aligned(
+        self, array: npt.NDArray[np.float32], sr: int, **kwargs: Any
+    ) -> dict[str, Any]:
+        """`{"text", "words"}` for the whole recording: chunk, transcribe, align, offset."""
         bounds = chunk_bounds(array, sr)
         texts: list[str] = [
             self._transcribe_chunk(array[s:e], sr, **kwargs)["text"] for s, e in bounds
@@ -318,20 +339,80 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         except Exception as e:
             result["words"] = []
             result["timestamp_error"] = str(e)
-
-        if return_speakers:
-            try:
-                activity = NemotronDiarizer.activity(array, sample_rate=sr)
-                keep = NemotronDiarizer.top_speakers(activity, **diarization_params)
-                result["speaker_segments"] = NemotronDiarizer.segments(activity, keep)
-                result["words"] = NemotronDiarizer.assign_speakers_to_words(
-                    result["words"], activity, keep
-                )
-            except Exception as e:
-                result["speaker_segments"] = []
-                result["diarization_error"] = str(e)
-
         return result
+
+    def _transcribe_streams(
+        self,
+        array: npt.NDArray[np.float32],
+        sr: int,
+        diarization_params: _DiarizationParams,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Per-speaker masked ASR, a zero-shot port of NeMo's `masked_asr`.
+
+        Nemotron runs first, one pass over the whole recording, so speaker ids
+        are recording-level. Each speaker is transcribed only where they talk
+        (`stream_chunks`), with everyone else zeroed (`masked_audio`); words take
+        their stream's speaker, and a word two streams both heard at once is
+        kept once (`dedupe_words`). Crosstalk under a speaker's mask is heard.
+        With at most one speaker active nothing is masked (today's exact text);
+        if diarization fails, the unmasked transcript gets `diarization_error`.
+        """
+        try:
+            activity = NemotronDiarizer.activity(array, sample_rate=sr)
+            keep = NemotronDiarizer.top_speakers(activity, **diarization_params)
+        except Exception as e:
+            result = self._transcribe_aligned(array, sr, **kwargs)
+            result["speaker_segments"] = []
+            result["diarization_error"] = str(e)
+            return result
+
+        masks = {c: activity[:, c] > NemotronDiarizer.SEGMENT_THRESHOLD for c in keep}
+        talking = [c for c in keep if masks[c].any()]
+        if len(talking) <= 1:
+            result = self._transcribe_aligned(array, sr, **kwargs)
+            name = f"SPEAKER_{keep.index(talking[0]) if talking else 0}"
+            result["words"] = [{**w, "speaker": name} for w in result["words"]]
+        else:
+            chunks: list[StreamChunk] = []
+            for c in talking:
+                spans = NemotronDiarizer.sample_spans(masks[c], sr, len(array))
+                chunks.extend(
+                    {"col": c, "start": s, "audio": masked_audio(array, spans, s, e)}
+                    for s, e in stream_chunks(array, spans, sr)
+                )
+            texts = [self._transcribe_chunk(ch["audio"], sr, **kwargs)["text"] for ch in chunks]
+            result = self._align_streams(chunks, texts, sr, masks, keep)
+            if result["words"]:
+                result["words"] = NemotronDiarizer.dedupe_words(result["words"], activity, keep)
+                result["text"] = " ".join(w["word"] for w in result["words"])
+        result["speaker_segments"] = NemotronDiarizer.segments(activity, keep)
+        return result
+
+    @staticmethod
+    def _align_streams(
+        chunks: list[StreamChunk],
+        texts: list[str],
+        sr: int,
+        masks: dict[int, npt.NDArray[np.bool_]],
+        keep: list[int],
+    ) -> dict[str, Any]:
+        """Align every stream chunk in one batch; `{"text", "words"}` merged by time.
+
+        If alignment fails the text is the chunk transcripts by start time and
+        `timestamp_error` is set.
+        """
+        try:
+            aligned = QwenForcedAligner.align_chunks(
+                [(ch["audio"], text) for ch, text in zip(chunks, texts, strict=True)],
+                sample_rate=sr,
+            )
+        except Exception as e:
+            order = sorted(range(len(chunks)), key=lambda k: chunks[k]["start"])
+            text = " ".join(texts[k] for k in order if texts[k])
+            return {"text": text, "words": [], "timestamp_error": str(e)}
+        words = NemotronDiarizer.stream_words(chunks, aligned, sr, masks, keep)
+        return {"text": " ".join(w["word"] for w in words), "words": words}
 
     def _extract_audio(self, inputs: object) -> _RawAudio | None:
         """Extract audio array from various input formats using HF utilities."""
