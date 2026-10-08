@@ -200,12 +200,8 @@ include_trailing_comma = true
 
 [tool.mypy]
 python_version = "3.12"
+strict = true
 warn_unused_configs = true
-check_untyped_defs = true
-no_implicit_optional = true
-warn_redundant_casts = true
-warn_unused_ignores = true
-warn_no_return = true
 follow_imports = "normal"
 # Installed packages that ship neither stubs nor a py.typed marker (datasets,
 # soundfile, torchaudio, fabric, nltk, ...) are analysed from source instead of
@@ -215,11 +211,27 @@ follow_untyped_imports = true
 # `spaces` and PyObjC's macOS-only frameworks.
 mypy_path = "typings"
 
+# Untyped packages analysed from source (follow_untyped_imports) re-export their
+# public API through bare `from .x import y` in __init__.py. Strict mode's
+# no_implicit_reexport would hide that API; it is a rule for our code, not theirs.
+[[tool.mypy.overrides]]
+module = ["datasets", "datasets.*", "fabric", "fabric.*", "nltk", "nltk.*"]
+implicit_reexport = true
+
 [tool.pyright]
 include = ["tiny_audio", "scripts", "tests", "demo", "docs", "typings"]
 exclude = ["**/node_modules", "**/__pycache__", "outputs", ".venv", "venv"]
-typeCheckingMode = "standard"
+typeCheckingMode = "strict"
 stubPath = "typings"
+# Packages without stubs or py.typed (datasets, soundfile, torchaudio, fabric,
+# nltk, ...) are still analysed from source (`useLibraryCodeForTypes`); this
+# rule only reports that a package ships no stubs, which is not ours to fix.
+reportMissingTypeStubs = "none"
+# Tests exercise private helpers directly; that is the point of a unit test.
+executionEnvironments = [
+  { root = "tests", reportPrivateUsage = "none" },
+  { root = "." },
+]
 
 [tool.pytest.ini_options]
 # Test discovery patterns
