@@ -221,7 +221,6 @@ include = ["tiny_audio"]
 exclude = ["**/node_modules", "**/__pycache__", "outputs", ".venv", "venv"]
 ignore = [
     "tiny_audio/asr_pipeline.py",
-    "tiny_audio/integrations/pipecat_stt.py",
 ]
 typeCheckingMode = "basic"
 reportPrivateImportUsage = false

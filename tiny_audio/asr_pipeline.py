@@ -10,23 +10,21 @@ import transformers
 from transformers.pipelines.audio_utils import ffmpeg_read
 
 try:
-    from .alignment import ForcedAligner, QwenForcedAligner
+    from .alignment import QwenForcedAligner
     from .asr_modeling import ASRModel
     from .asr_processing import prepend_lead_in
-    from .diarization import NemotronDiarizer, SpeakerDiarizer
+    from .diarization import NemotronDiarizer
 except ImportError:
-    from alignment import ForcedAligner, QwenForcedAligner  # type: ignore[no-redef]
+    from alignment import QwenForcedAligner  # type: ignore[no-redef]
     from asr_modeling import ASRModel  # type: ignore[no-redef]
     from asr_processing import prepend_lead_in  # type: ignore[no-redef]
-    from diarization import NemotronDiarizer, SpeakerDiarizer  # type: ignore[no-redef]
+    from diarization import NemotronDiarizer  # type: ignore[no-redef]
 
 # Re-export for backwards compatibility
 __all__ = [
     "ASRPipeline",
-    "ForcedAligner",
     "NemotronDiarizer",
     "QwenForcedAligner",
-    "SpeakerDiarizer",
 ]
 
 # Audio is transcribed in chunks cut at the quietest point between
