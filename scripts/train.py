@@ -45,8 +45,8 @@ from trl.import_utils import TRLExperimentalWarning
 from scripts.labels import (
     TEXT_CASE_CASED,
     TEXT_CASE_MONO,
-    _has_edge_content_tag,
-    _normalize_label,
+    has_edge_content_tag,
+    normalize_label,
 )
 from scripts.train_config import register_configs
 from tiny_audio.asr_config import (
@@ -225,7 +225,7 @@ class DatasetLoader:
         # new columns along. Same rows, same values, nothing written.
         # text_case: declares whether this source's transcripts already carry
         # case ("cased") or arrive mono-case and need recasing ("mono").
-        # Stored per row so _normalize_label does not have to re-derive a
+        # Stored per row so normalize_label does not have to re-derive a
         # source property from a single row's characters.
         # Omit it to keep the legacy per-row heuristic.
         text_case = dataset_cfg.get("text_case")
@@ -394,7 +394,7 @@ class DatasetLoader:
         ds = _transforms(ds).cast_column("audio", Audio(sampling_rate=self.sample_rate))
 
         keep_cols = {"audio", "text"}
-        # Preserve the declared casing policy so _normalize_label can use it.
+        # Preserve the declared casing policy so normalize_label can use it.
         if "_text_case" in ds.column_names:
             keep_cols = keep_cols | {"_text_case"}
         # Preserve the declared punctuation policy so _build_sample can pick
@@ -694,7 +694,7 @@ class DataCollator:
                 # Drop rows whose entire text was an annotation marker
                 # (e.g. Gigaspeech <NOISE>-only segments).
                 raw_text = f.get("text") or ""
-                if not _normalize_label(raw_text, f.get("_text_case")):
+                if not normalize_label(raw_text, f.get("_text_case")):
                     continue
                 # Drop rows whose label starts or ends with a content-bearing
                 # tag (<unk>/<foreign>/<overlap>). Stripping those yields a
@@ -702,7 +702,7 @@ class DataCollator:
                 # retains it, which supervises onset/offset truncation — the
                 # measured root cause of this recipe's Peoples regression.
                 # See scripts/labels.py _EDGE_CONTENT_TAG_RE for the rates and the evidence.
-                if _has_edge_content_tag(raw_text):
+                if has_edge_content_tag(raw_text):
                     continue
                 duration_s = audio.size / self.sample_rate
                 if duration_s > self._MAX_AUDIO_SECONDS:
@@ -734,7 +734,7 @@ class DataCollator:
 
     def _build_sample(self, feature: dict[str, Any], num_audio_tokens: int) -> ChatSample:
         """Build a single chat sample."""
-        text = _normalize_label(feature.get("text") or "", feature.get("_text_case"))
+        text = normalize_label(feature.get("text") or "", feature.get("_text_case"))
         # Prompt carries the label convention, so the punctuated and
         # unpunctuated halves of the mix stop competing for the same
         # conditioning. Undeclared sources keep the plain prompt.
@@ -1285,8 +1285,10 @@ def main(cfg: DictConfig) -> None:
     # scalar-tensor outputs into the graph instead of graph-breaking on
     # the first scalar-producing op (e.g. token_counts.max().item() in
     # _gather_audio_embeds).
-    torch._dynamo.config.cache_size_limit = 256
-    torch._dynamo.config.capture_scalar_outputs = True
+    # torch exposes these knobs only under torch._dynamo.
+    dynamo_config = torch._dynamo.config  # pyright: ignore[reportPrivateUsage]
+    dynamo_config.cache_size_limit = 256
+    dynamo_config.capture_scalar_outputs = True
     trainer = ASRTrainer(
         model=model,
         args=TrainingArguments(**get_valid_training_args(training_config)),

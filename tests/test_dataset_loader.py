@@ -82,7 +82,7 @@ class TestColumnPruning:
 
 
 class TestTextCaseColumn:
-    """`text_case` declares a source's casing policy for _normalize_label.
+    """`text_case` declares a source's casing policy for normalize_label.
 
     It has to survive _prepare_split's column pruning to reach the collator.
     """

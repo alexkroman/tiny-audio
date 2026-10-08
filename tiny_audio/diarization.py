@@ -57,7 +57,7 @@ class _AudioProcessor(Protocol):
         ...
 
 
-def _get_device() -> torch.device:
+def get_device() -> torch.device:
     """Get best available device for inference."""
     if torch.cuda.is_available():
         return torch.device("cuda")
@@ -141,7 +141,7 @@ class NemotronDiarizer:
                 raise ImportError(msg)
             model_loader = cast("_Loader[PreTrainedModel]", AutoModelForAudioFrameClassification)
             model = model_loader.from_pretrained(cls.MODEL_ID)
-            _module_to(model, _get_device())
+            _module_to(model, get_device())
             _module_eval(model)
             cls._model = model
             processor_loader = cast("_Loader[_AudioProcessor]", AutoProcessor)

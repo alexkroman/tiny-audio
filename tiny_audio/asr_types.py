@@ -13,7 +13,7 @@ from transformers.generation.utils import GenerateOutput, GenerationMixin
 
 if TYPE_CHECKING:
 
-    class GenerativeDecoder(PreTrainedModel, GenerationMixin):
+    class GenerativeDecoder(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-call]
         """Static view of the decoder: a PreTrainedModel that can generate.
 
         transformers annotates GenerationMixin's `self` with a protocol

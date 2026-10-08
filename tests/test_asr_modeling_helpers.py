@@ -20,7 +20,7 @@ from tiny_audio.asr_modeling import (
     _assert_audio_token_counts,
     _gather_audio_embeds,
     _has_sliding_window_attention,
-    _resolve_attn_implementation,
+    resolve_attn_implementation,
 )
 
 
@@ -34,26 +34,26 @@ class TestResolveAttnImplementation:
 
     @pytest.mark.parametrize("requested", [None, "eager", "sdpa"])
     def test_non_fa2_requests_pass_through(self, requested: str | None) -> None:
-        assert _resolve_attn_implementation(requested) == requested
+        assert resolve_attn_implementation(requested) == requested
 
     def test_fa2_without_cuda_is_sdpa(self) -> None:
-        assert _resolve_attn_implementation("flash_attention_2") == "sdpa"
+        assert resolve_attn_implementation("flash_attention_2") == "sdpa"
 
     def test_fa2_with_cuda_but_no_flash_attn_is_sdpa(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
         monkeypatch.setattr("transformers.utils.is_flash_attn_2_available", lambda: False)
-        assert _resolve_attn_implementation("flash_attention_2") == "sdpa"
+        assert resolve_attn_implementation("flash_attention_2") == "sdpa"
 
     def test_fa2_with_cuda_and_flash_attn_is_kept(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
         monkeypatch.setattr("transformers.utils.is_flash_attn_2_available", lambda: True)
-        assert _resolve_attn_implementation("flash_attention_2") == "flash_attention_2"
+        assert resolve_attn_implementation("flash_attention_2") == "flash_attention_2"
 
     @pytest.mark.parametrize("requested", [None, "sdpa", "flash_attention_2"])
     def test_mps_forces_eager(self, monkeypatch: pytest.MonkeyPatch, requested: str | None) -> None:
         """Without a model id there is nothing to check, so MPS stays conservative."""
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
-        assert _resolve_attn_implementation(requested) == "eager"
+        assert resolve_attn_implementation(requested) == "eager"
 
     @pytest.mark.parametrize("requested", [None, "sdpa"])
     def test_mps_keeps_request_without_sliding_window(
@@ -66,7 +66,7 @@ class TestResolveAttnImplementation:
             return False
 
         monkeypatch.setattr("tiny_audio.asr_modeling._has_sliding_window_attention", no_window)
-        assert _resolve_attn_implementation(requested, "some/model") == requested
+        assert resolve_attn_implementation(requested, "some/model") == requested
 
     @pytest.mark.parametrize("requested", [None, "sdpa"])
     def test_mps_forces_eager_with_sliding_window(
@@ -79,7 +79,7 @@ class TestResolveAttnImplementation:
             return True
 
         monkeypatch.setattr("tiny_audio.asr_modeling._has_sliding_window_attention", window)
-        assert _resolve_attn_implementation(requested, "some/model") == "eager"
+        assert resolve_attn_implementation(requested, "some/model") == "eager"
 
     def test_mps_fa2_still_degrades_to_sdpa(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A config pinning FA2 must not survive just because eager was skipped."""
@@ -89,7 +89,7 @@ class TestResolveAttnImplementation:
             return False
 
         monkeypatch.setattr("tiny_audio.asr_modeling._has_sliding_window_attention", no_window)
-        assert _resolve_attn_implementation("flash_attention_2", "some/model") == "sdpa"
+        assert resolve_attn_implementation("flash_attention_2", "some/model") == "sdpa"
 
 
 class TestHasSlidingWindowAttention:

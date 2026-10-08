@@ -9,18 +9,18 @@ import torch
 if TYPE_CHECKING:
     from .asr_modeling import ASRModel
     from .asr_pipeline import ASRPipeline
-    from .diarization import _get_device as _best_device
+    from .diarization import get_device as _best_device
 else:
     try:
         # For remote execution, imports are relative
         from .asr_modeling import ASRModel
         from .asr_pipeline import ASRPipeline
-        from .diarization import _get_device as _best_device
+        from .diarization import get_device as _best_device
     except ImportError:
         # For local execution, imports are not relative
         from asr_modeling import ASRModel
         from asr_pipeline import ASRPipeline
-        from diarization import _get_device as _best_device
+        from diarization import get_device as _best_device
 
 
 def _module_to(module: torch.nn.Module, device: torch.device) -> None:

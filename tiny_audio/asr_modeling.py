@@ -36,7 +36,6 @@ from transformers import __version__ as transformers_version
 from transformers.generation.utils import GenerateOutput, GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.utils.hub import (
-    PushToHubMixin,
     cached_file,  # pyright: ignore[reportUnknownVariableType]
 )
 
@@ -191,7 +190,7 @@ def _has_sliding_window_attention(model_id: str) -> bool:
     return bool(getattr(text_config, "sliding_window", None))
 
 
-def _resolve_attn_implementation(requested: str | None, model_id: str | None = None) -> str | None:
+def resolve_attn_implementation(requested: str | None, model_id: str | None = None) -> str | None:
     """Coerce flash_attention_2 to sdpa when CUDA isn't available, and avoid sdpa on MPS.
 
     FA2 is CUDA-only. On MPS/CPU, requesting it either errors at load or
@@ -500,25 +499,6 @@ def _log_linear_attention_backends(level: int = logging.WARNING) -> None:
 _StateDictT = TypeVar("_StateDictT", bound=dict[str, Any])
 
 
-def _push_to_hub_recording_repo_id(*args: Any, **kwargs: Any) -> str:
-    """`ASRModel.push_to_hub`: push to the Hub, pointing adapter_config at the repo.
-
-    IMPORTANT: Sets base_model_name_or_path in adapter_config.json to repo_id
-    so that transformers pipeline() can load the model correctly. Without this,
-    the pipeline tries to load from "None" which fails.
-
-    Takes `(model, repo_id, ...)` exactly like a bound `push_to_hub`. Spelled
-    with bare `*args` because that is the only wrapper signature both mypy and
-    pyright accept in place of PreTrainedModel's functools.wraps-declared one.
-    """
-    model = args[0]
-    repo_id = args[1] if len(args) > 1 else kwargs["repo_id"]
-    # Store repo_id in config so save_pretrained can access it
-    model.config.pretrained_model_path = repo_id
-    # Call parent's push_to_hub
-    return PreTrainedModel.push_to_hub(*args, **kwargs)  # type: ignore[no-any-return]
-
-
 class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-call]
     """Audio-to-text model combining an audio encoder, projector, and language model."""
 
@@ -787,7 +767,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
         LR routing.
         """
         encoder_kwargs: LoadKwargs = {
-            "attn_implementation": _resolve_attn_implementation(
+            "attn_implementation": resolve_attn_implementation(
                 config.attn_implementation, config.audio_model_id
             ),
             "low_cpu_mem_usage": True,
@@ -821,7 +801,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
 
             # Granite's block-attention implementation has no FA2 kernel and
             # raises ValueError on attn_implementation="flash_attention_2".
-            # _resolve_attn_implementation only downgrades FA2 when CUDA is
+            # resolve_attn_implementation only downgrades FA2 when CUDA is
             # absent, so on a CUDA box the inherited default would hard-fail
             # at load. Pin sdpa regardless of what the config asks for.
             granite_kwargs: LoadKwargs = {**encoder_kwargs, "attn_implementation": "sdpa"}
@@ -928,7 +908,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
     @classmethod
     def _load_language_model(cls, config: ASRConfig, dtype: torch.dtype) -> "GenerativeDecoder":
         """Load and freeze the language model."""
-        attn_implementation = _resolve_attn_implementation(
+        attn_implementation = resolve_attn_implementation(
             config.attn_implementation, config.text_model_id
         )
 
@@ -1361,7 +1341,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
             # "Norm"). This mirrors what the partial-unfreeze path already gets
             # for free via the `freeze_audio_encoder: true` branch above.
             for module in self.audio_tower.modules():
-                if isinstance(module, torch.nn.modules.batchnorm._BatchNorm):
+                if isinstance(
+                    module,
+                    (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d, nn.SyncBatchNorm),
+                ):
                     module.eval()
         if getattr(self.config, "freeze_language_model", True):
             self.language_model.train(False)
@@ -2069,12 +2052,15 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
 
         Batch 1 and uniform-length batches pad nothing and pass. `eager` is
         correct on MPS at any padding, and the bug is Metal-specific, so a CUDA
-        box is unaffected either way. `_resolve_attn_implementation` documents
+        box is unaffected either way. `resolve_attn_implementation` documents
         the measurements.
         """
         if attention_mask is None or attention_mask.device.type != "mps":
             return
-        if self.language_model.config._attn_implementation != "sdpa":
+        if (
+            self.language_model.config._attn_implementation  # pyright: ignore[reportPrivateUsage]  # transformers has no public accessor
+            != "sdpa"
+        ):
             return
         if not bool((attention_mask == 0).any()):
             return
@@ -2394,12 +2380,44 @@ class ASRModel(PreTrainedModel, GenerationMixin):  # type: ignore[no-untyped-cal
         if card_fn is not None:
             card_fn(str(output_dir))
 
-    # Declared the way PreTrainedModel declares its own push_to_hub (through
-    # functools.wraps), so the override has the type its bases expect; see
-    # `_push_to_hub_recording_repo_id` for the behaviour.
-    push_to_hub = functools.wraps(  # pyright: ignore[reportUnknownVariableType]
-        PushToHubMixin.push_to_hub
-    )(_push_to_hub_recording_repo_id)
+    # typeshed's functools._Wrapped (how PreTrainedModel declares push_to_hub) is
+    # not a descriptor, so no method can match it; the signature is the
+    # PushToHubMixin one that PreTrainedModel wraps.
+    def push_to_hub(  # type: ignore[override]
+        self,
+        repo_id: str,
+        *,
+        commit_message: str | None = None,
+        commit_description: str | None = None,
+        private: bool | None = None,
+        token: bool | str | None = None,
+        revision: str | None = None,
+        create_pr: bool = False,
+        max_shard_size: int | str | None = "50GB",
+        tags: list[str] | None = None,
+    ) -> str:
+        """Push model to HuggingFace Hub, ensuring adapter_config points to repo.
+
+        IMPORTANT: Sets base_model_name_or_path in adapter_config.json to repo_id
+        so that transformers pipeline() can load the model correctly. Without this,
+        the pipeline tries to load from "None" which fails.
+        """
+        # Store repo_id in config so save_pretrained can access it
+        self.config.pretrained_model_path = repo_id
+        # Call parent's push_to_hub. Its wrapper is an untyped (*args, **kwargs).
+        url: str = PreTrainedModel.push_to_hub(  # pyright: ignore[reportUnknownMemberType]
+            self,
+            repo_id,
+            commit_message=commit_message,
+            commit_description=commit_description,
+            private=private,
+            token=token,
+            revision=revision,
+            create_pr=create_pr,
+            max_shard_size=max_shard_size,
+            tags=tags,
+        )
+        return url
 
 
 # Register with transformers Auto classes

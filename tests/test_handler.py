@@ -7,7 +7,7 @@ import pytest
 import torch
 from pytest_mock import MockerFixture
 
-from tiny_audio.diarization import _get_device as _best_device
+from tiny_audio.diarization import get_device as _best_device
 from tiny_audio.handler import EndpointHandler
 
 

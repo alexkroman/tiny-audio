@@ -10,7 +10,7 @@ scores within 0.6 WER of the full stack).
 It is also actively masking a measured defect. 42% of the training mix declares
 `text_case: mono` and is lifted by the `truecase` library. Measured over 20,860
 non-initial words of genuinely-cased eval references, round-tripped through the
-real `_normalize_label(..., "mono")`: **2.40% receive a spurious capital**,
+real `normalize_label(..., "mono")`: **2.40% receive a spurious capital**,
 0.65% lose a legitimate one, and **23.2% of utterances carry at least one casing
 error** (`"and subscriptions revenues"` -> `"and Subscriptions revenues"`,
 `"on our IR website"` -> `"on our Ir Website"`, `NASA` -> `Nasa`). None of that

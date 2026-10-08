@@ -274,7 +274,9 @@ def synthetic_batch(
 
     audio_attention_mask: torch.Tensor = audio_out["attention_mask"]
     input_features: torch.Tensor = audio_out["input_features"]
-    enc_lengths = model._compute_encoder_output_lengths(audio_attention_mask)
+    # A probe of ASRModel internals: it reproduces what forward() computes.
+    encoder_lengths = model._compute_encoder_output_lengths  # pyright: ignore[reportPrivateUsage]
+    enc_lengths = encoder_lengths(audio_attention_mask)
     token_counts = model.projector.get_output_length(enc_lengths).to(torch.long)
 
     tok = model.tokenizer
@@ -369,7 +371,7 @@ def report(model: ASRModel, dtype: torch.dtype, device: str) -> None:
     # only exists on liger's patched forward, so it is gated on the same flag
     # ASRModel uses.
     forward_kwargs: dict[str, bool] = {}
-    if model._lm_accepts_skip_logits:
+    if model._lm_accepts_skip_logits:  # pyright: ignore[reportPrivateUsage]
         forward_kwargs["skip_logits"] = False
     outputs = model(**batch, **forward_kwargs)
     loss = outputs.loss

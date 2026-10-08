@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import cast
 
+import assemblyai as aai
 import pytest
 
 from scripts.eval.audio import TextNormalizer
 from scripts.eval.cli import ALL_DATASETS
 from scripts.eval.datasets import DATASET_REGISTRY
 from scripts.eval.evaluators.asr import speaker_text
-from scripts.eval.evaluators.base import Evaluator
+from scripts.eval.evaluators.base import Evaluator, Transcription
 from scripts.eval.speaker_metrics import (
     cp_errors,
     has_speakers,
@@ -22,24 +24,24 @@ from scripts.eval.speaker_metrics import (
 )
 
 
-def test_parse_turns_and_plain_text():
+def test_parse_turns_and_plain_text() -> None:
     text = "lead<SPK_1>Hi.<SPK_2> Hello. <SPK_3><SPK_1>Bye."
     assert parse_turns(text) == [(0, "lead"), (1, "Hi."), (2, "Hello."), (1, "Bye.")]
     assert plain_text(text) == "lead Hi. Hello. Bye."
 
 
-def test_word_errors():
+def test_word_errors() -> None:
     assert word_errors(["a", "b", "c"], ["a", "x", "c", "d"]) == 2
     assert word_errors([], ["a", "b"]) == 2
     assert word_errors(["a", "b"], []) == 2
 
 
-def test_cpwer_is_permutation_free():
+def test_cpwer_is_permutation_free() -> None:
     ref = "<SPK_1>hello there<SPK_2>good morning"
     assert cp_errors(ref, "<SPK_2>hello there<SPK_1>good morning") == (0, 4)
 
 
-def test_cpwer_charges_misattributed_words_twice():
+def test_cpwer_charges_misattributed_words_twice() -> None:
     ref = "<SPK_1>a b<SPK_2>c d"
     # 'c' given to speaker 1: a deletion from speaker 2 and an insertion on speaker 1.
     assert cp_errors(ref, "<SPK_1>a b c<SPK_2>d") == (2, 4)
@@ -47,7 +49,7 @@ def test_cpwer_charges_misattributed_words_twice():
     assert cp_errors(ref, "a b c d") == (4, 4)
 
 
-def test_speaker_metrics_separates_recognition_from_attribution():
+def test_speaker_metrics_separates_recognition_from_attribution() -> None:
     refs = ["<SPK_1>a b<SPK_2>c d", "<SPK_1>e f"]
     hyps = ["<SPK_1>a b c d", "<SPK_1>e f"]
     m = speaker_metrics(refs, hyps)
@@ -58,20 +60,20 @@ def test_speaker_metrics_separates_recognition_from_attribution():
     assert (m["cpwer_1spk"], m["cpwer_2spk"]) == (0.0, 1.0)
 
 
-def test_serialize_turns_renumbers_by_first_appearance_and_merges():
+def test_serialize_turns_renumbers_by_first_appearance_and_merges() -> None:
     turns = [("B", "Hi."), ("A", "Hello."), ("A", "How are you?"), ("C", ""), ("B", "Fine.")]
     assert serialize_turns(turns) == "<SPK_1>Hi.<SPK_2>Hello. How are you?<SPK_1>Fine."
     assert has_speakers("<SPK_3>x")
     assert not has_speakers("plain text")
 
 
-def test_assemblyai_utterances_become_speaker_text():
+def test_assemblyai_utterances_become_speaker_text() -> None:
     utt = SimpleNamespace
     transcript = SimpleNamespace(
         text="so yes", utterances=[utt(speaker="B", text="So"), utt(speaker="A", text="yes")]
     )
-    assert speaker_text(transcript) == "<SPK_1>So<SPK_2>yes"
-    assert speaker_text(SimpleNamespace(text="hi", utterances=None)) == "hi"
+    assert speaker_text(cast(aai.Transcript, transcript)) == "<SPK_1>So<SPK_2>yes"
+    assert speaker_text(cast(aai.Transcript, SimpleNamespace(text="hi", utterances=None))) == "hi"
 
 
 class _LowercaseNormalizer(TextNormalizer):
@@ -88,10 +90,10 @@ class _FixedEvaluator:
     """An Evaluator whose transcript per sample comes from a list."""
 
     @staticmethod
-    def make(predictions):
+    def make(predictions: list[str]) -> Evaluator:
         class Fixed(Evaluator):
-            def transcribe(self, audio):
-                return predictions[audio], 0.0, None
+            def transcribe(self, audio: object) -> Transcription:
+                return predictions[cast(int, audio)], 0.0, None
 
         evaluator = Fixed()
         # Whisper's normalizer downloads a spelling table; lowercasing is all
@@ -100,7 +102,7 @@ class _FixedEvaluator:
         return evaluator
 
 
-def test_eval_scores_words_without_tokens_and_adds_cpwer():
+def test_eval_scores_words_without_tokens_and_adds_cpwer() -> None:
     evaluator = _FixedEvaluator.make(["<SPK_1>hello there good morning", "<SPK_1>okay"])
     dataset = [
         {"audio": 0, "text": "<SPK_1>HELLO THERE<SPK_2>GOOD MORNING"},
@@ -115,13 +117,13 @@ def test_eval_scores_words_without_tokens_and_adds_cpwer():
     assert m["speaker_count_acc"] == 0.5
 
 
-def test_plain_datasets_get_no_speaker_metrics():
+def test_plain_datasets_get_no_speaker_metrics() -> None:
     evaluator = _FixedEvaluator.make(["hello"])
     evaluator.evaluate([{"audio": 0, "text": "hello"}])
     assert "cpwer" not in evaluator.compute_metrics()
 
 
-def test_ami_speakers_is_registered_but_not_in_all():
+def test_ami_speakers_is_registered_but_not_in_all() -> None:
     assert DATASET_REGISTRY["ami-speakers"].speakers
     assert "ami-speakers" not in ALL_DATASETS
     assert not DATASET_REGISTRY["ami"].speakers

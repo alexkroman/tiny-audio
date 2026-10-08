@@ -42,7 +42,7 @@ from transformers import TextIteratorStreamer, pipeline
 from scripts.eval.audio import LazyAudioDecoder, as_16k_array, is_str_dict, prepare_wav_bytes
 from scripts.eval.speaker_metrics import serialize_turns
 from tiny_audio.asr_config import ASRConfig
-from tiny_audio.asr_modeling import ASRModel, _resolve_attn_implementation
+from tiny_audio.asr_modeling import ASRModel, resolve_attn_implementation
 from tiny_audio.asr_pipeline import ASRPipeline
 
 from .base import (
@@ -143,7 +143,7 @@ def _resolve_local_runtime() -> tuple[int | str, str]:
     accelerated without AMX, so it is a slowdown, not a win.
 
     attn_implementation is deliberately NOT set here. ASRModel routes whatever
-    the config asks for through _resolve_attn_implementation; passing it here
+    the config asks for through resolve_attn_implementation; passing it here
     would be a second, silently diverging copy of that policy -- which is what
     it had become: the streaming evaluator asked for "sdpa" on MPS and got
     eager anyway. The kernel is instead corrected AFTER load, by
@@ -244,7 +244,7 @@ def _merge_lora_adapters(model: ASRModel) -> bool:
 def _use_sdpa_where_safe(model: ASRModel) -> None:
     """Re-apply the MPS attention policy after load, overriding the checkpoint's copy.
 
-    This duplicates what `_resolve_attn_implementation` already decided at
+    This duplicates what `resolve_attn_implementation` already decided at
     load -- deliberately, because on the default eval path that function is not
     the working tree's. `trust_remote_code` resolves the `auto_map` entry by
     importing the checkpoint's OWN `asr_modeling.py` (see
@@ -273,10 +273,11 @@ def _use_sdpa_where_safe(model: ASRModel) -> None:
     batches ragged audio on a Mac must not come through here.
     """
     text_model_id = getattr(model.config, "text_model_id", None)
-    resolved = _resolve_attn_implementation(
-        model.config.attn_implementation, model_id=text_model_id
-    )
-    if resolved is None or resolved == model.language_model.config._attn_implementation:
+    resolved = resolve_attn_implementation(model.config.attn_implementation, model_id=text_model_id)
+    # transformers exposes the active kernel only as the private config field.
+    lm_config = model.language_model.config
+    current = lm_config._attn_implementation  # pyright: ignore[reportPrivateUsage]
+    if resolved is None or resolved == current:
         return
     # transformers leaves the per-submodule dict form unparameterized.
     model.language_model.set_attn_implementation(  # pyright: ignore[reportUnknownMemberType]
@@ -312,7 +313,8 @@ def _build_local_pipeline(model_path: str, *, local_code: bool = False) -> ASRPi
     # Which code ran, and which attention kernel, are both part of what the WER
     # means -- so they are logged next to the device rather than left to infer.
     source = "working tree" if local_code else "checkpoint (trust_remote_code)"
-    resolved = pipe.model.language_model.config._attn_implementation
+    lm_config = pipe.model.language_model.config
+    resolved = lm_config._attn_implementation  # pyright: ignore[reportPrivateUsage]
     console.print(
         f"[dim]Using device: {device}, model_dtype: {model_dtype}, "
         f"code: {source}, decoder attn: {resolved}, "

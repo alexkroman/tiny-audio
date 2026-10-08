@@ -30,27 +30,27 @@ class TestScorability:
             ("123 456", False),
         ],
     )
-    def test_case_scorable(self, text, expected):
+    def test_case_scorable(self, text: str, expected: bool) -> None:
         assert is_case_scorable(text) is expected
 
     @pytest.mark.parametrize(
         ("text", "expected"),
         [("Hello, world.", True), ("hello world", False), ("Really?", True), ("", False)],
     )
-    def test_punct_scorable(self, text, expected):
+    def test_punct_scorable(self, text: str, expected: bool) -> None:
         assert is_punct_scorable(text) is expected
 
-    def test_orthographic_requires_both(self):
+    def test_orthographic_requires_both(self) -> None:
         assert is_orthographic_reference("Hello, world.") is True
         assert is_orthographic_reference("HELLO WORLD.") is False  # cased? no
         assert is_orthographic_reference("Hello world") is False  # punctuated? no
 
 
 class TestLightNormalize:
-    def test_preserves_case_and_punctuation(self):
+    def test_preserves_case_and_punctuation(self) -> None:
         assert light_normalize("  Hello,   World!  ") == "Hello, World!"
 
-    def test_reattaches_detached_punctuation(self):
+    def test_reattaches_detached_punctuation(self) -> None:
         """GigaSpeech dev ships `"yeah ."`. Without reattachment every mark
         reads as a missing trailing punct plus a spurious token, which drove
         GigaSpeech punct F1 to 4.6 as a pure tokenization artifact.
@@ -60,24 +60,24 @@ class TestLightNormalize:
 
 
 class TestCaseScoring:
-    def test_perfect_casing(self):
+    def test_perfect_casing(self) -> None:
         assert score_case("Hello World", "Hello World") == (0, 2)
 
-    def test_counts_only_case_differences(self):
+    def test_counts_only_case_differences(self) -> None:
         errors, comparable = score_case("Hello World", "hello World")
         assert (errors, comparable) == (1, 2)
 
-    def test_recognition_errors_are_excluded(self):
+    def test_recognition_errors_are_excluded(self) -> None:
         """A word we got wrong cannot also be a casing error — otherwise the
         metric would double-count substitutions."""
         errors, comparable = score_case("Hello World", "Hello Planet")
         assert comparable == 1
         assert errors == 0
 
-    def test_punctuation_does_not_count_as_a_case_error(self):
+    def test_punctuation_does_not_count_as_a_case_error(self) -> None:
         assert score_case("Hello World.", "Hello World") == (0, 2)
 
-    def test_truecase_style_spurious_capital_is_caught(self):
+    def test_truecase_style_spurious_capital_is_caught(self) -> None:
         """The exact defect this metric was built to expose."""
         errors, comparable = score_case("and subscriptions revenues", "and Subscriptions revenues")
         assert errors == 1
@@ -85,19 +85,19 @@ class TestCaseScoring:
 
 
 class TestPunctScoring:
-    def test_exact_match(self):
+    def test_exact_match(self) -> None:
         tp, pred, act = score_punct("Hello, world.", "Hello, world.")
         assert (tp, pred, act) == (2, 2, 2)
 
-    def test_missing_punctuation_is_a_recall_miss(self):
+    def test_missing_punctuation_is_a_recall_miss(self) -> None:
         tp, pred, act = score_punct("Hello, world.", "Hello world")
         assert (tp, pred, act) == (0, 0, 2)
 
-    def test_spurious_punctuation_is_a_precision_miss(self):
+    def test_spurious_punctuation_is_a_precision_miss(self) -> None:
         tp, pred, act = score_punct("Hello world", "Hello, world.")
         assert (tp, pred, act) == (0, 2, 0)
 
-    def test_wrong_mark_is_not_a_true_positive(self):
+    def test_wrong_mark_is_not_a_true_positive(self) -> None:
         tp, _, act = score_punct("Really?", "Really.")
         assert tp == 0
         assert act == 1
@@ -105,23 +105,23 @@ class TestPunctScoring:
 
 class TestAggregate:
     @staticmethod
-    def _pairs(n, ref, hyp):
+    def _pairs(n: int, ref: str, hyp: str) -> list[tuple[str, str]]:
         return [(ref, hyp)] * n
 
-    def test_monocase_corpus_reports_no_casing_number(self):
+    def test_monocase_corpus_reports_no_casing_number(self) -> None:
         """An ALL-CAPS corpus must omit the metric, not report a fake 0.0."""
         m = compute_formatting_metrics(self._pairs(50, "HELLO WORLD", "Hello world"))
         assert "case_error_rate" not in m
         assert "orthographic_wer" not in m
 
-    def test_below_floor_is_omitted(self):
+    def test_below_floor_is_omitted(self) -> None:
         m = compute_formatting_metrics(
             self._pairs(MIN_SCORABLE_SAMPLES - 1, "Hello, world.", "Hello, world.")
         )
         assert "orthographic_wer" not in m
         assert "punct_f1" not in m
 
-    def test_at_floor_is_reported(self):
+    def test_at_floor_is_reported(self) -> None:
         m = compute_formatting_metrics(
             self._pairs(MIN_SCORABLE_SAMPLES, "Hello, world.", "Hello, world.")
         )
@@ -130,7 +130,7 @@ class TestAggregate:
         assert m["case_error_rate"] == pytest.approx(0.0)
         assert m["orthographic_scored_samples"] == MIN_SCORABLE_SAMPLES
 
-    def test_allcaps_reference_does_not_inflate_orthographic_wer(self):
+    def test_allcaps_reference_does_not_inflate_orthographic_wer(self) -> None:
         """Ungated, an ALL-CAPS reference scores ~100% orthographic WER against
         correctly-cased output and poisons the pooled number (observed: 48.19
         pooled for a system whose scorable orthographic WER is 10.14)."""
@@ -138,5 +138,5 @@ class TestAggregate:
         allcaps = self._pairs(20, "HELLO WORLD", "Hello world")
         assert compute_formatting_metrics(good + allcaps)["orthographic_wer"] == pytest.approx(0.0)
 
-    def test_empty_input_is_safe(self):
+    def test_empty_input_is_safe(self) -> None:
         assert compute_formatting_metrics([]) == {}

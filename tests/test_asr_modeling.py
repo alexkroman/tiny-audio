@@ -31,7 +31,7 @@ from tiny_audio.asr_modeling import (
     _LoadStateDictResult,
     _max_attention_head_dim,
     _patch_gemma_decode_loop,
-    _resolve_attn_implementation,
+    resolve_attn_implementation,
 )
 from tiny_audio.asr_processing import ASRProcessor
 from tiny_audio.projectors import MLPAudioProjector
@@ -869,17 +869,17 @@ class TestAttnImplementationOnMps:
     def test_prefers_eager_when_mps_is_available(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
         for requested in (None, "sdpa", "flash_attention_2"):
-            assert _resolve_attn_implementation(requested) == "eager"
+            assert resolve_attn_implementation(requested) == "eager"
 
     def test_respects_an_explicit_eager_request(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
-        assert _resolve_attn_implementation("eager") == "eager"
+        assert resolve_attn_implementation("eager") == "eager"
 
     def test_leaves_non_mps_resolution_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
         monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-        assert _resolve_attn_implementation("sdpa") == "sdpa"
-        assert _resolve_attn_implementation("flash_attention_2") == "sdpa"
+        assert resolve_attn_implementation("sdpa") == "sdpa"
+        assert resolve_attn_implementation("flash_attention_2") == "sdpa"
 
 
 class TestForwardPassesReturnDict:

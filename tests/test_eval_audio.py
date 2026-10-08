@@ -12,7 +12,7 @@ from scripts.eval.audio import TextNormalizer, audio_to_wav_bytes, prepare_wav_b
 class TestAudioToWavBytes:
     """Tests for audio_to_wav_bytes function."""
 
-    def test_numpy_array_mono(self):
+    def test_numpy_array_mono(self) -> None:
         """Test conversion of mono numpy array."""
         audio = np.random.randn(16000).astype(np.float32)
         wav_bytes = audio_to_wav_bytes(audio, 16000)
@@ -25,7 +25,7 @@ class TestAudioToWavBytes:
         assert sr == 16000
         assert len(audio_back) == 16000
 
-    def test_numpy_array_stereo_squeezed(self):
+    def test_numpy_array_stereo_squeezed(self) -> None:
         """Test that stereo arrays are squeezed to mono."""
         audio = np.random.randn(1, 16000).astype(np.float32)
         wav_bytes = audio_to_wav_bytes(audio, 16000)
@@ -33,7 +33,7 @@ class TestAudioToWavBytes:
         audio_back, _sr = sf.read(io.BytesIO(wav_bytes))
         assert audio_back.ndim == 1
 
-    def test_different_sample_rates(self):
+    def test_different_sample_rates(self) -> None:
         """Test various sample rates."""
         for sr in [8000, 16000, 22050, 44100]:
             audio = np.random.randn(sr).astype(np.float32)
@@ -45,7 +45,7 @@ class TestAudioToWavBytes:
 class TestPrepareWavBytes:
     """Tests for prepare_wav_bytes function."""
 
-    def test_dict_with_array_and_sampling_rate(self):
+    def test_dict_with_array_and_sampling_rate(self) -> None:
         """Test dict format with array and sampling_rate keys."""
         audio_dict = {
             "array": np.random.randn(16000).astype(np.float32),
@@ -54,7 +54,7 @@ class TestPrepareWavBytes:
         wav_bytes = prepare_wav_bytes(audio_dict)
         assert isinstance(wav_bytes, bytes)
 
-    def test_dict_with_bytes(self):
+    def test_dict_with_bytes(self) -> None:
         """Test dict format with bytes key."""
         # Create valid WAV bytes first
         audio = np.random.randn(16000).astype(np.float32)
@@ -64,18 +64,18 @@ class TestPrepareWavBytes:
         wav_bytes = prepare_wav_bytes(audio_dict)
         assert wav_bytes == original_bytes
 
-    def test_object_with_array_attribute(self):
+    def test_object_with_array_attribute(self) -> None:
         """Test object with array and sampling_rate attributes."""
 
         class AudioObject:
-            def __init__(self):
+            def __init__(self) -> None:
                 self.array = np.random.randn(16000).astype(np.float32)
                 self.sampling_rate = 16000
 
         wav_bytes = prepare_wav_bytes(AudioObject())
         assert isinstance(wav_bytes, bytes)
 
-    def test_unsupported_format_raises_error(self):
+    def test_unsupported_format_raises_error(self) -> None:
         """Test that unsupported formats raise ValueError."""
         with pytest.raises(ValueError, match="Unsupported audio format"):
             prepare_wav_bytes("not_a_valid_audio")
@@ -88,60 +88,60 @@ class TestTextNormalizer:
     """Tests for TextNormalizer class."""
 
     @pytest.fixture
-    def normalizer(self):
+    def normalizer(self) -> TextNormalizer:
         """Create a TextNormalizer instance."""
         return TextNormalizer()
 
-    def test_lowercase(self, normalizer):
+    def test_lowercase(self, normalizer: TextNormalizer) -> None:
         """Test that text is lowercased."""
         result = normalizer.normalize("HELLO WORLD")
         assert result == result.lower()
 
-    def test_okay_normalization(self, normalizer):
+    def test_okay_normalization(self, normalizer: TextNormalizer) -> None:
         """Test 'okay' -> 'ok' normalization."""
         result = normalizer.normalize("okay")
         assert "ok" in result
         assert "okay" not in result
 
-    def test_alright_normalization(self, normalizer):
+    def test_alright_normalization(self, normalizer: TextNormalizer) -> None:
         """Test 'all right' -> 'alright' normalization."""
         result = normalizer.normalize("all right")
         assert "alright" in result
 
-    def test_kinda_normalization(self, normalizer):
+    def test_kinda_normalization(self, normalizer: TextNormalizer) -> None:
         """Test 'kinda' -> 'kind of' normalization."""
         result = normalizer.normalize("kinda")
         assert "kind of" in result
 
-    def test_contractions_expansion(self, normalizer):
+    def test_contractions_expansion(self, normalizer: TextNormalizer) -> None:
         """Test that 's contractions are expanded."""
         result = normalizer.normalize("it's")
         assert "it is" in result
 
-    def test_empty_string(self, normalizer):
+    def test_empty_string(self, normalizer: TextNormalizer) -> None:
         """Test empty string handling."""
         result = normalizer.normalize("")
         assert result == ""
 
-    def test_whitespace_only(self, normalizer):
+    def test_whitespace_only(self, normalizer: TextNormalizer) -> None:
         """Test whitespace-only strings."""
         result = normalizer.normalize("   ")
         assert result.strip() == ""
 
-    def test_numbers_preserved(self, normalizer):
+    def test_numbers_preserved(self, normalizer: TextNormalizer) -> None:
         """Test that numbers are handled consistently."""
         # The Whisper normalizer may convert numbers to words or vice versa
         result = normalizer.normalize("I have 3 apples")
         assert len(result) > 0
 
-    def test_punctuation_removal(self, normalizer):
+    def test_punctuation_removal(self, normalizer: TextNormalizer) -> None:
         """Test that punctuation is removed."""
         result = normalizer.normalize("Hello, world! How are you?")
         assert "," not in result
         assert "!" not in result
         assert "?" not in result
 
-    def test_possessive_s_is_mangled_by_whisper(self, normalizer):
+    def test_possessive_s_is_mangled_by_whisper(self, normalizer: TextNormalizer) -> None:
         """Whisper's normalizer expands ALL ``'s`` to ``is``, including
         possessives. This is a known limitation; the test pins the behavior so
         nobody re-introduces a custom ``'s -> is`` rule (which would be a no-op
@@ -150,7 +150,7 @@ class TestTextNormalizer:
         assert normalizer.normalize("john's car") == "john is car"
         assert normalizer.normalize("the company's revenue") == "the company is revenue"
 
-    def test_gigaspeech_punctuation_markers_stripped(self, normalizer):
+    def test_gigaspeech_punctuation_markers_stripped(self, normalizer: TextNormalizer) -> None:
         """Gigaspeech transcripts ship with literal ``<COMMA>`` / ``<PERIOD>`` /
         ``<QUESTIONMARK>`` / ``<EXCLAMATIONPOINT>`` / ``<UNK>`` markers in
         place of real punctuation. Whisper's normalizer drops <...> tags."""
