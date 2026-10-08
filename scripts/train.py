@@ -92,6 +92,91 @@ def _resolve_transcribe_prompt(
     return None
 
 
+def _add_source_policy_columns(ds: Dataset, dataset_cfg: DictConfig, dataset_path: str) -> Dataset:
+    """Attach the source's declared `_text_case` / `_text_punct` as constant columns."""
+    # text_case: declares whether this source's transcripts already carry
+    # case ("cased") or arrive mono-case and need recasing ("mono").
+    # Stored per row so normalize_label does not have to re-derive a
+    # source property from a single row's characters.
+    # Omit it to keep the legacy per-row heuristic.
+    text_case = dataset_cfg.get("text_case")
+    if text_case is not None:
+        if text_case not in (TEXT_CASE_MONO, TEXT_CASE_CASED):
+            msg = (
+                f"text_case must be {TEXT_CASE_MONO!r} or {TEXT_CASE_CASED!r}, "
+                f"got {text_case!r} for {dataset_path}"
+            )
+            raise ValueError(msg)
+        # @fingerprint_transform computes `new_fingerprint` when it is omitted,
+        # though `add_column` annotates it as a required argument.
+        ds = ds.add_column("_text_case", [text_case] * len(ds))  # pyright: ignore[reportCallIssue]
+
+    # text_punct: declares whether this source's transcripts carry
+    # punctuation. Deliberately separate from text_case -- they are not the
+    # same axis, and conflating them gets Gigaspeech wrong, which is
+    # ALL-CAPS (text_case: mono) yet natively punctuated. Omit it and the
+    # row gets the plain prompt, i.e. today's behaviour.
+    text_punct = dataset_cfg.get("text_punct")
+    if text_punct is not None:
+        if not isinstance(text_punct, bool):
+            msg = f"text_punct must be a bool, got {text_punct!r} for {dataset_path}"
+            raise ValueError(msg)
+        # @fingerprint_transform computes `new_fingerprint` when it is omitted,
+        # though `add_column` annotates it as a required argument.
+        ds = ds.add_column(  # pyright: ignore[reportCallIssue]
+            "_text_punct", [text_punct] * len(ds)
+        )
+    return ds
+
+
+def _validate_exclude_where(ds: Dataset, exclude_where: DictConfig, dataset_path: str) -> None:
+    """Reject an `exclude_where` rule with no criteria or a column the source lacks."""
+    column = exclude_where.get("column")
+    has_criteria = bool(exclude_where.get("values")) or any(
+        exclude_where.get(bound) is not None for bound in ("above", "below")
+    )
+    if not column or not has_criteria:
+        msg = (
+            f"exclude_where needs 'column' plus at least one of "
+            f"'values' / 'above' / 'below', got {exclude_where!r} "
+            f"for {dataset_path}"
+        )
+        raise ValueError(msg)
+    if column not in ds.column_names:
+        # Fail loudly: a silently-ignored filter would train on the
+        # rows you believe you excluded, and the mix table would lie.
+        msg = (
+            f"exclude_where column {column!r} not in {dataset_path} "
+            f"(available: {sorted(ds.column_names)})"
+        )
+        raise ValueError(msg)
+
+
+def _resolve_excluded_values(
+    names: list[Any], feature: object, column: str, dataset_path: str
+) -> set[object] | None:
+    """Map `exclude_where.values` onto the column's stored values (None if unset)."""
+    if not names:
+        return None
+    # Gigaspeech's `source` is a ClassLabel, so its rows hold ints
+    # (0=audiobook, 1=podcast, 2=youtube), NOT the label strings the
+    # datasets-server `statistics` endpoint renders. Comparing rows
+    # against the human-readable names matches nothing and silently
+    # dropped 0 of 910,140 rows. Resolve names -> ids so the config
+    # stays readable, and reject a name the column does not define.
+    if not isinstance(feature, ClassLabel):
+        return set(names)
+    # Report every bad name at once rather than dying on the first.
+    unknown = sorted(n for n in names if n not in feature.names)
+    if unknown:
+        msg = (
+            f"exclude_where value {unknown} not a label of {column!r} in "
+            f"{dataset_path} (defined: {feature.names})"
+        )
+        raise ValueError(msg)
+    return {feature.str2int(n) for n in names}
+
+
 class DatasetLoader:
     """Loads and prepares datasets for training.
 
@@ -110,6 +195,7 @@ class DatasetLoader:
         self.epoch_expansion = int(self.config.get("epoch_expansion", 1) or 1)
 
     def _prepare_split(self, dataset_cfg: DictConfig, split: str) -> Dataset:
+        """Load one split of one source and reduce it to the columns training reads."""
         dataset_path = dataset_cfg.get("path")
         if not dataset_path:
             msg = "Dataset path is required"
@@ -136,64 +222,13 @@ class DatasetLoader:
         # Pre-filter the table has no indices mapping, so add_column is a
         # zero-copy horizontal concat and the filters below simply carry the
         # new columns along. Same rows, same values, nothing written.
-        # text_case: declares whether this source's transcripts already carry
-        # case ("cased") or arrive mono-case and need recasing ("mono").
-        # Stored per row so normalize_label does not have to re-derive a
-        # source property from a single row's characters.
-        # Omit it to keep the legacy per-row heuristic.
-        text_case = dataset_cfg.get("text_case")
-        if text_case is not None:
-            if text_case not in (TEXT_CASE_MONO, TEXT_CASE_CASED):
-                msg = (
-                    f"text_case must be {TEXT_CASE_MONO!r} or {TEXT_CASE_CASED!r}, "
-                    f"got {text_case!r} for {dataset_path}"
-                )
-                raise ValueError(msg)
-            # @fingerprint_transform computes `new_fingerprint` when it is omitted,
-            # though `add_column` annotates it as a required argument.
-            ds = ds.add_column(  # pyright: ignore[reportCallIssue]
-                "_text_case", [text_case] * len(ds)
-            )
-
-        # text_punct: declares whether this source's transcripts carry
-        # punctuation. Deliberately separate from text_case -- they are not the
-        # same axis, and conflating them gets Gigaspeech wrong, which is
-        # ALL-CAPS (text_case: mono) yet natively punctuated. Omit it and the
-        # row gets the plain prompt, i.e. today's behaviour.
-        text_punct = dataset_cfg.get("text_punct")
-        if text_punct is not None:
-            if not isinstance(text_punct, bool):
-                msg = f"text_punct must be a bool, got {text_punct!r} for {dataset_path}"
-                raise ValueError(msg)
-            # @fingerprint_transform computes `new_fingerprint` when it is omitted,
-            # though `add_column` annotates it as a required argument.
-            ds = ds.add_column(  # pyright: ignore[reportCallIssue]
-                "_text_punct", [text_punct] * len(ds)
-            )
-
-        # CommonVoice strict-validated filter: Mozilla's `train` split is
-        # already up-vote validated (up_votes >= 2 AND up_votes > down_votes),
-        # but still admits clips with non-zero down_votes. Filtering to
-        # down_votes == 0 cuts the small tail of community-flagged
-        # audio/transcript mismatches. Applied to all CV splits (train +
-        # eval) for consistency with the TEDLIUM marker-filter pattern
-        # below. Guarded on column presence in case a future mirror strips
-        # the voting metadata.
-        if "common_voice" in dataset_path.lower() and "down_votes" in ds.column_names:
-
-            def _no_down_votes(dv: int) -> bool:
-                return dv == 0
-
-            ds = ds.filter(
-                _no_down_votes,
-                num_proc=self.num_proc,
-                input_columns="down_votes",
-            )
+        ds = _add_source_policy_columns(ds, dataset_cfg, dataset_path)
+        ds = self._filter_common_voice_down_votes(ds, dataset_path)
 
         # Declarative row filter on a source-metadata column, e.g.
         #   exclude_where: {column: source, values: [audiobook]}
         #   exclude_where: {column: audio_duration, above: 19.0}
-        # It must run HERE, before the keep_cols pruning below drops every
+        # It must run HERE, before _select_training_columns drops every
         # column that is not audio/text/_text_case/_text_punct -- by then the
         # column you want to filter on no longer exists.
         #
@@ -207,96 +242,97 @@ class DatasetLoader:
         # unchanged. Rows are swapped, not lost.
         exclude_where = dataset_cfg.get("exclude_where")
         if exclude_where is not None:
-            column = exclude_where.get("column")
-            names = list(exclude_where.get("values") or [])
-            # Numeric bounds, added 2026-09-20 for LibriHeavy. Semantics follow
-            # the key's name: this EXCLUDES rows, so `above: 19.0` drops rows
-            # whose value exceeds 19.0 (it is not a keep-ceiling).
-            above = exclude_where.get("above")
-            below = exclude_where.get("below")
-            if not column or (not names and above is None and below is None):
-                msg = (
-                    f"exclude_where needs 'column' plus at least one of "
-                    f"'values' / 'above' / 'below', got {exclude_where!r} "
-                    f"for {dataset_path}"
-                )
-                raise ValueError(msg)
-            if column not in ds.column_names:
-                # Fail loudly: a silently-ignored filter would train on the
-                # rows you believe you excluded, and the mix table would lie.
-                msg = (
-                    f"exclude_where column {column!r} not in {dataset_path} "
-                    f"(available: {sorted(ds.column_names)})"
-                )
-                raise ValueError(msg)
-            # Gigaspeech's `source` is a ClassLabel, so its rows hold ints
-            # (0=audiobook, 1=podcast, 2=youtube), NOT the label strings the
-            # datasets-server `statistics` endpoint renders. Comparing rows
-            # against the human-readable names matches nothing and silently
-            # dropped 0 of 910,140 rows. Resolve names -> ids so the config
-            # stays readable, and reject a name the column does not define.
-            feature = (ds.features or {}).get(column)
-            wanted: set[object] | None = None
-            if names:
-                if isinstance(feature, ClassLabel):
-                    # Report every bad name at once rather than dying on the first.
-                    unknown = sorted(n for n in names if n not in feature.names)
-                    if unknown:
-                        msg = (
-                            f"exclude_where value {unknown} not a label of {column!r} in "
-                            f"{dataset_path} (defined: {feature.names})"
-                        )
-                        raise ValueError(msg)
-                    wanted = {feature.str2int(n) for n in names}
-                else:
-                    wanted = set(names)
+            ds = self._apply_exclude_where(ds, exclude_where, dataset_path)
 
-            def _keep(
-                v: Any,
-                _wanted: set[object] | None = wanted,
-                _above: float | None = above,
-                _below: float | None = below,
-            ) -> bool:
-                excluded = (
-                    (_wanted is not None and v in _wanted)
-                    or (v is not None and _above is not None and v > _above)
-                    or (v is not None and _below is not None and v < _below)
-                )
-                return not excluded
+        ds = self._select_training_columns(ds, dataset_cfg)
+        return self._filter_ignore_markers(ds, dataset_path)
 
-            before = len(ds)
-            # `input_columns` keeps this from materialising the audio column --
-            # it matters for a duration filter over ~1.1M rows, which would
-            # otherwise decode every clip to answer a float comparison.
-            ds = ds.filter(
-                _keep,
-                num_proc=self.num_proc,
-                input_columns=column,
+    def _filter_common_voice_down_votes(self, ds: Dataset, dataset_path: str) -> Dataset:
+        """Keep only CommonVoice clips with zero down-votes (no-op for other sources)."""
+        # CommonVoice strict-validated filter: Mozilla's `train` split is
+        # already up-vote validated (up_votes >= 2 AND up_votes > down_votes),
+        # but still admits clips with non-zero down_votes. Filtering to
+        # down_votes == 0 cuts the small tail of community-flagged
+        # audio/transcript mismatches. Applied to all CV splits (train +
+        # eval) for consistency with the TEDLIUM marker-filter pattern in
+        # _filter_ignore_markers. Guarded on column presence in case a future
+        # mirror strips the voting metadata.
+        if "common_voice" not in dataset_path.lower() or "down_votes" not in ds.column_names:
+            return ds
+
+        def _no_down_votes(dv: int) -> bool:
+            return dv == 0
+
+        return ds.filter(
+            _no_down_votes,
+            num_proc=self.num_proc,
+            input_columns="down_votes",
+        )
+
+    def _apply_exclude_where(
+        self, ds: Dataset, exclude_where: DictConfig, dataset_path: str
+    ) -> Dataset:
+        """Drop the rows an `exclude_where` rule matches, failing if it matches none."""
+        column = exclude_where.get("column")
+        names = list(exclude_where.get("values") or [])
+        # Numeric bounds, added 2026-09-20 for LibriHeavy. Semantics follow
+        # the key's name: this EXCLUDES rows, so `above: 19.0` drops rows
+        # whose value exceeds 19.0 (it is not a keep-ceiling).
+        above = exclude_where.get("above")
+        below = exclude_where.get("below")
+        _validate_exclude_where(ds, exclude_where, dataset_path)
+        feature = (ds.features or {}).get(column)
+        wanted = _resolve_excluded_values(names, feature, column, dataset_path)
+
+        def _keep(
+            v: Any,
+            _wanted: set[object] | None = wanted,
+            _above: float | None = above,
+            _below: float | None = below,
+        ) -> bool:
+            excluded = (
+                (_wanted is not None and v in _wanted)
+                or (v is not None and _above is not None and v > _above)
+                or (v is not None and _below is not None and v < _below)
             )
-            dropped = before - len(ds)
-            logger.info(
-                "exclude_where on %s: dropped %d/%d rows (%s in %s, above=%s, below=%s)",
-                dataset_path,
-                dropped,
-                before,
-                column,
-                names or "-",
-                above,
-                below,
-            )
-            # A filter that matches nothing is a configuration bug, not a
-            # legitimate no-op: you asked to exclude something that is not
-            # there. Failing here costs seconds; not failing means training a
-            # full run on the mix you thought you had excluded, and only
-            # finding out from the eval.
-            if dropped == 0:
-                msg = (
-                    f"exclude_where on {dataset_path} matched 0 of {before} rows "
-                    f"({column}: values={sorted(names)} above={above} below={below}). "
-                    f"Check the column's value type and spelling -- feature is {feature!r}."
-                )
-                raise ValueError(msg)
+            return not excluded
 
+        before = len(ds)
+        # `input_columns` keeps this from materialising the audio column --
+        # it matters for a duration filter over ~1.1M rows, which would
+        # otherwise decode every clip to answer a float comparison.
+        ds = ds.filter(
+            _keep,
+            num_proc=self.num_proc,
+            input_columns=column,
+        )
+        dropped = before - len(ds)
+        logger.info(
+            "exclude_where on %s: dropped %d/%d rows (%s in %s, above=%s, below=%s)",
+            dataset_path,
+            dropped,
+            before,
+            column,
+            names or "-",
+            above,
+            below,
+        )
+        # A filter that matches nothing is a configuration bug, not a
+        # legitimate no-op: you asked to exclude something that is not
+        # there. Failing here costs seconds; not failing means training a
+        # full run on the mix you thought you had excluded, and only
+        # finding out from the eval.
+        if dropped == 0:
+            msg = (
+                f"exclude_where on {dataset_path} matched 0 of {before} rows "
+                f"({column}: values={sorted(names)} above={above} below={below}). "
+                f"Check the column's value type and spelling -- feature is {feature!r}."
+            )
+            raise ValueError(msg)
+        return ds
+
+    def _select_training_columns(self, ds: Dataset, dataset_cfg: DictConfig) -> Dataset:
+        """Rename to audio/text, cast audio to the target rate, and prune other columns."""
         col_map = {
             "text": dataset_cfg.get("text_column", "text"),
             "audio": dataset_cfg.get("audio_column", "audio"),
@@ -309,33 +345,31 @@ class DatasetLoader:
 
         ds = ds.cast_column("audio", Audio(sampling_rate=self.sample_rate))
 
-        keep_cols = {"audio", "text"}
-        # Preserve the declared casing policy so normalize_label can use it.
-        if "_text_case" in ds.column_names:
-            keep_cols = keep_cols | {"_text_case"}
-        # Preserve the declared punctuation policy so _build_sample can pick
-        # the matching prompt.
-        if "_text_punct" in ds.column_names:
-            keep_cols = keep_cols | {"_text_punct"}
+        # Preserve the declared casing policy so normalize_label can use it, and
+        # the declared punctuation policy so _build_sample can pick the
+        # matching prompt.
+        keep_cols = {"audio", "text"} | ({"_text_case", "_text_punct"} & set(ds.column_names))
         extra_cols = [c for c in (ds.column_names or []) if c not in keep_cols]
 
         if extra_cols:
             ds = ds.remove_columns(extra_cols)
+        return ds
 
+    def _filter_ignore_markers(self, ds: Dataset, dataset_path: str) -> Dataset:
+        """Drop TEDLIUM/EdAcc rows whose whole label is the unscored-region marker."""
         # Filter `ignore_time_segment_in_scoring` placeholder labels. TEDLIUM
         # uses them to mark unscored regions; EdAcc reuses the same convention
         # in its validation transcripts. Both ship rows where the entire label
         # IS that string — training on them teaches the model to emit it.
         # Case-insensitive: TEDLIUM ships lowercase, EdAcc ships uppercase.
         # Duration filtering happens in DataCollator to avoid loading all audio upfront.
-        if "tedlium" in dataset_path.lower() or "edacc" in dataset_path.lower():
+        if "tedlium" not in dataset_path.lower() and "edacc" not in dataset_path.lower():
+            return ds
 
-            def filter_ignore_marker(text: str) -> bool:
-                return text.strip().lower() != "ignore_time_segment_in_scoring"
+        def filter_ignore_marker(text: str) -> bool:
+            return text.strip().lower() != "ignore_time_segment_in_scoring"
 
-            ds = ds.filter(filter_ignore_marker, num_proc=self.num_proc, input_columns="text")
-
-        return ds
+        return ds.filter(filter_ignore_marker, num_proc=self.num_proc, input_columns="text")
 
     def _resample_to_target(self, ds: Dataset, target: int) -> Dataset:
         """Cap (downsample) or repeat-pad (upsample) to ``target`` samples.
@@ -816,82 +850,82 @@ def _require_fused_cross_entropy(model: ASRModel, cfg: DictConfig) -> None:
     raise RuntimeError(msg)
 
 
-@hydra.main(version_base=None, config_path="../configs", config_name="config")
-def main(cfg: DictConfig) -> None:
-    push_to_hub = cfg.training.get("push_to_hub") and cfg.training.get("hub_model_id")
-    if push_to_hub and not os.environ.get("HF_TOKEN"):
-        msg = (
-            "HF_TOKEN environment variable is required when push_to_hub is enabled. "
-            "Set it with: export HF_TOKEN=your_token"
-        )
-        raise ValueError(msg)
+def _init_wandb(cfg: DictConfig) -> None:
+    """Start the wandb run with the resolved config and the current git state."""
+    cfg_container = OmegaConf.to_container(cfg, resolve=True)
+    assert isinstance(cfg_container, dict)
+    # The root config's keys are the group names (model/data/training).
+    wandb_config = {str(k): v for k, v in cfg_container.items()}
+    git_commit, git_dirty = _git_state()
+    if git_commit:
+        # Surface the commit in the run config so it's queryable/filterable
+        # in the wandb UI alongside the run's hyperparameters. Wandb does
+        # capture git metadata on its own, but it lives in a separate panel
+        # and can't be used to group/filter runs.
+        wandb_config["git_commit"] = git_commit
+        wandb_config["git_dirty"] = git_dirty
+    run = wandb.init(
+        project=cfg.training.get("wandb_project", "tiny-audio"),
+        config=wandb_config,
+    )
+    if git_commit:
+        run.summary["git_commit"] = git_commit
+        run.summary["git_dirty"] = git_dirty
 
-    if cfg.training.get("report_to") == "wandb":
-        cfg_container = OmegaConf.to_container(cfg, resolve=True)
-        assert isinstance(cfg_container, dict)
-        # The root config's keys are the group names (model/data/training).
-        wandb_config = {str(k): v for k, v in cfg_container.items()}
-        git_commit, git_dirty = _git_state()
-        if git_commit:
-            # Surface the commit in the run config so it's queryable/filterable
-            # in the wandb UI alongside the run's hyperparameters. Wandb does
-            # capture git metadata on its own, but it lives in a separate panel
-            # and can't be used to group/filter runs.
-            wandb_config["git_commit"] = git_commit
-            wandb_config["git_dirty"] = git_dirty
-        run = wandb.init(
-            project=cfg.training.get("wandb_project", "tiny-audio"),
-            config=wandb_config,
-        )
-        if git_commit:
-            run.summary["git_commit"] = git_commit
-            run.summary["git_dirty"] = git_dirty
 
-    # Patch the decoder's transformers module with liger fused kernels before
-    # the LM class is instantiated. The big win is fused linear cross-entropy:
-    # instead of materializing the (B, T, V) fp32 log-softmax tensor that HF's
-    # standard CE / LabelSmoother path requires (~15GB at B=50, V=151k on
-    # Qwen3-0.6B), liger fuses lm_head @ hidden_states + softmax + CE into a
-    # single kernel with peak memory O(B·T·D). Label smoothing flows through
-    # this kernel via the loss_function's **kwargs path (see ASRModel.forward)
-    # — so set HF Trainer's label_smoothing_factor=0 in configs to bypass the
+# Decoder-family substring -> liger patcher. First match wins, so longer keys
+# are listed first.
+_LIGER_PATCHERS = (
+    ("gemma-4", "apply_liger_kernel_to_gemma4"),
+    ("qwen3.5", "apply_liger_kernel_to_qwen3_5"),
+    ("qwen3", "apply_liger_kernel_to_qwen3"),
+)
+
+
+def _apply_liger_kernels(cfg: DictConfig) -> None:
+    """Patch the decoder's transformers module with liger's fused kernels, if mapped."""
+    # Must run before the LM class is instantiated. The big win is fused
+    # linear cross-entropy: instead of materializing the (B, T, V) fp32
+    # log-softmax tensor that HF's standard CE / LabelSmoother path requires
+    # (~15GB at B=50, V=151k on Qwen3-0.6B), liger fuses lm_head @
+    # hidden_states + softmax + CE into a single kernel with peak memory
+    # O(B·T·D). Label smoothing flows through this kernel via the
+    # loss_function's **kwargs path (see ASRModel.forward) — so set HF
+    # Trainer's label_smoothing_factor=0 in configs to bypass the
     # LabelSmoother and rely on model.config.label_smoothing instead.
     #
     # The patcher is per-architecture, so it must track text_model_id. Getting
     # this wrong is not a crash but an OOM: Gemma 4's vocab is 262,144, so an
     # unfused (B, T, V) logits tensor is ~17GB at B=32/T=512 before the
-    # log_softmax copy. First match wins, so longer keys are listed first.
-    if cfg.training.get("use_liger", True):
-        liger_patchers = (
-            ("gemma-4", "apply_liger_kernel_to_gemma4"),
-            ("qwen3.5", "apply_liger_kernel_to_qwen3_5"),
-            ("qwen3", "apply_liger_kernel_to_qwen3"),
+    # log_softmax copy.
+    text_model_id = str(cfg.model.get("text_model_id", "")).lower()
+    patcher_name = next((fn for key, fn in _LIGER_PATCHERS if key in text_model_id), None)
+    if patcher_name is None:
+        logger.warning(
+            "No liger patcher mapped for text_model_id=%r — training with stock "
+            "kernels and unfused cross-entropy. Add an entry to _LIGER_PATCHERS "
+            "if this decoder has liger support.",
+            cfg.model.get("text_model_id"),
         )
-        text_model_id = str(cfg.model.get("text_model_id", "")).lower()
-        patcher_name = next((fn for key, fn in liger_patchers if key in text_model_id), None)
-        if patcher_name is None:
-            logger.warning(
-                "No liger patcher mapped for text_model_id=%r — training with stock "
-                "kernels and unfused cross-entropy. Add an entry to liger_patchers "
-                "if this decoder has liger support.",
-                cfg.model.get("text_model_id"),
-            )
-        else:
-            try:
-                if _liger_transformers is None:
-                    assert _liger_import_error is not None
-                    raise _liger_import_error
-                getattr(_liger_transformers, patcher_name)()
-                logger.info("Applied liger kernels via %s()", patcher_name)
-            except (ImportError, AttributeError) as e:
-                logger.warning(
-                    "liger-kernel unavailable or missing %s (%s) — falling back to "
-                    "stock kernels. Install with `poetry install` on Linux and pin a "
-                    "version that exports it to enable fused linear CE.",
-                    patcher_name,
-                    e,
-                )
+        return
+    try:
+        if _liger_transformers is None:
+            assert _liger_import_error is not None
+            raise _liger_import_error
+        getattr(_liger_transformers, patcher_name)()
+        logger.info("Applied liger kernels via %s()", patcher_name)
+    except (ImportError, AttributeError) as e:
+        logger.warning(
+            "liger-kernel unavailable or missing %s (%s) — falling back to "
+            "stock kernels. Install with `poetry install` on Linux and pin a "
+            "version that exports it to enable fused linear CE.",
+            patcher_name,
+            e,
+        )
 
+
+def _build_asr_config(cfg: DictConfig) -> ASRConfig:
+    """Merge `model:` with the TRAINING_MODEL_PARAMS set under `training:` into an ASRConfig."""
     model_container = OmegaConf.to_container(cfg.model, resolve=True)
     assert isinstance(model_container, dict), "model config must be a dict"
     # Keys are ModelConfig field names (scripts/train_config.py), i.e. strings.
@@ -928,9 +962,38 @@ def main(cfg: DictConfig) -> None:
     )
     # None marks a schema field the configs left unset; drop it so ASRConfig's
     # own default applies (see ModelConfig in scripts/train_config.py).
-    asr_config = ASRConfig(**{k: v for k, v in model_config_dict.items() if v is not None})
+    return ASRConfig(**{k: v for k, v in model_config_dict.items() if v is not None})
 
-    model = ASRModel(asr_config)
+
+def _disable_chat_template_thinking(model: ASRModel) -> None:
+    """Rewrite an `enable_thinking` chat template (Qwen3) so thinking is always off."""
+    # Workaround: TRL's DataCollatorForChatML doesn't pass enable_thinking=False to Qwen3.
+    # See https://github.com/huggingface/trl/issues/3387
+    chat_template = model.tokenizer.chat_template
+    if isinstance(chat_template, str) and "enable_thinking" in chat_template:
+        model.tokenizer.chat_template = chat_template.replace(
+            "enable_thinking is defined and enable_thinking is false",
+            "true",
+        )
+
+
+@hydra.main(version_base=None, config_path="../configs", config_name="config")
+def main(cfg: DictConfig) -> None:
+    push_to_hub = cfg.training.get("push_to_hub") and cfg.training.get("hub_model_id")
+    if push_to_hub and not os.environ.get("HF_TOKEN"):
+        msg = (
+            "HF_TOKEN environment variable is required when push_to_hub is enabled. "
+            "Set it with: export HF_TOKEN=your_token"
+        )
+        raise ValueError(msg)
+
+    if cfg.training.get("report_to") == "wandb":
+        _init_wandb(cfg)
+
+    if cfg.training.get("use_liger", True):
+        _apply_liger_kernels(cfg)
+
+    model = ASRModel(_build_asr_config(cfg))
 
     _require_fused_cross_entropy(model, cfg)
 
@@ -945,14 +1008,7 @@ def main(cfg: DictConfig) -> None:
     if hub_model_id := cfg.training.get("hub_model_id"):
         model.config.pretrained_model_path = hub_model_id
 
-    # Workaround: TRL's DataCollatorForChatML doesn't pass enable_thinking=False to Qwen3.
-    # See https://github.com/huggingface/trl/issues/3387
-    chat_template = model.tokenizer.chat_template
-    if isinstance(chat_template, str) and "enable_thinking" in chat_template:
-        model.tokenizer.chat_template = chat_template.replace(
-            "enable_thinking is defined and enable_thinking is false",
-            "true",
-        )
+    _disable_chat_template_thinking(model)
 
     train_dataset, val_dataset = DatasetLoader(cfg).load()
 

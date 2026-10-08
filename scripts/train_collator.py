@@ -130,51 +130,60 @@ class DataCollator:
     # than the labeled token.
     _MIN_AUDIO_SECONDS = 0.8
 
+    @staticmethod
+    def _load_mono_audio(feature: dict[str, Any]) -> npt.NDArray[Any]:
+        """Return the row's audio as a 1-D numpy array, averaging channels if needed."""
+        audio = feature["audio"]["array"]
+        if hasattr(audio, "numpy"):
+            audio = audio.numpy()
+        audio = audio.squeeze()
+        if audio.ndim > 1:
+            audio = audio.mean(axis=0)
+        return audio
+
+    def _is_trainable(self, audio: npt.NDArray[Any], feature: dict[str, Any]) -> bool:
+        """Whether a decoded row is safe to train on (see the reasons inline)."""
+        # Drop samples that would poison the gradient or break the
+        # encoder: empty / NaN audio, labels that normalize to empty
+        # (entire label was an annotation marker like <noise>), audio
+        # longer than Whisper's 30s window (label/audio mismatch via
+        # silent truncation), or sub-floor backchannels (label/audio
+        # don't actually line up — boundary-cut segments dominate the
+        # >50% WER tail). One bad sample is enough to NaN the
+        # optimizer state. Applied uniformly to train and eval — the
+        # filter is correctness, not policy, and the per-dataset eval
+        # cap (max_eval_samples_per_dataset) keeps any single dataset
+        # cluster from saturating an eval batch.
+        if audio.size == 0:
+            return False
+        if not np.isfinite(audio).all():
+            return False
+        # Drop rows whose entire text was an annotation marker
+        # (e.g. Gigaspeech <NOISE>-only segments).
+        raw_text = feature.get("text") or ""
+        if not normalize_label(raw_text, feature.get("_text_case")):
+            return False
+        # Drop rows whose label starts or ends with a content-bearing
+        # tag (<unk>/<foreign>/<overlap>). Stripping those yields a
+        # target missing its first or last spoken word while the audio
+        # retains it, which supervises onset/offset truncation — the
+        # measured root cause of this recipe's Peoples regression.
+        # See scripts/labels.py _EDGE_CONTENT_TAG_RE for the rates and the evidence.
+        if has_edge_content_tag(raw_text):
+            return False
+        duration_s = audio.size / self.sample_rate
+        return self._MIN_AUDIO_SECONDS <= duration_s <= self._MAX_AUDIO_SECONDS
+
     def _extract_audio_arrays(
         self, features: list[dict[str, Any]]
     ) -> tuple[list[npt.NDArray[Any]], list[dict[str, Any]]]:
+        """Decode each row to mono audio, keeping only rows `_is_trainable` accepts."""
         audio_arrays: list[npt.NDArray[Any]] = []
         valid_features: list[dict[str, Any]] = []
         for f in features:
             try:
-                audio = f["audio"]["array"]
-                if hasattr(audio, "numpy"):
-                    audio = audio.numpy()
-                audio = audio.squeeze()
-                if audio.ndim > 1:
-                    audio = audio.mean(axis=0)
-                # Drop samples that would poison the gradient or break the
-                # encoder: empty / NaN audio, labels that normalize to empty
-                # (entire label was an annotation marker like <noise>), audio
-                # longer than Whisper's 30s window (label/audio mismatch via
-                # silent truncation), or sub-floor backchannels (label/audio
-                # don't actually line up — boundary-cut segments dominate the
-                # >50% WER tail). One bad sample is enough to NaN the
-                # optimizer state. Applied uniformly to train and eval — the
-                # filter is correctness, not policy, and the per-dataset eval
-                # cap (max_eval_samples_per_dataset) keeps any single dataset
-                # cluster from saturating an eval batch.
-                if audio.size == 0:
-                    continue
-                if not np.isfinite(audio).all():
-                    continue
-                # Drop rows whose entire text was an annotation marker
-                # (e.g. Gigaspeech <NOISE>-only segments).
-                raw_text = f.get("text") or ""
-                if not normalize_label(raw_text, f.get("_text_case")):
-                    continue
-                # Drop rows whose label starts or ends with a content-bearing
-                # tag (<unk>/<foreign>/<overlap>). Stripping those yields a
-                # target missing its first or last spoken word while the audio
-                # retains it, which supervises onset/offset truncation — the
-                # measured root cause of this recipe's Peoples regression.
-                # See scripts/labels.py _EDGE_CONTENT_TAG_RE for the rates and the evidence.
-                if has_edge_content_tag(raw_text):
-                    continue
-                duration_s = audio.size / self.sample_rate
-                if duration_s > self._MAX_AUDIO_SECONDS:
-                    continue
-                if duration_s < self._MIN_AUDIO_SECONDS:
+                audio = self._load_mono_audio(f)
+                if not self._is_trainable(audio, f):
                     continue
                 audio_arrays.append(audio)
                 valid_features.append(f)

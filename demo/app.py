@@ -207,24 +207,118 @@ Model: <a href="https://huggingface.co/{model}" target="_blank">{model}</a></p>
 """
 
 
+def pick_device() -> int | str:
+    """The pipeline device: CUDA index 0, Apple "mps", or -1 for CPU."""
+    if torch.cuda.is_available():
+        return 0
+    if torch.backends.mps.is_available():
+        return "mps"
+    return -1
+
+
+def pipeline_kwargs(
+    show_timestamps: bool, show_diarization: bool, num_speakers: float, max_speakers: float
+) -> dict[str, Any]:
+    """Pipeline call options for the requested outputs and speaker-count hints."""
+    kwargs: dict[str, Any] = {}
+    if show_timestamps:
+        kwargs["return_timestamps"] = True
+    if show_diarization:
+        kwargs["return_speakers"] = True
+        # An exact count, or an upper bound, caps the speakers Nemotron
+        # keeps; the exact count wins if both are set. 0 means auto.
+        if num_speakers and int(num_speakers) > 0:
+            kwargs["num_speakers"] = int(num_speakers)
+        elif max_speakers and int(max_speakers) > 0:
+            kwargs["max_speakers"] = int(max_speakers)
+    return kwargs
+
+
+def warn_partial_failures(result: Mapping[str, Any]) -> None:
+    """Surface a failed timestamp or diarization stage as a UI warning."""
+    if "timestamp_error" in result:
+        gr.Warning(f"Word timestamps failed: {result['timestamp_error']}")
+    if "diarization_error" in result:
+        gr.Warning(f"Diarization failed: {result['diarization_error']}")
+
+
+def toggle_speaker_controls(on: bool) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Show the speaker-count sliders only while diarization is on: they only matter then."""
+    return gr.update(visible=on), gr.update(visible=on)
+
+
+def build_options() -> tuple[gr.Checkbox, gr.Checkbox, gr.Slider, gr.Slider]:
+    """The output toggles and speaker-count sliders, in one group."""
+    with gr.Group():
+        show_timestamps = gr.Checkbox(
+            label="Word timestamps",
+            info="Align each word to the audio",
+            value=False,
+        )
+        show_diarization = gr.Checkbox(
+            label="Speaker diarization",
+            info="Label who spoke when",
+            value=False,
+        )
+        num_speakers = gr.Slider(
+            label="Number of speakers",
+            info="Exact count if you know it; 0 detects it automatically",
+            value=0,
+            minimum=0,
+            maximum=8,
+            step=1,
+            visible=False,
+        )
+        max_speakers = gr.Slider(
+            label="Maximum speakers",
+            info="Upper bound when the exact count is unknown; 0 means no limit",
+            value=0,
+            minimum=0,
+            maximum=8,
+            step=1,
+            visible=False,
+        )
+    return show_timestamps, show_diarization, num_speakers, max_speakers
+
+
+def build_output_tabs() -> tuple[gr.Tabs, gr.Textbox, gr.HTML, gr.Dataframe, gr.Dataframe]:
+    """The result tabs: transcript, conversation, word and speaker tables."""
+    with gr.Tabs(selected="transcript") as tabs:
+        with gr.Tab("Transcript", id="transcript"):
+            output_text = gr.Textbox(
+                show_label=False,
+                placeholder="Your transcript will appear here.",
+                lines=12,
+                buttons=["copy"],
+            )
+        with gr.Tab("Conversation", id="conversation"):
+            conversation_output = gr.HTML(conversation_html(None))
+        with gr.Tab("Words", id="words"):
+            timestamps_output = gr.Dataframe(
+                headers=["Start", "End", "Speaker", "Word"],
+                show_label=False,
+                interactive=False,
+                max_height=420,
+            )
+        with gr.Tab("Speakers", id="speakers"):
+            diarization_output = gr.Dataframe(
+                headers=["Start", "End", "Speaker"],
+                show_label=False,
+                interactive=False,
+                max_height=420,
+            )
+    return tabs, output_text, conversation_output, timestamps_output, diarization_output
+
+
 def create_demo(model_path: str = "mazesmazes/tiny-audio") -> gr.Blocks:
     """Create Gradio demo interface using transformers pipeline."""
-
-    # Determine device
-    device: int | str
-    if torch.cuda.is_available():
-        device = 0
-    elif torch.backends.mps.is_available():
-        device = "mps"
-    else:
-        device = -1
 
     # Load pipeline - uses custom ASRPipeline from the model repo
     pipe = pipeline(
         "automatic-speech-recognition",
         model=model_path,
         trust_remote_code=True,
-        device=device,
+        device=pick_device(),
     )
     # Load the aligner and diarizer now, not on the first request: on ZeroGPU
     # each request runs in a forked worker, so a model first loaded there is
@@ -251,26 +345,11 @@ def create_demo(model_path: str = "mazesmazes/tiny-audio") -> gr.Blocks:
             msg = "Record or upload some audio first."
             raise gr.Error(msg)
 
-        # Build kwargs
-        kwargs: dict[str, Any] = {}
-        if show_timestamps:
-            kwargs["return_timestamps"] = True
-        if show_diarization:
-            kwargs["return_speakers"] = True
-            # An exact count, or an upper bound, caps the speakers Nemotron
-            # keeps; the exact count wins if both are set. 0 means auto.
-            if num_speakers and int(num_speakers) > 0:
-                kwargs["num_speakers"] = int(num_speakers)
-            elif max_speakers and int(max_speakers) > 0:
-                kwargs["max_speakers"] = int(max_speakers)
+        kwargs = pipeline_kwargs(show_timestamps, show_diarization, num_speakers, max_speakers)
 
         # Transcribe the audio (on the GPU, on ZeroGPU)
         result = run_pipeline(audio, kwargs)
-
-        if "timestamp_error" in result:
-            gr.Warning(f"Word timestamps failed: {result['timestamp_error']}")
-        if "diarization_error" in result:
-            gr.Warning(f"Diarization failed: {result['diarization_error']}")
+        warn_partial_failures(result)
 
         words = word_rows(result.get("words")) if show_timestamps or show_diarization else []
         segments = segment_rows(result.get("speaker_segments")) if show_diarization else []
@@ -292,66 +371,14 @@ def create_demo(model_path: str = "mazesmazes/tiny-audio") -> gr.Blocks:
                     label="Audio",
                 )
 
-                with gr.Group():
-                    show_timestamps = gr.Checkbox(
-                        label="Word timestamps",
-                        info="Align each word to the audio",
-                        value=False,
-                    )
-                    show_diarization = gr.Checkbox(
-                        label="Speaker diarization",
-                        info="Label who spoke when",
-                        value=False,
-                    )
-                    num_speakers = gr.Slider(
-                        label="Number of speakers",
-                        info="Exact count if you know it; 0 detects it automatically",
-                        value=0,
-                        minimum=0,
-                        maximum=8,
-                        step=1,
-                        visible=False,
-                    )
-                    max_speakers = gr.Slider(
-                        label="Maximum speakers",
-                        info="Upper bound when the exact count is unknown; 0 means no limit",
-                        value=0,
-                        minimum=0,
-                        maximum=8,
-                        step=1,
-                        visible=False,
-                    )
+                show_timestamps, show_diarization, num_speakers, max_speakers = build_options()
 
                 process_btn = gr.Button("Transcribe", variant="primary", size="lg")
 
-            with gr.Column(scale=3, min_width=400), gr.Tabs(selected="transcript") as tabs:
-                with gr.Tab("Transcript", id="transcript"):
-                    output_text = gr.Textbox(
-                        show_label=False,
-                        placeholder="Your transcript will appear here.",
-                        lines=12,
-                        buttons=["copy"],
-                    )
-                with gr.Tab("Conversation", id="conversation"):
-                    conversation_output = gr.HTML(conversation_html(None))
-                with gr.Tab("Words", id="words"):
-                    timestamps_output = gr.Dataframe(
-                        headers=["Start", "End", "Speaker", "Word"],
-                        show_label=False,
-                        interactive=False,
-                        max_height=420,
-                    )
-                with gr.Tab("Speakers", id="speakers"):
-                    diarization_output = gr.Dataframe(
-                        headers=["Start", "End", "Speaker"],
-                        show_label=False,
-                        interactive=False,
-                        max_height=420,
-                    )
-
-        # The speaker controls only matter when diarization is on
-        def toggle_speaker_controls(on: bool) -> tuple[dict[str, Any], dict[str, Any]]:
-            return gr.update(visible=on), gr.update(visible=on)
+            with gr.Column(scale=3, min_width=400):
+                tabs, output_text, conversation_output, timestamps_output, diarization_output = (
+                    build_output_tabs()
+                )
 
         show_diarization.change(
             fn=toggle_speaker_controls,

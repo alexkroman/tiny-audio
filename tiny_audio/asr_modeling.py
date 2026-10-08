@@ -470,55 +470,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # this line left ASRConfig's 12-gram loop guard inert: the value was
         # set on the config, serialized into config.json, and never consulted.
         self.generation_config.no_repeat_ngram_size = config.no_repeat_ngram_size
-        # Set EOS tokens, filtering out any that don't exist in the tokenizer.
-        # `convert_tokens_to_ids` reports "not in vocab" inconsistently: Qwen-
-        # style tokenizers return None, while Gemma's returns unk_token_id.
-        # Filtering on None alone left Gemma with eos_token_id=[unk, unk], so
-        # generation never stopped and every sample ran to max_new_tokens.
-        #
-        # The membership test is a name round-trip, NOT `id == unk_token_id`:
-        # in GPT-2-lineage tokenizers (SmolLM2, Qwen) unk_token *is*
-        # "<|endoftext|>", so comparing ids would discard a legitimate stop
-        # token here while fixing Gemma. A token that fell back to unk comes
-        # back under unk's name; one that is really in the vocab comes back
-        # as itself.
-        #
-        # The name list alone is not enough, and silently produced garbage on
-        # Gemma 4: that template dropped Gemma 2/3's "<end_of_turn>" for a new
-        # "<|turn>role\n ... <turn|>\n" scheme, so all three probes missed and
-        # eos collapsed to the bare "<eos>" -- a token the template never
-        # emits. Training taught the model to close its turn with "<turn|>"
-        # (id 106) and generation then ignored it, running every sample to
-        # max_new_tokens and burying the transcript under 250 copies of
-        # "<turn|>" that `skip_special_tokens` silently swallowed.
-        #
-        # So derive the real terminator from the template instead of guessing
-        # its name: render an assistant turn holding a sentinel and take the
-        # first token that follows it. That token is the turn closer by
-        # construction, for any decoder, including ones released after this
-        # code was written. The name probes stay as a fallback for tokenizers
-        # whose template renders no trailing special token.
-        eos_ids: list[int] = []
-        derived = self._derive_turn_end_token_id()
-        if derived is not None:
-            eos_ids.append(derived)
-        for token in ("<|im_end|>", "<|endoftext|>", "<end_of_turn>"):
-            token_id = self.tokenizer.convert_tokens_to_ids(token)
-            # A single token name maps to a single id (None when unknown).
-            if (
-                not isinstance(token_id, int)
-                or self.tokenizer.convert_ids_to_tokens(token_id) != token
-            ):
-                continue
-            if token_id not in eos_ids:
-                eos_ids.append(token_id)
-        # The chat-template stop tokens above are additions, not replacements:
-        # the tokenizer's own EOS is always a valid stop and is the only one
-        # left for a decoder using none of those three templates.
-        tokenizer_eos = self.tokenizer.eos_token_id
-        if isinstance(tokenizer_eos, int) and tokenizer_eos not in eos_ids:
-            eos_ids.append(tokenizer_eos)
-        self.generation_config.eos_token_id = eos_ids
+        self.generation_config.eos_token_id = self._resolve_eos_token_ids()
         self.generation_config.pad_token_id = self.tokenizer.pad_token_id
 
         # Feature extractor for audio preprocessing
@@ -991,6 +943,58 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 cfg.pad_token_id = self.tokenizer.pad_token_id
                 cfg.eos_token_id = self.tokenizer.eos_token_id
                 cfg.bos_token_id = self.tokenizer.bos_token_id
+
+    def _resolve_eos_token_ids(self) -> list[int]:
+        """Collect the ids generation stops on: turn closer, known end tokens, tokenizer EOS."""
+        # Candidates that don't exist in the tokenizer are filtered out.
+        # `convert_tokens_to_ids` reports "not in vocab" inconsistently: Qwen-
+        # style tokenizers return None, while Gemma's returns unk_token_id.
+        # Filtering on None alone left Gemma with eos_token_id=[unk, unk], so
+        # generation never stopped and every sample ran to max_new_tokens.
+        #
+        # The membership test is a name round-trip, NOT `id == unk_token_id`:
+        # in GPT-2-lineage tokenizers (SmolLM2, Qwen) unk_token *is*
+        # "<|endoftext|>", so comparing ids would discard a legitimate stop
+        # token here while fixing Gemma. A token that fell back to unk comes
+        # back under unk's name; one that is really in the vocab comes back
+        # as itself.
+        #
+        # The name list alone is not enough, and silently produced garbage on
+        # Gemma 4: that template dropped Gemma 2/3's "<end_of_turn>" for a new
+        # "<|turn>role\n ... <turn|>\n" scheme, so all three probes missed and
+        # eos collapsed to the bare "<eos>" -- a token the template never
+        # emits. Training taught the model to close its turn with "<turn|>"
+        # (id 106) and generation then ignored it, running every sample to
+        # max_new_tokens and burying the transcript under 250 copies of
+        # "<turn|>" that `skip_special_tokens` silently swallowed.
+        #
+        # So derive the real terminator from the template instead of guessing
+        # its name: render an assistant turn holding a sentinel and take the
+        # first token that follows it. That token is the turn closer by
+        # construction, for any decoder, including ones released after this
+        # code was written. The name probes stay as a fallback for tokenizers
+        # whose template renders no trailing special token.
+        eos_ids: list[int] = []
+        derived = self._derive_turn_end_token_id()
+        if derived is not None:
+            eos_ids.append(derived)
+        for token in ("<|im_end|>", "<|endoftext|>", "<end_of_turn>"):
+            token_id = self.tokenizer.convert_tokens_to_ids(token)
+            # A single token name maps to a single id (None when unknown).
+            if (
+                not isinstance(token_id, int)
+                or self.tokenizer.convert_ids_to_tokens(token_id) != token
+            ):
+                continue
+            if token_id not in eos_ids:
+                eos_ids.append(token_id)
+        # The chat-template stop tokens above are additions, not replacements:
+        # the tokenizer's own EOS is always a valid stop and is the only one
+        # left for a decoder using none of those three templates.
+        tokenizer_eos = self.tokenizer.eos_token_id
+        if isinstance(tokenizer_eos, int) and tokenizer_eos not in eos_ids:
+            eos_ids.append(tokenizer_eos)
+        return eos_ids
 
     def _derive_turn_end_token_id(self) -> int | None:
         """Return the token id the chat template uses to close an assistant turn.
