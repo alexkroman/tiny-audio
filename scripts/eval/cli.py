@@ -83,7 +83,7 @@ def _dir_segment(value: str) -> str:
     """Sanitize one `_`-delimited field of a run directory name.
 
     Run directories are `{date}_{time}_{model}[_{endpoint}]_{dataset}`, and
-    every consumer splits them on `_` (`scripts.utils._extract_model_from_dir`
+    every consumer splits them on `_` (`scripts.utils.extract_model_from_dir`
     takes field 2, the dataset is the last). An underscore inside a field
     silently shifts all the others: with `--model-name granite_qwen` the
     model parses as "granite", so the run it just wrote can never be found
