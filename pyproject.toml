@@ -64,7 +64,10 @@ python = ">=3.12,<3.13"
 torch = "~2.8.0"
 soundfile = ">=0.12.1"
 librosa = ">=0.10.0"
-transformers = ">=5.0.0"
+# transformers main after 5.17: Nemotron-3-Diarization (nemotron3_diarization)
+# is not in a release yet. Same commit as requirements.txt and
+# demo/requirements.txt, the one the diarization pipeline was verified on.
+transformers = { git = "https://github.com/huggingface/transformers.git", rev = "91ea1192a00e0ebb684400434375fbd2345c8449" }
 datasets = { extras = ["audio"], version = ">=3.0.0,<4.0.0" }
 jiwer = "*"
 attrs = "*"
@@ -78,8 +81,8 @@ assemblyai = "*"
 deepgram-sdk = "*"
 typer = ">=0.19.2"
 trl = ">=0.26.0"
-peft = ">=0.13.0"                                             # LoRA adapters for Stage 2 fine-tuning
-torchaudio = "~2.8.0"                                         # torchaudio's major.minor must match torch's
+peft = ">=0.13.0"                                                                                                            # LoRA adapters for Stage 2 fine-tuning
+torchaudio = "~2.8.0"                                                                                                        # torchaudio's major.minor must match torch's
 # >=0.8.0, NOT the previous >=0.5.0. `apply_liger_kernel_to_qwen3_5` first
 # ships in 0.8.0 (verified against the wheels: 0.7.0 does not export it), and
 # without it scripts/train.py's patcher lookup raises AttributeError, gets

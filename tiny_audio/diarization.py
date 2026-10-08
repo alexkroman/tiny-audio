@@ -1,18 +1,21 @@
 """Speaker diarization with NVIDIA Nemotron-3-Diarization."""
 
 import importlib.util
-from typing import Any, Protocol, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict
 
 import numpy as np
 import numpy.typing as npt
 import torch
 import torchaudio
-from transformers import (
-    AutoModelForAudioFrameClassification,
-    AutoProcessor,
-    BatchFeature,
-    PreTrainedModel,
-)
+from transformers import AutoModelForAudioFrameClassification, AutoProcessor
+
+if TYPE_CHECKING:
+    # In transformers main after 5.17; loaded through the Auto classes at runtime
+    # so an older build reaches get_instance's install hint instead of failing here.
+    from transformers import (
+        Nemotron3DiarizationForAudioFrameClassification,
+        Nemotron3DiarizationProcessor,
+    )
 
 
 class SpeakerSegment(TypedDict):
@@ -21,14 +24,6 @@ class SpeakerSegment(TypedDict):
     speaker: str
     start: float
     end: float
-
-
-class _AudioProcessor(Protocol):
-    """What `activity` uses of the Nemotron processor (its class ships after 5.17)."""
-
-    def __call__(self, audio: npt.NDArray[np.float32], *, sampling_rate: int) -> BatchFeature:
-        """Turn 16 kHz mono audio into model inputs."""
-        ...
 
 
 def get_device() -> torch.device:
@@ -80,11 +75,13 @@ class NemotronDiarizer:
     FRAME_S = 0.01
     SEGMENT_THRESHOLD = 0.5  # a speaker's segment = frames above this
     MIN_WORD_ACTIVITY = 0.1  # below this nobody is heard: the word inherits its neighbour
-    _model: PreTrainedModel | None = None
-    _processor: _AudioProcessor | None = None
+    _model: "Nemotron3DiarizationForAudioFrameClassification | None" = None
+    _processor: "Nemotron3DiarizationProcessor | None" = None
 
     @classmethod
-    def get_instance(cls) -> tuple[PreTrainedModel, _AudioProcessor]:
+    def get_instance(
+        cls,
+    ) -> "tuple[Nemotron3DiarizationForAudioFrameClassification, Nemotron3DiarizationProcessor]":
         """Load the diarization model and processor once, then return the cached pair."""
         if cls._model is None or cls._processor is None:
             if importlib.util.find_spec("transformers.models.nemotron3_diarization") is None:
@@ -94,14 +91,14 @@ class NemotronDiarizer:
                     "pip install git+https://github.com/huggingface/transformers"
                 )
                 raise ImportError(msg)
-            model: PreTrainedModel = AutoModelForAudioFrameClassification.from_pretrained(
-                cls.MODEL_ID
+            model: Nemotron3DiarizationForAudioFrameClassification = (
+                AutoModelForAudioFrameClassification.from_pretrained(cls.MODEL_ID)
             )
             # PreTrainedModel.to is functools.wraps'd, which pyright cannot bind as a method.
             model.to(get_device())  # pyright: ignore[reportArgumentType]
             model.eval()
             cls._model = model
-            processor: _AudioProcessor = AutoProcessor.from_pretrained(cls.MODEL_ID)
+            processor: Nemotron3DiarizationProcessor = AutoProcessor.from_pretrained(cls.MODEL_ID)
             cls._processor = processor
         return cls._model, cls._processor
 
