@@ -39,11 +39,11 @@ class GateBlock(nn.Module):
         self.out_proj = nn.Linear(dim, dim, bias=False)
 
 
-class FakeDecoderConfig(PretrainedConfig):
+class FakeDecoderConfig(PretrainedConfig):  # type: ignore[no-untyped-call]  # untyped __init_subclass__
     model_type = "fake_decoder"
 
 
-class FakeDecoder(PreTrainedModel):
+class FakeDecoder(PreTrainedModel):  # type: ignore[no-untyped-call]  # untyped __init_subclass__
     config_class = FakeDecoderConfig
 
     def __init__(self, depth: int = 2) -> None:
@@ -94,9 +94,7 @@ class TestASRConfigFields:
             lora_rank_pattern={"in_proj_a": 16}, lora_alpha_pattern={"in_proj_a": 32}
         )
         # transformers' PretrainedConfig.from_dict leaves **kwargs untyped
-        revived = ASRConfig.from_dict(  # pyright: ignore[reportUnknownMemberType]
-            config.to_dict()
-        )
+        revived = ASRConfig.from_dict(config.to_dict())  # pyright: ignore[reportUnknownMemberType]
         assert revived.lora_rank_pattern == {"in_proj_a": 16}
         assert revived.lora_alpha_pattern == {"in_proj_a": 32}
 

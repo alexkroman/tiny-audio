@@ -40,7 +40,10 @@ class TestPrependLeadIn:
         assert out is audio, "disabled must not copy or alter the waveform"
 
     def test_batch_of_waveforms(self) -> None:
-        batch = [np.ones(1600, dtype=np.float32), np.ones(800, dtype=np.float32)]
+        batch: list[npt.NDArray[np.float32]] = [
+            np.ones(1600, dtype=np.float32),
+            np.ones(800, dtype=np.float32),
+        ]
         out = prepend_lead_in(batch, 16000, 0.25)
         assert [len(x) for x in out] == [5600, 4800]
 

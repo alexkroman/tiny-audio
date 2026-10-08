@@ -29,7 +29,8 @@ class MockProjector:
     """Mock projector that mimics stride-2 downsampling."""
 
     def get_output_length(self, input_length: torch.Tensor) -> torch.Tensor:
-        return input_length // 2
+        output_length: torch.Tensor = input_length // 2
+        return output_length
 
 
 @pytest.fixture

@@ -31,7 +31,7 @@ class FakeBlock(nn.Module):
         self.lin = nn.Linear(dim, dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.lin(x)
+        return cast(torch.Tensor, self.lin(x))
 
 
 class FakeGraniteEncoder(nn.Module):
@@ -48,7 +48,7 @@ class FakeGraniteEncoder(nn.Module):
         x = self.input_linear(x)
         for layer in self.layers:
             x = layer(x)
-        return self.out(self.out_mid(x))
+        return cast(torch.Tensor, self.out(self.out_mid(x)))
 
 
 @pytest.fixture
@@ -376,7 +376,8 @@ class TestEncoderIsNeverLeftInTrainMode:
         model = self._model(base_asr_config, 1)
         model.train()
         assert model.audio_tower.training is False
-        model.eval()
+        # transformers' PreTrainedModel.eval is unannotated
+        model.eval()  # type: ignore[no-untyped-call]
         assert model.audio_tower.training is False
 
 

@@ -68,12 +68,14 @@ class TestASRConfigSerialization:
     ) -> None:
         save_dir = tmp_path / "cfg"
         save_dir.mkdir()
-        base_asr_config.save_pretrained(save_dir)  # pyright: ignore[reportUnknownMemberType]  # untyped **kwargs
+        # transformers leaves save_pretrained's **kwargs untyped
+        base_asr_config.save_pretrained(save_dir)  # pyright: ignore[reportUnknownMemberType]
 
         # config.json should exist
         assert (save_dir / "config.json").exists()
 
-        loaded = ASRConfig.from_pretrained(save_dir)  # pyright: ignore[reportUnknownMemberType]  # untyped **kwargs
+        # transformers leaves from_pretrained's **kwargs untyped
+        loaded = ASRConfig.from_pretrained(save_dir)  # pyright: ignore[reportUnknownMemberType]
         assert loaded.audio_model_id == base_asr_config.audio_model_id
         assert loaded.text_model_id == base_asr_config.text_model_id
         assert loaded.projector_type == base_asr_config.projector_type
@@ -163,7 +165,9 @@ class TestAutoConfigRegistration:
 
     def test_auto_config_resolves_asr_model(self) -> None:
         # Register happens at module import. Confirm the registry has it.
-        config_class = transformers.AutoConfig.for_model(  # pyright: ignore[reportUnknownMemberType]
+        # transformers leaves for_model's **kwargs untyped
+        config = transformers.AutoConfig.for_model(  # pyright: ignore[reportUnknownMemberType]
             "asr_model"
-        ).__class__
+        )
+        config_class = config.__class__
         assert config_class is ASRConfig

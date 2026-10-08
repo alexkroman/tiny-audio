@@ -60,7 +60,7 @@ def _make_cfg(
 
 def _fake_dataset(audio_seconds: float, **extra_cols: object) -> Dataset:
     n = int(audio_seconds * 16000)
-    rows = {
+    rows: dict[str, list[Any]] = {
         "audio": [{"array": np.zeros(n, dtype=np.float32), "sampling_rate": 16000}],
         **{k: [v] for k, v in extra_cols.items()},
     }
@@ -451,7 +451,7 @@ class TestNoFullRewrite:
 
     def test_filtered_source_with_provenance_columns_is_never_flattened(self) -> None:
         flattens: list[int] = []
-        original = Dataset.flatten_indices
+        original: Callable[..., Dataset] = Dataset.flatten_indices
 
         def counted(self: Dataset, *args: Any, **kwargs: Any) -> Dataset:
             flattens.append(1)

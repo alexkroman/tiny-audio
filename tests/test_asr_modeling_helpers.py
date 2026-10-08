@@ -4,7 +4,7 @@ Module-level functions are called directly; instance methods that only touch
 the tokenizer or projector are invoked unbound against a stand-in `self`.
 """
 
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import NoReturn, cast
@@ -61,7 +61,10 @@ class TestResolveAttnImplementation:
     ) -> None:
         """Qwen3.5's case: no sliding-window layer, so eager is not needed."""
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
-        no_window: Callable[[str], bool] = lambda _: False
+
+        def no_window(_: str) -> bool:
+            return False
+
         monkeypatch.setattr("tiny_audio.asr_modeling._has_sliding_window_attention", no_window)
         assert _resolve_attn_implementation(requested, "some/model") == requested
 
@@ -71,14 +74,20 @@ class TestResolveAttnImplementation:
     ) -> None:
         """Gemma 4's case: Metal sdpa is wrong for cached sliding-window decode."""
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
-        window: Callable[[str], bool] = lambda _: True
+
+        def window(_: str) -> bool:
+            return True
+
         monkeypatch.setattr("tiny_audio.asr_modeling._has_sliding_window_attention", window)
         assert _resolve_attn_implementation(requested, "some/model") == "eager"
 
     def test_mps_fa2_still_degrades_to_sdpa(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A config pinning FA2 must not survive just because eager was skipped."""
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
-        no_window: Callable[[str], bool] = lambda _: False
+
+        def no_window(_: str) -> bool:
+            return False
+
         monkeypatch.setattr("tiny_audio.asr_modeling._has_sliding_window_attention", no_window)
         assert _resolve_attn_implementation("flash_attention_2", "some/model") == "sdpa"
 
@@ -157,9 +166,7 @@ class _MaskOnDevice:
         self.shape = self._tensor.shape
 
     # Elementwise like Tensor.__eq__, which object.__eq__'s signature cannot express.
-    def __eq__(  # type: ignore[override]
-        self, other: torch.Tensor | int
-    ) -> torch.Tensor:
+    def __eq__(self, other: torch.Tensor | int) -> torch.Tensor:  # type: ignore[override]
         return self._tensor == other
 
     # Like a real Tensor, hash by identity even though __eq__ is elementwise.
@@ -282,8 +289,9 @@ class TestLeftPadPromptRows:
         ids, mask = ASRModel._left_pad_prompt_rows(
             fake, [torch.tensor([1, 2]), torch.tensor([3])], torch.device("cpu")
         )
-        assert ids.tolist() == [[1, 2], [9, 3]]  # pyright: ignore[reportUnknownMemberType]  # Tensor.tolist() -> list[Unknown]
-        assert mask.tolist() == [[1, 1], [0, 1]]  # pyright: ignore[reportUnknownMemberType]  # Tensor.tolist() -> list[Unknown]
+        # torch types Tensor.tolist() as list[Unknown]
+        assert ids.tolist() == [[1, 2], [9, 3]]  # pyright: ignore[reportUnknownMemberType]
+        assert mask.tolist() == [[1, 1], [0, 1]]  # pyright: ignore[reportUnknownMemberType]
 
     def test_falls_back_to_eos_then_zero(self) -> None:
         fake = stub(tokenizer=SimpleNamespace(pad_token_id=None, eos_token_id=2))
@@ -313,7 +321,8 @@ class TestRenderAudioPrompt:
         assert call.args[0] == [{"role": "user", "content": "<audio><audio><audio> Transcribe"}]
         assert call.kwargs["add_generation_prompt"] is True
         assert call.kwargs["enable_thinking"] is False
-        assert row.tolist() == [1, 2, 3]  # pyright: ignore[reportUnknownMemberType]  # Tensor.tolist() -> list[Unknown]
+        # torch types Tensor.tolist() as list[Unknown]
+        assert row.tolist() == [1, 2, 3]  # pyright: ignore[reportUnknownMemberType]
         assert row.dtype == torch.long
 
     def test_empty_instruction_leaves_placeholders_alone(self) -> None:
@@ -328,10 +337,12 @@ class TestGetNumAudioTokens:
     """The batch-max token count chains encoder lengths into the projector."""
 
     def test_uses_longest_sample(self) -> None:
-        encoder_lengths: Callable[[torch.Tensor], torch.Tensor] = lambda mask: torch.tensor(
-            [10, 20]
-        )
-        output_length: Callable[[int], int] = lambda n: (n - 4) // 4 + 1
+        def encoder_lengths(mask: torch.Tensor) -> torch.Tensor:
+            return torch.tensor([10, 20])
+
+        def output_length(n: int) -> int:
+            return (n - 4) // 4 + 1
+
         fake = stub(
             _compute_encoder_output_lengths=encoder_lengths,
             projector=SimpleNamespace(get_output_length=output_length),
