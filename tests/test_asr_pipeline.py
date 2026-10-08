@@ -1,7 +1,13 @@
 """Tests for ASRPipeline and helper classes."""
 
+from unittest.mock import MagicMock, patch
+
 import numpy as np
 import pytest
+import torch
+import transformers
+
+from tiny_audio.asr_pipeline import ASRPipeline, NemotronDiarizer, QwenForcedAligner
 
 
 class TestExtractAudio:
@@ -10,12 +16,8 @@ class TestExtractAudio:
     @pytest.fixture
     def extract_audio(self):
         """Get the extract_audio function without loading a model."""
-        from tiny_audio.asr_pipeline import ASRPipeline
-
-        class MockPipeline:
-            _extract_audio = ASRPipeline._extract_audio
-
-        return MockPipeline()
+        # Instance without calling __init__: _extract_audio touches no state.
+        return object.__new__(ASRPipeline)
 
     def test_dict_with_array(self, extract_audio):
         """Dict with 'array' key should extract audio."""
@@ -50,10 +52,6 @@ class TestSanitizeParameters:
 
     def test_removes_custom_params(self):
         """Custom params should be removed before parent validation."""
-        from unittest.mock import patch
-
-        from tiny_audio.asr_pipeline import ASRPipeline
-
         # Create a mock pipeline that won't call parent __init__
         with patch.object(ASRPipeline, "__init__", return_value=None):
             pipeline = ASRPipeline.__new__(ASRPipeline)
@@ -91,10 +89,6 @@ class TestPostprocess:
     @pytest.fixture
     def mock_pipeline(self):
         """Create a mock pipeline with postprocess method."""
-        from unittest.mock import MagicMock
-
-        from tiny_audio.asr_pipeline import ASRPipeline
-
         # Create instance without calling __init__
         pipeline = object.__new__(ASRPipeline)
 
@@ -110,15 +104,11 @@ class TestPostprocess:
 
     def test_handles_list_outputs(self, mock_pipeline):
         """Should handle list of outputs from chunking."""
-        import torch
-
         result = mock_pipeline.postprocess([{"tokens": torch.tensor([1, 2, 3])}])
         assert "text" in result
 
     def test_handles_tensor_tokens(self, mock_pipeline):
         """Should handle tensor tokens."""
-        import torch
-
         result = mock_pipeline.postprocess({"tokens": torch.tensor([[1, 2, 3]])})
         assert "text" in result
         mock_pipeline.tokenizer.decode.assert_called()
@@ -126,7 +116,6 @@ class TestPostprocess:
     def test_strips_think_tags(self, mock_pipeline):
         """Should strip <think>...</think> tags from output."""
         mock_pipeline.tokenizer.decode.return_value = "<think>reasoning</think> hello world"
-        import torch
 
         result = mock_pipeline.postprocess({"tokens": torch.tensor([1, 2, 3])})
         assert "<think>" not in result["text"]
@@ -139,16 +128,12 @@ class TestExtractAudioFileAndBytes:
 
     def test_extract_audio_from_bytes(self):
         """Bytes input should be parsed by ffmpeg_read."""
-        from unittest.mock import patch
 
-        from tiny_audio.asr_pipeline import ASRPipeline
-
-        class MockPipeline:
-            _extract_audio = ASRPipeline._extract_audio
+        pipeline = object.__new__(ASRPipeline)
 
         with patch("tiny_audio.asr_pipeline.ffmpeg_read") as mock_read:
             mock_read.return_value = np.zeros(16000, dtype=np.float32)
-            result = MockPipeline()._extract_audio(b"some-audio-bytes")
+            result = pipeline._extract_audio(b"some-audio-bytes")
 
         assert result is not None
         assert result["sampling_rate"] == 16000
@@ -156,12 +141,8 @@ class TestExtractAudioFileAndBytes:
 
     def test_extract_audio_from_path(self, tmp_path):
         """File path input should be opened and read via ffmpeg_read."""
-        from unittest.mock import patch
 
-        from tiny_audio.asr_pipeline import ASRPipeline
-
-        class MockPipeline:
-            _extract_audio = ASRPipeline._extract_audio
+        pipeline = object.__new__(ASRPipeline)
 
         # Create a dummy file
         f = tmp_path / "audio.wav"
@@ -169,7 +150,7 @@ class TestExtractAudioFileAndBytes:
 
         with patch("tiny_audio.asr_pipeline.ffmpeg_read") as mock_read:
             mock_read.return_value = np.zeros(16000, dtype=np.float32)
-            result = MockPipeline()._extract_audio(str(f))
+            result = pipeline._extract_audio(str(f))
 
         assert result is not None
         assert result["sampling_rate"] == 16000
@@ -180,8 +161,6 @@ class TestPipelineCall:
 
     @pytest.fixture
     def pipeline(self, base_asr_model):
-        from tiny_audio.asr_pipeline import ASRPipeline
-
         return ASRPipeline(
             model=base_asr_model,
             feature_extractor=base_asr_model.feature_extractor,
@@ -197,8 +176,6 @@ class TestPipelineCall:
     @pytest.fixture
     def chunked(self, monkeypatch):
         """Stub per-chunk transcription: chunk k transcribes as "w{k}a w{k}b"."""
-        import transformers
-
         calls = []
 
         def fake_call(self, inputs, **kwargs):
@@ -218,7 +195,6 @@ class TestPipelineCall:
 
     def test_timestamps_chunk_align_and_offset(self, pipeline, chunked, monkeypatch):
         """Long audio is transcribed per chunk; word times land on the recording timeline."""
-        from tiny_audio.asr_pipeline import QwenForcedAligner
 
         def fake_align(chunks, sample_rate=16000):
             return [
@@ -239,8 +215,6 @@ class TestPipelineCall:
 
     def test_plain_call_chunks_without_aligning(self, pipeline, chunked, monkeypatch):
         """Long audio chunks even without timestamps; one call would stop at max_new_tokens."""
-        from tiny_audio.asr_pipeline import QwenForcedAligner
-
         monkeypatch.setattr(
             QwenForcedAligner, "align_chunks", lambda *a, **k: pytest.fail("aligner called")
         )
@@ -267,8 +241,6 @@ class TestPipelineCall:
         assert chunked == []
 
     def test_plain_chunks_concatenate_logprobs(self, pipeline, monkeypatch):
-        import transformers
-
         def fake_call(self, inputs, **kwargs):
             return {"text": "x", "top1_logprob": [-0.1], "top2_logprob": [-2.0]}
 
@@ -277,10 +249,9 @@ class TestPipelineCall:
         assert result == {"text": "x x", "top1_logprob": [-0.1, -0.1], "top2_logprob": [-2.0, -2.0]}
 
     def test_alignment_failure_recorded(self, pipeline, chunked, monkeypatch):
-        from tiny_audio.asr_pipeline import QwenForcedAligner
-
         def boom(*args, **kwargs):
-            raise RuntimeError("model not loadable")
+            msg = "model not loadable"
+            raise RuntimeError(msg)
 
         monkeypatch.setattr(QwenForcedAligner, "align_chunks", boom)
         result = pipeline(
@@ -292,8 +263,6 @@ class TestPipelineCall:
 
     def test_speakers_from_one_nemotron_pass(self, pipeline, chunked, monkeypatch):
         """Words take the Nemotron speaker active at their time; segments come back too."""
-        from tiny_audio.asr_pipeline import NemotronDiarizer, QwenForcedAligner
-
         monkeypatch.setattr(
             QwenForcedAligner,
             "align_chunks",

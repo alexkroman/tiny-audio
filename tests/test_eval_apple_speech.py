@@ -1,9 +1,13 @@
 """Tests for AppleSpeechEvaluator."""
 
+import importlib
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+
+from scripts.eval.evaluators import asr
 
 _AUTHORIZED = 3
 _DENIED = 1
@@ -31,10 +35,6 @@ def fake_speech_frameworks(monkeypatch):
     monkeypatch.setitem(sys.modules, "CoreFoundation", fake_corefoundation)
 
     # Reload asr.py so module-level imports pick up the fakes.
-    import importlib
-
-    from scripts.eval.evaluators import asr
-
     importlib.reload(asr)
 
     return {"Speech": fake_speech, "recognizer": recognizer, "asr": asr}
@@ -115,8 +115,6 @@ class TestAppleSpeechEvaluator:
             ev.transcribe(audio={"array": [], "sampling_rate": 16000})
 
     def test_transcribe_cleans_up_temp_wav(self, fake_speech_frameworks, mocker):
-        from pathlib import Path
-
         mocker.patch.object(
             fake_speech_frameworks["asr"], "prepare_wav_bytes", return_value=b"WAVDATA"
         )
@@ -130,8 +128,6 @@ class TestAppleSpeechEvaluator:
         assert before == after, f"temp wav not cleaned up: {after - before}"
 
     def test_close_removes_temp_dir(self, fake_speech_frameworks):
-        from pathlib import Path
-
         ev = fake_speech_frameworks["asr"].AppleSpeechEvaluator()
         temp_dir = ev.temp_dir
         assert Path(temp_dir).is_dir()

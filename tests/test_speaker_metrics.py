@@ -6,6 +6,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from scripts.eval.audio import TextNormalizer
+from scripts.eval.cli import ALL_DATASETS
+from scripts.eval.datasets import DATASET_REGISTRY
+from scripts.eval.evaluators.asr import speaker_text
+from scripts.eval.evaluators.base import Evaluator
 from scripts.eval.speaker_metrics import (
     cp_errors,
     has_speakers,
@@ -61,8 +66,6 @@ def test_serialize_turns_renumbers_by_first_appearance_and_merges():
 
 
 def test_assemblyai_utterances_become_speaker_text():
-    from scripts.eval.evaluators.asr import speaker_text
-
     utt = SimpleNamespace
     transcript = SimpleNamespace(
         text="so yes", utterances=[utt(speaker="B", text="So"), utt(speaker="A", text="yes")]
@@ -71,13 +74,21 @@ def test_assemblyai_utterances_become_speaker_text():
     assert speaker_text(SimpleNamespace(text="hi", utterances=None)) == "hi"
 
 
+class _LowercaseNormalizer(TextNormalizer):
+    """Lowercasing only; skips building Whisper's normalizer."""
+
+    def __init__(self) -> None:
+        pass
+
+    def normalize(self, text: str) -> str:
+        return text.lower()
+
+
 class _FixedEvaluator:
     """An Evaluator whose transcript per sample comes from a list."""
 
     @staticmethod
     def make(predictions):
-        from scripts.eval.evaluators.base import Evaluator
-
         class Fixed(Evaluator):
             def transcribe(self, audio):
                 return predictions[audio], 0.0, None
@@ -85,7 +96,7 @@ class _FixedEvaluator:
         evaluator = Fixed()
         # Whisper's normalizer downloads a spelling table; lowercasing is all
         # these references need.
-        evaluator.normalizer = SimpleNamespace(normalize=str.lower)
+        evaluator.normalizer = _LowercaseNormalizer()
         return evaluator
 
 
@@ -111,9 +122,6 @@ def test_plain_datasets_get_no_speaker_metrics():
 
 
 def test_ami_speakers_is_registered_but_not_in_all():
-    from scripts.eval.cli import ALL_DATASETS
-    from scripts.eval.datasets import DATASET_REGISTRY
-
     assert DATASET_REGISTRY["ami-speakers"].speakers
     assert "ami-speakers" not in ALL_DATASETS
     assert not DATASET_REGISTRY["ami"].speakers

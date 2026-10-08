@@ -1,34 +1,69 @@
 import functools
+import importlib
+import importlib.util
 import inspect
 import json
 import logging
 import math
+import shutil
 from collections.abc import Iterator
+from copy import copy
+from os import PathLike
 from pathlib import Path
 from threading import Thread
+from typing import TYPE_CHECKING, Any, TypedDict, TypeVar, cast, overload
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F  # noqa: N812
+from peft import LoraConfig, PeftModel, get_peft_model
+from safetensors.torch import load_file
+from torch.nn import functional
 from transformers import (
     AutoConfig,
+    AutoFeatureExtractor,
     AutoModel,
     AutoModelForCausalLM,
+    AutoModelForSeq2SeqLM,
     AutoTokenizer,
     PreTrainedModel,
     TextIteratorStreamer,
+    WhisperModel,
 )
-from transformers.generation import GenerationMixin
+from transformers import __version__ as transformers_version
+from transformers.generation.utils import GenerateOutput, GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.utils.hub import PushToHubMixin, cached_file
 
-try:
+if TYPE_CHECKING:
+    from transformers import GraniteSpeech5Encoder
+    from transformers.models.auto.modeling_auto import _BaseModelWithGenerate
+    from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
+    from transformers.models.gemma4.modeling_gemma4 import Gemma4ForCausalLM
+
     from .asr_config import ASRConfig, compute_encoder_output_length
-    from .asr_processing import left_pad_prompt_rows
+    from .asr_processing import ASRProcessor, left_pad_prompt_rows
     from .projectors import PROJECTOR_CLASSES
-except ImportError:
-    from asr_config import ASRConfig, compute_encoder_output_length  # type: ignore[no-redef]
-    from asr_processing import left_pad_prompt_rows  # type: ignore[no-redef]
-    from projectors import PROJECTOR_CLASSES  # type: ignore[no-redef]
+else:
+    try:
+        from .asr_config import ASRConfig, compute_encoder_output_length
+        from .asr_processing import ASRProcessor, left_pad_prompt_rows
+        from .projectors import PROJECTOR_CLASSES
+    except ImportError:  # flat layout on the Hub: sibling modules, no package
+        from asr_config import ASRConfig, compute_encoder_output_length
+        from asr_processing import ASRProcessor, left_pad_prompt_rows
+        from projectors import PROJECTOR_CLASSES
+
+    # Architectures newer than the transformers floor in pyproject.toml. Kept
+    # optional so a checkpoint that needs neither still loads on an older
+    # install; the branch that needs one raises at its use site instead.
+    try:
+        from transformers import GraniteSpeech5Encoder
+    except ImportError:  # transformers < 5.16: no native granite_speech5
+        GraniteSpeech5Encoder = None
+    try:
+        from transformers.models.gemma4.modeling_gemma4 import Gemma4ForCausalLM
+    except ImportError:  # transformers without the gemma4 architecture
+        Gemma4ForCausalLM = None
 
 
 logger = logging.getLogger(__name__)
@@ -109,7 +144,7 @@ class ChunkedEmbedding(nn.Module):
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Look up `input_ids` in every chunk and concatenate along the feature dim."""
-        out = torch.cat([F.embedding(input_ids, chunk) for chunk in self.chunks], dim=-1)
+        out = torch.cat([functional.embedding(input_ids, chunk) for chunk in self.chunks], dim=-1)
         if self.embed_scale is not None:
             out = out * self.embed_scale.to(out.dtype)
         return out
@@ -131,7 +166,7 @@ class ChunkedEmbedding(nn.Module):
         )
 
 
-def find_encoder_layer_stack(encoder: nn.Module) -> tuple[str, nn.Module] | None:
+def find_encoder_layer_stack(encoder: nn.Module) -> tuple[str, nn.ModuleList] | None:
     """Locate the encoder's ordered transformer-block list.
 
     Returns `(attribute_path, ModuleList)` or None. Encoders disagree on the
@@ -201,17 +236,17 @@ def unfreeze_encoder_top_layers(
         return []
     found = find_encoder_layer_stack(encoder)
     if found is None:
-        raise ValueError(
+        msg = (
             f"Could not locate a transformer-block ModuleList on "
             f"{type(encoder).__name__}; cannot unfreeze its top {top_n} layers. "
             f"Children: {[n for n, _ in encoder.named_children()]}"
         )
+        raise ValueError(msg)
     path, stack = found
     depth = len(stack)
     if top_n > depth:
-        raise ValueError(
-            f"encoder_trainable_top_layers={top_n} exceeds the encoder's {depth} blocks"
-        )
+        msg = f"encoder_trainable_top_layers={top_n} exceeds the encoder's {depth} blocks"
+        raise ValueError(msg)
 
     unfrozen: list[str] = []
     for idx in range(depth - top_n, depth):
@@ -358,9 +393,10 @@ def _resolve_attn_implementation(requested: str | None, model_id: str | None = N
     # broken torch install takes it down with it). Without this check a CUDA
     # box with no flash-attn raises at from_pretrained instead of quietly
     # using sdpa, which is the same numerics at lower throughput.
-    from transformers.utils import is_flash_attn_2_available
-
-    if not is_flash_attn_2_available():
+    #
+    # Looked up on `transformers.utils` at call time rather than bound at
+    # import, so patching it there (as the tests do) reaches this probe.
+    if not importlib.import_module("transformers.utils").is_flash_attn_2_available():
         logger.warning(
             "flash_attention_2 requested but flash_attn is not installed or too old; "
             "falling back to sdpa."
@@ -388,7 +424,7 @@ def _gather_audio_embeds(
     _, max_len, _ = audio_embeds.shape
     needed = int(token_counts.max().item()) if max_tokens is None else max_tokens
     if needed > max_len:
-        audio_embeds = F.pad(audio_embeds, (0, 0, 0, needed - max_len))
+        audio_embeds = functional.pad(audio_embeds, (0, 0, 0, needed - max_len))
         max_len = needed
     indices = torch.arange(max_len, device=audio_embeds.device).unsqueeze(0)
     mask = indices < token_counts.unsqueeze(1)
@@ -425,12 +461,13 @@ def _assert_audio_token_counts(
         actual = torch.as_tensor(actual, device=token_counts.device).to(torch.long).reshape(-1)
         if actual.shape == token_counts.shape and not torch.equal(actual, token_counts):
             rows = (actual != token_counts).nonzero().flatten()[:8].tolist()
-            raise ValueError(
+            msg = (
                 "Audio token count mismatch between prompt and projector. Rows "
                 f"{rows}: prompt expects {token_counts[rows].tolist()}, encoder+projector "
                 f"produced {actual[rows].tolist()}. A wrong `encoder_conv_layers` for this "
                 "encoder is the usual cause."
             )
+            raise ValueError(msg)
 
     available = audio_embeds.shape[1]
     if max_tokens is not None:
@@ -438,11 +475,12 @@ def _assert_audio_token_counts(
     else:
         needed = int(token_counts.max().item()) if token_counts.numel() else 0
     if needed > available:
-        raise ValueError(
+        msg = (
             f"Projector produced {available} audio frames but the prompt expects up to "
             f"{needed}. Without this check `_gather_audio_embeds` would zero-pad the "
             "deficit, silently feeding the decoder zero vectors in place of audio."
         )
+        raise ValueError(msg)
 
 
 def _patch_gemma_decode_loop(model) -> None:
@@ -540,8 +578,6 @@ def _log_linear_attention_backends(level: int = logging.WARNING) -> None:
     touch these functions at all. `level` is INFO for an inference load
     (`from_pretrained`), where the slower path is not something to act on.
     """
-    import importlib.util
-
     found = {
         pkg: importlib.util.find_spec(mod) is not None
         for pkg, mod in (("causal-conv1d", "causal_conv1d"), ("flash-linear-attention", "fla"))
@@ -559,8 +595,31 @@ def _log_linear_attention_backends(level: int = logging.WARNING) -> None:
         logger.info("Linear-attention fast path: causal-conv1d + flash-linear-attention packages.")
 
 
+class _LoadKwargs(TypedDict):
+    """Loader arguments shared by the encoder and decoder `from_pretrained` calls."""
+
+    attn_implementation: str | None
+    low_cpu_mem_usage: bool
+    dtype: torch.dtype
+
+
+class _DecoderLoadKwargs(_LoadKwargs):
+    """Decoder loader arguments: the shared ones plus remote-code opt-in."""
+
+    trust_remote_code: bool
+
+
+_StateDictT = TypeVar("_StateDictT", bound=dict[str, Any])
+
+
 class ASRModel(PreTrainedModel, GenerationMixin):
     """Audio-to-text model combining an audio encoder, projector, and language model."""
+
+    audio_tower: nn.Module
+    # The decoder as AutoModelForCausalLM types it. With LoRA attached this is
+    # a PeftModel, which forwards every attribute it does not define to the
+    # decoder it wraps -- so the decoder's interface is the right static view.
+    language_model: "_BaseModelWithGenerate"
 
     config_class = ASRConfig
     base_model_prefix = "model"
@@ -572,10 +631,16 @@ class ASRModel(PreTrainedModel, GenerationMixin):
     TRANSCRIBE_PROMPT = "Transcribe the speech to text"
 
     @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path: str, *args, **kwargs) -> "ASRModel":
+    def from_pretrained(
+        cls,
+        pretrained_model_name_or_path: str | PathLike[str] | None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> "ASRModel":
         """Load model from pretrained, handling device placement correctly."""
-        from safetensors.torch import load_file
-        from transformers.utils.hub import cached_file
+        if pretrained_model_name_or_path is None:
+            msg = "ASRModel.from_pretrained needs a checkpoint directory or Hub repo id"
+            raise ValueError(msg)
 
         config = kwargs.pop("config", None)
         if config is None:
@@ -590,7 +655,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             # Load projector weights from safetensors
             subfolder = kwargs.get("subfolder")
             revision = kwargs.get("revision")
-            cache_kwargs = {}
+            cache_kwargs: dict[str, str] = {}
             if subfolder:
                 cache_kwargs["subfolder"] = subfolder
             if revision:
@@ -619,21 +684,23 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 )
                 if adapter_config_file is not None:
                     # Load saved adapter weights using the original repo_id/path
-                    # PEFT handles Hub downloads and caching internally
-                    from peft import PeftModel
-
+                    # PEFT handles Hub downloads and caching internally.
+                    #
                     # Adapter weights load onto the base model's device. Left to
                     # PEFT they go straight to "cuda" whenever CUDA reports
                     # available, which ZeroGPU Spaces do at startup without a
                     # GPU attached ("No CUDA GPUs are available").
                     base_device = next(model.language_model.parameters()).device
-                    model.language_model = PeftModel.from_pretrained(
+                    peft_model = PeftModel.from_pretrained(
                         model.language_model,
                         pretrained_model_name_or_path,
                         is_trainable=True,
                         torch_device=str(base_device),
                         **cache_kwargs,
                     )
+                    # See the `language_model` annotation: PEFT forwards the
+                    # decoder interface, so callers keep using it unchanged.
+                    model.language_model = cast("_BaseModelWithGenerate", peft_model)
                 else:
                     # No saved adapters - initialize fresh LLM LoRA for training.
                     # __init__ skips _setup_lora while loading, so call it here.
@@ -653,8 +720,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         # Shadows the class attribute when the config names one, so a run that
         # trained under a specific instruction decodes under the same one.
-        if getattr(config, "transcribe_prompt", None) is not None:
-            self.TRANSCRIBE_PROMPT = config.transcribe_prompt
+        transcribe_prompt = getattr(config, "transcribe_prompt", None)
+        if transcribe_prompt is not None:
+            self.TRANSCRIBE_PROMPT = transcribe_prompt
         target_dtype = getattr(torch, config.model_dtype)
 
         # Audio encoder (frozen)
@@ -741,7 +809,11 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             eos_ids.append(derived)
         for token in ("<|im_end|>", "<|endoftext|>", "<end_of_turn>"):
             token_id = self.tokenizer.convert_tokens_to_ids(token)
-            if token_id is None or self.tokenizer.convert_ids_to_tokens(token_id) != token:
+            # A single token name maps to a single id (None when unknown).
+            if (
+                not isinstance(token_id, int)
+                or self.tokenizer.convert_ids_to_tokens(token_id) != token
+            ):
                 continue
             if token_id not in eos_ids:
                 eos_ids.append(token_id)
@@ -787,8 +859,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
     def _create_feature_extractor(self, config: ASRConfig):
         """Create the appropriate feature extractor for the audio encoder."""
-        from transformers import AutoFeatureExtractor
-
         feature_extractor = AutoFeatureExtractor.from_pretrained(config.audio_model_id)
         # Whisper's encoder requires a fixed 3000 mel frames (30s) and the
         # feature extractor pads to that by default — leave it alone. Other
@@ -808,7 +878,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         from its pretrained features). See `ASRTrainer.create_optimizer` for the
         LR routing.
         """
-        encoder_kwargs = {
+        encoder_kwargs: _LoadKwargs = {
             "attn_implementation": _resolve_attn_implementation(
                 config.attn_implementation, config.audio_model_id
             ),
@@ -816,9 +886,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             "dtype": dtype,
         }
 
+        encoder: nn.Module
         if "whisper" in config.audio_model_id.lower():
-            from transformers import WhisperModel
-
             full_model = WhisperModel.from_pretrained(config.audio_model_id, **encoder_kwargs)
             encoder = full_model.encoder
             del full_model
@@ -833,14 +902,19 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             # checkpoint ships modeling .py files but its config.json has no
             # `auto_map`, so Auto* classes can't resolve them on older
             # versions -- they fail with KeyError('granite_speech5_ctc').
-            from transformers import GraniteSpeech5Encoder
+            if GraniteSpeech5Encoder is None:
+                msg = (
+                    "Granite Speech 5.0 encoders need transformers >= 5.16 for the "
+                    f"native granite_speech5 architecture; found {transformers_version}."
+                )
+                raise ImportError(msg)
 
             # Granite's block-attention implementation has no FA2 kernel and
             # raises ValueError on attn_implementation="flash_attention_2".
             # _resolve_attn_implementation only downgrades FA2 when CUDA is
             # absent, so on a CUDA box the inherited default would hard-fail
             # at load. Pin sdpa regardless of what the config asks for.
-            granite_kwargs = {**encoder_kwargs, "attn_implementation": "sdpa"}
+            granite_kwargs: _LoadKwargs = {**encoder_kwargs, "attn_implementation": "sdpa"}
             encoder = GraniteSpeech5Encoder.from_pretrained(config.audio_model_id, **granite_kwargs)
         elif "glm" in config.audio_model_id.lower():
             # GLM-ASR stores its encoder at audio_tower (GlmAsrEncoder), but
@@ -852,21 +926,19 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             # flat checkpoints hung them off the top-level model. Resolve the
             # owner instead of assuming, so neither layout AttributeErrors
             # at load.
-            from transformers import AutoModelForSeq2SeqLM
-            from transformers import __version__ as transformers_version
-
             full_model = AutoModelForSeq2SeqLM.from_pretrained(
                 config.audio_model_id, trust_remote_code=True, **encoder_kwargs
             )
             inner = getattr(full_model, "model", None)
-            holder = inner if hasattr(inner, "audio_tower") else full_model
+            holder = inner if inner is not None and hasattr(inner, "audio_tower") else full_model
             if not hasattr(holder, "audio_tower"):
-                raise AttributeError(
+                msg = (
                     f"{type(full_model).__name__} exposes no audio_tower at "
                     "`.audio_tower` or `.model.audio_tower`; GLM-ASR encoder "
                     f"extraction needs updating for transformers "
                     f"{transformers_version}."
                 )
+                raise AttributeError(msg)
             encoder = holder.audio_tower
             # Drop the LLM decoder and projector to free their VRAM. These must
             # go through the same owner as audio_tower: assigning None to a name
@@ -929,7 +1001,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         return encoder
 
     @classmethod
-    def _load_language_model(cls, config: ASRConfig, dtype: torch.dtype) -> PreTrainedModel:
+    def _load_language_model(
+        cls, config: ASRConfig, dtype: torch.dtype
+    ) -> "_BaseModelWithGenerate":
         """Load and freeze the language model."""
         attn_implementation = _resolve_attn_implementation(
             config.attn_implementation, config.text_model_id
@@ -955,7 +1029,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 )
                 attn_implementation = "sdpa"
 
-        decoder_kwargs = {
+        decoder_kwargs: _DecoderLoadKwargs = {
             "attn_implementation": attn_implementation,
             "trust_remote_code": True,
             "low_cpu_mem_usage": True,
@@ -1006,7 +1080,13 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # See _load_audio_encoder note: idempotent post-load cast to dodge the
         # FA2 "current dype is fp32" warning when from_pretrained's dtype kwarg
         # isn't fully propagated to every submodule.
-        decoder = decoder.to(dtype=dtype)
+        #
+        # Called through the nn.Module view: PreTrainedModel declares `to` via
+        # functools.wraps, which type checkers cannot bind to an instance. The
+        # call still dispatches to PreTrainedModel.to, which returns the same
+        # module, so the cast happens in place exactly as before.
+        decoder_module: nn.Module = decoder
+        decoder_module.to(dtype=dtype)
         decoder.config.use_cache = getattr(config, "use_cache", True)
         if getattr(config, "freeze_language_model", True):
             decoder.requires_grad_(False)
@@ -1014,7 +1094,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         return decoder
 
     @staticmethod
-    def _gemma_text_only(loaded: PreTrainedModel) -> PreTrainedModel:
+    def _gemma_text_only(loaded: "_BaseModelWithGenerate") -> "_BaseModelWithGenerate":
         """Turn a loaded Gemma4ForConditionalGeneration into a text-only CausalLM.
 
         Two independent problems force this transplant rather than just loading
@@ -1043,9 +1123,12 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         returned text-only model holds 4,628,569,344 parameters against the
         checkpoint's 5,123,178,979, so ~494M are released.
         """
-        from transformers.models.gemma4.modeling_gemma4 import Gemma4ForCausalLM
+        if Gemma4ForCausalLM is None:
+            msg = f"Gemma 4 decoders need the gemma4 architecture; found {transformers_version}."
+            raise ImportError(msg)
 
-        text_config = loaded.config.get_text_config()
+        # Only reached for gemma-4 checkpoints, whose text config is Gemma4TextConfig.
+        text_config = cast("Gemma4TextConfig", loaded.config.get_text_config())
         with torch.device("meta"):
             shell = Gemma4ForCausalLM(text_config)
 
@@ -1070,11 +1153,14 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         stranded = [n for n, t in shell.named_parameters() if t.device.type == "meta"]
         stranded += [n for n, t in shell.named_buffers() if t.device.type == "meta"]
         if stranded:
-            raise RuntimeError(
+            msg = (
                 "Gemma text-only conversion left parameters on the meta device "
                 f"(would silently produce garbage): {stranded[:5]}"
             )
-        return shell
+            raise RuntimeError(msg)
+        # Gemma4ForCausalLM is a PreTrainedModel with GenerationMixin, which is
+        # all `_BaseModelWithGenerate` stands for.
+        return cast("_BaseModelWithGenerate", shell)
 
     def _create_projector(self, config: ASRConfig, dtype: torch.dtype) -> nn.Module:
         """Create the trainable audio projector."""
@@ -1085,7 +1171,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 enc_cfg, "d_model", None
             )
             if config.encoder_dim is None:
-                raise ValueError("Could not auto-detect encoder_dim. Please specify in config.")
+                msg = "Could not auto-detect encoder_dim. Please specify in config."
+                raise ValueError(msg)
 
         if config.llm_dim is None:
             dec_cfg = self.language_model.config
@@ -1097,16 +1184,18 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 dec_cfg, "d_model", None
             )
             if config.llm_dim is None:
-                raise ValueError("Could not auto-detect llm_dim. Please specify in config.")
+                msg = "Could not auto-detect llm_dim. Please specify in config."
+                raise ValueError(msg)
 
         # Select projector type based on config
         projector_type = getattr(config, "projector_type", "mlp")
         projector_class = PROJECTOR_CLASSES.get(projector_type)
         if projector_class is None:
-            raise ValueError(
+            msg = (
                 f"Unknown projector_type: {projector_type}. "
                 f"Valid options: {list(PROJECTOR_CLASSES.keys())}"
             )
+            raise ValueError(msg)
         projector = projector_class(config)
 
         # Move projector to same device as language model (important when using quantization)
@@ -1120,8 +1209,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
     def _setup_lora(self, config: ASRConfig):
         """Apply LoRA adapters to the language model for Stage 2 fine-tuning."""
-        from peft import LoraConfig, get_peft_model
-
         lora_config = LoraConfig(
             r=config.lora_rank,
             lora_alpha=config.lora_alpha,
@@ -1137,7 +1224,11 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             bias="none",
             task_type="CAUSAL_LM",
         )
-        self.language_model = get_peft_model(self.language_model, lora_config)
+        # See the `language_model` annotation for why the PEFT wrapper is
+        # typed as the decoder it wraps.
+        self.language_model = cast(
+            "_BaseModelWithGenerate", get_peft_model(self.language_model, lora_config)
+        )
 
     def _init_tokenizer(self, config: ASRConfig):
         """Initialize tokenizer with audio token."""
@@ -1360,8 +1451,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         Upstream sniffs for it to detect the pre-4.35 checkpointing format and
         would silently take the legacy `self.apply(...)` path instead.
         """
-        import inspect
-
         forwardable = dict(kwargs)
         forwardable["every_n_layers"] = every_n_layers
         if gradient_checkpointing_func is not None:
@@ -1412,11 +1501,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
     def get_processor(self):
         """Get the processor for this model."""
-        try:
-            from .asr_processing import ASRProcessor
-        except ImportError:
-            from asr_processing import ASRProcessor  # type: ignore[no-redef]
-
         return ASRProcessor(
             feature_extractor=self.feature_extractor,
             tokenizer=self.tokenizer,
@@ -1425,7 +1509,15 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             audio_token=self.audio_token,
         )
 
-    def state_dict(self, *args, **kwargs) -> dict[str, torch.Tensor]:
+    @overload
+    def state_dict(
+        self, *, destination: _StateDictT, prefix: str = ..., keep_vars: bool = ...
+    ) -> _StateDictT: ...
+
+    @overload
+    def state_dict(self, *, prefix: str = ..., keep_vars: bool = ...) -> dict[str, Any]: ...
+
+    def state_dict(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         """Save trainable weights: projector, plus the encoder/LM when unfrozen.
 
         Every module this returns is gated on the same freeze flag that decides
@@ -1627,7 +1719,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         mask `mask_length` frames forward from each), but reimplemented in
         pure torch so it stays inside the autograd graph without crossing
         the numpy boundary. This avoids inductor codegen failures
-        (e.g. the `‘zuf0’ was not declared` error from the prior numpy ->
+        (e.g. the `'zuf0' was not declared` error from the prior numpy ->
         torch.tensor round-trip) AND avoids the per-forward host-to-GPU
         sync that the numpy path required.
 
@@ -1674,12 +1766,13 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         valid_lengths = None
         if attention_mask is not None:
             if attention_mask.shape[-1] != sequence_length:
-                raise ValueError(
+                msg = (
                     "SpecAugment attention_mask time axis "
                     f"({attention_mask.shape[-1]}) does not match input_features "
                     f"({sequence_length}). Masking against the wrong axis is silent, "
                     "so this is raised rather than ignored."
                 )
+                raise ValueError(msg)
             valid_lengths = attention_mask.to(device).sum(dim=-1)
 
         if getattr(config, "mask_time_prob", 0.0) > 0:
@@ -1748,7 +1841,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             (mask_prob * lengths.float() / mask_length + 0.5).long(), min=min_masks
         )  # (B,)
 
-        # Sample start positions independently per sample × span, inside that
+        # Sample start positions independently per sample x span, inside that
         # sample's own valid range. Clamp so a span of length mask_length never
         # starts past the end of short content. torch.rand is [0, 1), so the
         # floor below never reaches max_start.
@@ -2011,7 +2104,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             return
         if not bool((attention_mask == 0).any()):
             return
-        raise ValueError(
+        msg = (
             "Refusing to generate: this is a left-padded batch of "
             f"{attention_mask.shape[0]} on MPS with sdpa attention, where "
             "Metal's kernel returns NaN for the padded rows and every one of "
@@ -2020,26 +2113,40 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             "to decode), batch only equal-length clips, or generate one clip "
             "at a time."
         )
+        raise ValueError(msg)
 
     @torch.no_grad()
     def generate(
         self,
+        *args: Any,
         input_ids: torch.Tensor | None = None,
         input_features: torch.Tensor | None = None,
         audio_attention_mask: torch.Tensor | None = None,
         attention_mask: torch.Tensor | None = None,
-        **generate_kwargs,
-    ):
+        **generate_kwargs: Any,
+    ) -> GenerateOutput | torch.LongTensor:
         """Generate transcription from audio input.
 
         Can be called in two ways:
         1. With input_ids containing <audio> tokens (from processor)
         2. With just audio, and we build the prompt internally
+
+        The audio arguments are keyword-only; `*args` exists only so the
+        signature stays compatible with `GenerationMixin.generate`, whose
+        positional parameters mean something else entirely.
         """
+        if args:
+            msg = (
+                "ASRModel.generate takes input_ids, input_features, "
+                "audio_attention_mask and attention_mask as keyword arguments"
+            )
+            raise TypeError(msg)
         if input_features is None:
-            raise ValueError("input_features required for generation")
+            msg = "input_features required for generation"
+            raise ValueError(msg)
         if audio_attention_mask is None:
-            raise ValueError("audio_attention_mask required for generation")
+            msg = "audio_attention_mask required for generation"
+            raise ValueError(msg)
 
         input_ids, attention_mask, inputs_embeds = self._prepare_audio_inputs(
             input_features,
@@ -2059,9 +2166,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             if flag in generate_kwargs:
                 score_flags[flag] = generate_kwargs.pop(flag)
         if score_flags:
-            from copy import copy as _copy
-
-            gen_cfg = _copy(self.generation_config)
+            gen_cfg = copy(self.generation_config)
             for flag, value in score_flags.items():
                 setattr(gen_cfg, flag, value)
             # output_scores requires return_dict_in_generate for HF generate to
@@ -2100,8 +2205,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # compatibility with existing callers.
         prompt_len = input_ids.shape[1] if "input_ids" in lm_inputs else 0
         if isinstance(output, torch.Tensor):
-            return output[:, prompt_len:]
-        output.sequences = output.sequences[:, prompt_len:]
+            # Slicing a token-id tensor keeps its int64 dtype.
+            return cast("torch.LongTensor", output[:, prompt_len:])
+        output.sequences = cast("torch.LongTensor", output.sequences[:, prompt_len:])
         return output
 
     def generate_streaming(
@@ -2182,10 +2288,13 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         thread.join()
 
-    def save_pretrained(self, save_directory: str | Path, **kwargs) -> None:
-        """Save model, tokenizer, and processor."""
-        import shutil
+    def save_pretrained(
+        self, save_directory: str | PathLike[str], *args: Any, **kwargs: Any
+    ) -> None:
+        """Save model, tokenizer, and processor.
 
+        Extra positional arguments are forwarded to `PreTrainedModel.save_pretrained`.
+        """
         save_dir = Path(save_directory)
         save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2210,7 +2319,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         del self.tokenizer
 
         try:
-            super().save_pretrained(save_dir, **kwargs)
+            super().save_pretrained(save_dir, *args, **kwargs)
         finally:
             self.tokenizer = tokenizer
 
@@ -2298,17 +2407,24 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         if card_fn is not None:
             card_fn(str(output_dir))
 
-    def push_to_hub(self, repo_id: str, **kwargs) -> str:
+    def _push_to_hub_recording_repo_id(self: Any, *args: Any, **kwargs: Any) -> str:
         """Push model to HuggingFace Hub, ensuring adapter_config points to repo.
 
         IMPORTANT: Sets base_model_name_or_path in adapter_config.json to repo_id
         so that transformers pipeline() can load the model correctly. Without this,
         the pipeline tries to load from "None" which fails.
         """
+        repo_id = args[0] if args else kwargs["repo_id"]
         # Store repo_id in config so save_pretrained can access it
         self.config.pretrained_model_path = repo_id
         # Call parent's push_to_hub
-        return super().push_to_hub(repo_id, **kwargs)
+        return PreTrainedModel.push_to_hub(self, *args, **kwargs)
+
+    # Declared the way PreTrainedModel declares its own push_to_hub (through
+    # functools.wraps), so the override has the type its bases expect. `self`
+    # is Any above because mypy and pyright bind a wraps-declared method
+    # differently, and no narrower annotation satisfies both.
+    push_to_hub = functools.wraps(PushToHubMixin.push_to_hub)(_push_to_hub_recording_repo_id)
 
 
 # Register with transformers Auto classes

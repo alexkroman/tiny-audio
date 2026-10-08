@@ -1,6 +1,7 @@
 """ASR evaluator implementations."""
 
 import contextlib
+import importlib
 import io
 import json
 import os
@@ -14,29 +15,67 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from types import ModuleType
+from typing import IO, TYPE_CHECKING, cast
 
 import numpy as np
 import soundfile as sf
 import torch
+from assemblyai.streaming.v3 import (
+    SpeechModel,
+    StreamingClient,
+    StreamingClientOptions,
+    StreamingEvents,
+    StreamingParameters,
+)
+from deepgram import DeepgramClient, ListenV1Response
+from huggingface_hub import InferenceClient
+from peft import PeftModel
+from peft.tuners.tuners_utils import BaseTuner
 from rich.table import Table
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential_jitter
+from transformers import TextIteratorStreamer, pipeline
 
 from scripts.eval.audio import as_16k_array, prepare_wav_bytes
+from scripts.eval.speaker_metrics import serialize_turns
+from tiny_audio.asr_config import ASRConfig
+from tiny_audio.asr_modeling import ASRModel, _resolve_attn_implementation
+from tiny_audio.asr_pipeline import ASRPipeline
 
 from .base import Evaluator, console, setup_assemblyai
 
-try:
-    from CoreFoundation import CFRunLoopRunInMode, kCFRunLoopDefaultMode
-    from Foundation import NSURL, NSLocale
-    from Speech import (
-        SFSpeechRecognizer,
-        SFSpeechRecognizerAuthorizationStatusAuthorized,
-        SFSpeechURLRecognitionRequest,
-    )
+if TYPE_CHECKING:
+    from elevenlabs import SpeechToTextChunkResponseModel
+    from elevenlabs.client import ElevenLabs
 
-    _APPLE_SPEECH_AVAILABLE = True
-except ImportError:
-    _APPLE_SPEECH_AVAILABLE = False
+    _ELEVENLABS_AVAILABLE: bool
+else:
+    # Optional vendor SDK, dev-only on purpose (see [tool.deptry] DEP004).
+    try:
+        from elevenlabs import SpeechToTextChunkResponseModel
+        from elevenlabs.client import ElevenLabs
+
+        _ELEVENLABS_AVAILABLE = True
+    except ImportError:
+        _ELEVENLABS_AVAILABLE = False
+
+# PyObjC's frameworks exist only on macOS with pyobjc-framework-Speech. They
+# are dynamic bridges (every attribute is resolved at runtime), so they are
+# loaded as modules and their members looked up at the call site.
+if TYPE_CHECKING:
+    CoreFoundation: ModuleType
+    Foundation: ModuleType
+    Speech: ModuleType
+    _APPLE_SPEECH_AVAILABLE: bool
+else:
+    try:
+        CoreFoundation = importlib.import_module("CoreFoundation")
+        Foundation = importlib.import_module("Foundation")
+        Speech = importlib.import_module("Speech")
+
+        _APPLE_SPEECH_AVAILABLE = True
+    except ImportError:
+        _APPLE_SPEECH_AVAILABLE = False
 
 
 def print_generation_config(model, model_path: str):
@@ -123,7 +162,9 @@ def _resolve_local_runtime() -> tuple[int | str, str]:
     return -1, "float32"
 
 
-def _build_working_tree_pipeline(model_path: str, device: int | str, model_dtype: str):
+def _build_working_tree_pipeline(
+    model_path: str, device: int | str, model_dtype: str
+) -> ASRPipeline:
     """Build the pipeline from THIS checkout's tiny_audio, ignoring the checkpoint's copy.
 
     `save_pretrained` ships the modeling code alongside the weights and points
@@ -146,10 +187,6 @@ def _build_working_tree_pipeline(model_path: str, device: int | str, model_dtype
     dtype goes through the config, not a `dtype=` kwarg -- see
     `_resolve_local_runtime` for why that distinction is load-bearing.
     """
-    from tiny_audio.asr_config import ASRConfig
-    from tiny_audio.asr_modeling import ASRModel
-    from tiny_audio.asr_pipeline import ASRPipeline
-
     config = ASRConfig.from_pretrained(model_path)
     for field in DTYPE_CONFIG_FIELDS:
         setattr(config, field, model_dtype)
@@ -189,11 +226,12 @@ def _merge_lora_adapters(model) -> bool:
     `asr_modeling`. `config.use_lora` is read only during load, so unwrapping
     afterwards is invisible to the rest of the stack.
     """
-    from peft import PeftModel
-
-    if not isinstance(model.language_model, PeftModel):
+    language_model = model.language_model
+    if not isinstance(language_model, PeftModel):
         return False
-    model.language_model = model.language_model.merge_and_unload()
+    # A LoRA PeftModel's base_model is its tuner; PeftModel's __getattr__
+    # forwards merge_and_unload there, so call it on the tuner directly.
+    model.language_model = cast(BaseTuner, language_model.base_model).merge_and_unload()
     return True
 
 
@@ -228,8 +266,6 @@ def _use_sdpa_where_safe(model) -> None:
     N threads each making batch-1 calls, so it stays safe. Anything that
     batches ragged audio on a Mac must not come through here.
     """
-    from tiny_audio.asr_modeling import _resolve_attn_implementation
-
     text_model_id = getattr(model.config, "text_model_id", None)
     resolved = _resolve_attn_implementation(
         model.config.attn_implementation, model_id=text_model_id
@@ -239,24 +275,28 @@ def _use_sdpa_where_safe(model) -> None:
     model.language_model.set_attn_implementation(resolved)
 
 
-def _build_local_pipeline(model_path: str, *, local_code: bool = False):
+def _build_local_pipeline(model_path: str, *, local_code: bool = False) -> ASRPipeline:
     """Build the ASR pipeline both local evaluators run on.
 
     `local_code=True` swaps the checkpoint's bundled modeling code for this
     checkout's; see `_build_working_tree_pipeline`.
     """
-    from transformers import pipeline
-
     device, model_dtype = _resolve_local_runtime()
     if local_code:
         pipe = _build_working_tree_pipeline(model_path, device, model_dtype)
     else:
-        pipe = pipeline(
-            "automatic-speech-recognition",
-            model=model_path,
-            trust_remote_code=True,
-            device=device,
-            model_kwargs=dict.fromkeys(DTYPE_CONFIG_FIELDS, model_dtype),
+        # `custom_pipelines` in the checkpoint's config.json resolves this to
+        # the checkpoint's own copy of ASRPipeline (see above), not the
+        # generic ASR pipeline the task name alone would suggest.
+        pipe = cast(
+            ASRPipeline,
+            pipeline(
+                "automatic-speech-recognition",
+                model=model_path,
+                trust_remote_code=True,
+                device=device,
+                model_kwargs=dict.fromkeys(DTYPE_CONFIG_FIELDS, model_dtype),
+            ),
         )
     merged = _merge_lora_adapters(pipe.model)
     _use_sdpa_where_safe(pipe.model)
@@ -322,7 +362,7 @@ class LocalEvaluator(Evaluator):
             if top1 and top2 and len(top1) == len(top2):
                 n = len(top1)
                 mean_top1 = sum(top1) / n
-                mean_margin = sum(a - b for a, b in zip(top1, top2)) / n
+                mean_margin = sum(a - b for a, b in zip(top1, top2, strict=True)) / n
                 confidence = {
                     "mean_top1_logprob": mean_top1,
                     "mean_margin": mean_margin,
@@ -337,14 +377,13 @@ class LocalEvaluator(Evaluator):
         scored -- the same call a user makes. An alignment or diarization
         error is raised, not scored as an unlabelled transcript.
         """
-        from scripts.eval.speaker_metrics import serialize_turns
-
         start = time.time()
         result = self.pipe(audio, user_prompt=self.user_prompt, return_speakers=True)
         elapsed = time.time() - start
         for key in ("timestamp_error", "diarization_error"):
             if result.get(key):
-                raise RuntimeError(f"{key}: {result[key]}")
+                msg = f"{key}: {result[key]}"
+                raise RuntimeError(msg)
         text = serialize_turns((w["speaker"], w["word"]) for w in result["words"])
         return text, elapsed, None
 
@@ -385,8 +424,6 @@ class LocalStreamingEvaluator(Evaluator):
         self.processing_times = []
 
     def transcribe(self, audio) -> tuple[str, float, dict | None]:
-        from transformers import TextIteratorStreamer
-
         audio_array = as_16k_array(audio)
 
         # Process audio (ASRProcessor handles sampling_rate internally)
@@ -406,8 +443,8 @@ class LocalStreamingEvaluator(Evaluator):
             skip_prompt=True,
         )
 
-        first_token_time = [None]
-        generation_start = [None]
+        first_token_time: list[float | None] = [None]
+        generation_start: list[float | None] = [None]
 
         def generate():
             generation_start[0] = time.time()
@@ -470,8 +507,6 @@ class EndpointEvaluator(Evaluator):
 
     def __init__(self, endpoint_url: str, **kwargs):
         super().__init__(**kwargs)
-        from huggingface_hub import InferenceClient
-
         self.client = InferenceClient(base_url=endpoint_url)
 
     def transcribe(self, audio) -> tuple[str, float, dict | None]:
@@ -521,12 +556,18 @@ class AssemblyAIEvaluator(Evaluator):
 
 def speaker_text(transcript) -> str:
     """An AssemblyAI transcript's utterances as `<SPK_n>` text (plain text if none)."""
-    from scripts.eval.speaker_metrics import serialize_turns
-
     utterances = transcript.utterances or []
     if not utterances:
         return transcript.text or ""
     return serialize_turns((u.speaker, u.text) for u in utterances)
+
+
+class _StreamingError(RuntimeError):
+    """A streaming-session failure carrying the server's close code (or None)."""
+
+    def __init__(self, code: object, detail: str) -> None:
+        super().__init__(f"Streaming error (code={code}): {detail}")
+        self.streaming_code = code
 
 
 class AssemblyAIStreamingEvaluator(Evaluator):
@@ -599,14 +640,6 @@ class AssemblyAIStreamingEvaluator(Evaluator):
         return audio_array
 
     def _run_session(self, pcm_data: bytes) -> tuple[str, float]:
-        from assemblyai.streaming.v3 import (
-            SpeechModel,
-            StreamingClient,
-            StreamingClientOptions,
-            StreamingEvents,
-            StreamingParameters,
-        )
-
         # Per-call state — closures capture these, so threads cannot stomp on
         # each other's connection or callback buckets.
         transcripts: dict[int, str] = {}
@@ -658,10 +691,7 @@ class AssemblyAIStreamingEvaluator(Evaluator):
         if error_box[0] is not None:
             err = error_box[0]
             code = getattr(err, "code", None)
-            msg = str(err) or "no message"
-            exc = RuntimeError(f"Streaming error (code={code}): {msg}")
-            exc.streaming_code = code  # type: ignore[attr-defined]
-            raise exc
+            raise _StreamingError(code, str(err) or "no message")
 
         full_transcript = " ".join(transcripts[k] for k in sorted(transcripts.keys()))
         return full_transcript, elapsed
@@ -672,8 +702,6 @@ class DeepgramEvaluator(Evaluator):
 
     def __init__(self, api_key: str, **kwargs):
         super().__init__(**kwargs)
-        from deepgram import DeepgramClient
-
         self.client = DeepgramClient(api_key=api_key)
 
     def transcribe(self, audio) -> tuple[str, float, dict | None]:
@@ -686,8 +714,13 @@ class DeepgramEvaluator(Evaluator):
         )
         elapsed = time.time() - start
 
-        text = response.results.channels[0].alternatives[0].transcript
-        return text, elapsed, None
+        # Without a callback URL the API answers synchronously, with the
+        # transcript rather than an accepted-for-later acknowledgement.
+        alternatives = cast(ListenV1Response, response).results.channels[0].alternatives
+        if not alternatives:
+            msg = "Deepgram response has no alternatives"
+            raise RuntimeError(msg)
+        return alternatives[0].transcript or "", elapsed, None
 
 
 class _SmallestHTTPError(RuntimeError):
@@ -748,7 +781,8 @@ class SmallestEvaluator(Evaluator):
         elapsed = time.time() - start
 
         if payload.get("status") != "success":
-            raise RuntimeError(f"Smallest.ai returned non-success payload: {payload}")
+            msg = f"Smallest.ai returned non-success payload: {payload}"
+            raise RuntimeError(msg)
         return payload.get("transcription") or "", elapsed, None
 
 
@@ -757,8 +791,9 @@ class ElevenLabsEvaluator(Evaluator):
 
     def __init__(self, api_key: str, model: str = "scribe_v2", **kwargs):
         super().__init__(**kwargs)
-        from elevenlabs.client import ElevenLabs
-
+        if not _ELEVENLABS_AVAILABLE:
+            msg = "ElevenLabs backend requires the elevenlabs SDK: pip install elevenlabs"
+            raise ImportError(msg)
         self.client = ElevenLabs(api_key=api_key)
         self.model = model
 
@@ -773,7 +808,11 @@ class ElevenLabsEvaluator(Evaluator):
         elapsed = time.time() - start
 
         # Extract text from transcription response
-        text = transcription.text if hasattr(transcription, "text") else str(transcription)
+        text = (
+            transcription.text
+            if isinstance(transcription, SpeechToTextChunkResponseModel)
+            else str(transcription)
+        )
         return text or "", elapsed, None
 
 
@@ -788,7 +827,7 @@ def _pump_run_loop_until(event: threading.Event, timeout_seconds: float) -> bool
     while not event.is_set():
         if time.time() >= deadline:
             return False
-        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, True)
+        CoreFoundation.CFRunLoopRunInMode(CoreFoundation.kCFRunLoopDefaultMode, 0.05, True)
     return True
 
 
@@ -800,10 +839,11 @@ class AppleSpeechEvaluator(Evaluator):
 
     def __init__(self, locale: str = "en-US", **kwargs):
         if not _APPLE_SPEECH_AVAILABLE:
-            raise ImportError(
+            msg = (
                 "Apple SFSpeechRecognizer backend requires PyObjC on macOS. "
                 "Install with: pip install pyobjc-framework-Speech"
             )
+            raise ImportError(msg)
 
         if kwargs.get("num_workers", 1) > 1:
             console.print(
@@ -814,7 +854,7 @@ class AppleSpeechEvaluator(Evaluator):
         super().__init__(**kwargs)
 
         self.locale = locale
-        self.temp_dir = tempfile.mkdtemp(prefix="apple-speech-")
+        self.temp_dir: str | None = tempfile.mkdtemp(prefix="apple-speech-")
         self._authorize()
         self.recognizer = self._build_recognizer(locale)
 
@@ -826,24 +866,29 @@ class AppleSpeechEvaluator(Evaluator):
             status_box[0] = status
             auth_event.set()
 
-        SFSpeechRecognizer.requestAuthorization_(handler)
+        Speech.SFSpeechRecognizer.requestAuthorization_(handler)
         if not _pump_run_loop_until(auth_event, self.AUTH_TIMEOUT_SECONDS):
-            raise TimeoutError("Speech recognition authorization request timed out")
-        if status_box[0] != SFSpeechRecognizerAuthorizationStatusAuthorized:
-            raise RuntimeError(
+            msg = "Speech recognition authorization request timed out"
+            raise TimeoutError(msg)
+        if status_box[0] != Speech.SFSpeechRecognizerAuthorizationStatusAuthorized:
+            msg = (
                 f"Speech recognition not authorized (status={status_box[0]}). "
                 "Approve at System Settings > Privacy & Security > Speech Recognition."
             )
+            raise RuntimeError(msg)
 
     def _build_recognizer(self, locale: str):
-        ns_locale = NSLocale.alloc().initWithLocaleIdentifier_(locale)
-        recognizer = SFSpeechRecognizer.alloc().initWithLocale_(ns_locale)
+        ns_locale = Foundation.NSLocale.alloc().initWithLocaleIdentifier_(locale)
+        recognizer = Speech.SFSpeechRecognizer.alloc().initWithLocale_(ns_locale)
         if recognizer is None:
-            raise ValueError(f"Unsupported locale: {locale}")
+            msg = f"Unsupported locale: {locale}"
+            raise ValueError(msg)
         if not recognizer.supportsOnDeviceRecognition():
-            raise RuntimeError(f"On-device recognition unavailable for locale {locale}")
+            msg = f"On-device recognition unavailable for locale {locale}"
+            raise RuntimeError(msg)
         if not recognizer.isAvailable():
-            raise RuntimeError("SFSpeechRecognizer not available right now")
+            msg = "SFSpeechRecognizer not available right now"
+            raise RuntimeError(msg)
         return recognizer
 
     def transcribe(self, audio) -> tuple[str, float, dict | None]:
@@ -853,14 +898,14 @@ class AppleSpeechEvaluator(Evaluator):
             with os.fdopen(fd, "wb") as f:
                 f.write(wav_bytes)
 
-            url = NSURL.fileURLWithPath_(temp_path)
-            request = SFSpeechURLRecognitionRequest.alloc().initWithURL_(url)
+            url = Foundation.NSURL.fileURLWithPath_(temp_path)
+            request = Speech.SFSpeechURLRecognitionRequest.alloc().initWithURL_(url)
             request.setRequiresOnDeviceRecognition_(True)
             request.setShouldReportPartialResults_(False)
 
             done_event = threading.Event()
             text_box = [""]
-            error_box = [None]
+            error_box: list[str | None] = [None]
 
             def handler(result, error):
                 if error is not None:
@@ -878,21 +923,22 @@ class AppleSpeechEvaluator(Evaluator):
 
             if not _pump_run_loop_until(done_event, self.TRANSCRIBE_TIMEOUT_SECONDS):
                 task.cancel()
-                raise RuntimeError(
-                    f"Recognition timed out after {self.TRANSCRIBE_TIMEOUT_SECONDS}s"
-                )
+                msg = f"Recognition timed out after {self.TRANSCRIBE_TIMEOUT_SECONDS}s"
+                raise RuntimeError(msg)
             elapsed = time.time() - start
 
             if error_box[0]:
-                raise RuntimeError(f"SFSpeechRecognizer error: {error_box[0]}")
+                msg = f"SFSpeechRecognizer error: {error_box[0]}"
+                raise RuntimeError(msg)
             return text_box[0], elapsed, None
         finally:
             with contextlib.suppress(OSError):
                 Path(temp_path).unlink()
 
     def close(self) -> None:
-        if getattr(self, "temp_dir", None):
-            shutil.rmtree(self.temp_dir, ignore_errors=True)
+        temp_dir = getattr(self, "temp_dir", None)
+        if temp_dir:
+            shutil.rmtree(temp_dir, ignore_errors=True)
             self.temp_dir = None
 
 
@@ -946,11 +992,12 @@ class SwiftSDKEvaluator(Evaluator):
             )
         ).expanduser()
         if not (swift_dir / "Package.swift").exists():
-            raise RuntimeError(
+            msg = (
                 f"Swift package not found at {swift_dir}. Set TINY_AUDIO_SWIFT_DIR "
                 f"to the path containing Package.swift (the tiny-audio-swift "
                 f"checkout's swift/ directory)."
             )
+            raise RuntimeError(msg)
         swift_build = swift_dir / ".build"
 
         # Build the debug test bundle first: SwiftPM only emits `mlx.metallib`
@@ -963,11 +1010,12 @@ class SwiftSDKEvaluator(Evaluator):
             text=True,
         )
         if test_build_result.returncode != 0:
-            raise RuntimeError(
+            msg = (
                 "swift build --build-tests failed:\n"
                 f"stdout:\n{test_build_result.stdout}\n"
                 f"stderr:\n{test_build_result.stderr}"
             )
+            raise RuntimeError(msg)
 
         # Always rebuild release before running. Cheap when up-to-date.
         console.print("[bold cyan]Building tiny-audio-swift-eval (release)...[/bold cyan]")
@@ -987,15 +1035,17 @@ class SwiftSDKEvaluator(Evaluator):
             text=True,
         )
         if build_result.returncode != 0:
-            raise RuntimeError(
+            msg = (
                 "swift build failed:\n"
                 f"stdout:\n{build_result.stdout}\n"
                 f"stderr:\n{build_result.stderr}"
             )
+            raise RuntimeError(msg)
 
         binary = swift_build / "release" / "tiny-audio-swift-eval"
         if not binary.exists():
-            raise RuntimeError(f"tiny-audio-swift-eval binary missing after build: {binary}")
+            msg = f"tiny-audio-swift-eval binary missing after build: {binary}"
+            raise RuntimeError(msg)
 
         # Copy mlx.metallib next to the release binary so MLX can find it at
         # runtime. The metallib should land in the debug test bundle after
@@ -1032,13 +1082,14 @@ class SwiftSDKEvaluator(Evaluator):
                         metallib_src = candidate
                         break
             if metallib_src is None:
-                raise RuntimeError(
+                msg = (
                     f"mlx.metallib not found at {primary_src} and no fallback "
                     "metallib located on disk. mlx-swift's build process did not "
                     "emit one. Workaround: copy a working `mlx.metallib` from "
                     "another tiny-audio-swift checkout's debug test bundle into "
                     f"{primary_src}, then re-run."
                 )
+                raise RuntimeError(msg)
             shutil.copy2(str(metallib_src), str(metallib_dst))
             console.print(f"[dim]Copied mlx.metallib from {metallib_src} to binary directory[/dim]")
 
@@ -1060,20 +1111,23 @@ class SwiftSDKEvaluator(Evaluator):
         )
 
         # Wait for the binary to emit `{"ready": true}` once load + warmup is done.
-        ready_line = self.proc.stdout.readline()
+        _, stdout, stderr = self._pipes()
+        ready_line = stdout.readline()
         if not ready_line:
-            err = self.proc.stderr.read()
-            raise RuntimeError(f"Swift binary failed to start. stderr:\n{err}")
+            err = stderr.read()
+            msg = f"Swift binary failed to start. stderr:\n{err}"
+            raise RuntimeError(msg)
         try:
             ready_msg = json.loads(ready_line)
         except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                f"Swift binary emitted non-JSON startup line: {ready_line!r}"
-            ) from exc
+            msg = f"Swift binary emitted non-JSON startup line: {ready_line!r}"
+            raise RuntimeError(msg) from exc
         if "error" in ready_msg:
-            raise RuntimeError(f"Swift binary load failed: {ready_msg['error']}")
+            msg = f"Swift binary load failed: {ready_msg['error']}"
+            raise RuntimeError(msg)
         if not ready_msg.get("ready"):
-            raise RuntimeError(f"Swift binary unexpected startup line: {ready_msg}")
+            msg = f"Swift binary unexpected startup line: {ready_msg}"
+            raise RuntimeError(msg)
         console.print("[bold green]Swift SDK ready[/bold green]")
 
     def transcribe(self, audio) -> tuple[str, float, dict | None]:
@@ -1082,24 +1136,36 @@ class SwiftSDKEvaluator(Evaluator):
         # temp wav if we got an in-memory array.
         path, is_temp = self._resolve_audio_path(audio)
         try:
-            self.proc.stdin.write(path + "\n")
-            self.proc.stdin.flush()
-            line = self.proc.stdout.readline()
+            stdin, stdout, stderr = self._pipes()
+            stdin.write(path + "\n")
+            stdin.flush()
+            line = stdout.readline()
             if not line:
-                err = self.proc.stderr.read()
-                raise RuntimeError(f"Swift binary closed unexpectedly. stderr:\n{err}")
+                err = stderr.read()
+                msg = f"Swift binary closed unexpectedly. stderr:\n{err}"
+                raise RuntimeError(msg)
             try:
-                msg = json.loads(line)
+                reply = json.loads(line)
             except json.JSONDecodeError as exc:
-                raise RuntimeError(f"Swift binary emitted non-JSON line: {line!r}") from exc
-            if "error" in msg:
-                raise RuntimeError(f"Swift transcribe failed: {msg['error']}")
-            text = msg.get("text", "")
-            elapsed_ms = msg.get("elapsed_ms", 0)
+                msg = f"Swift binary emitted non-JSON line: {line!r}"
+                raise RuntimeError(msg) from exc
+            if "error" in reply:
+                msg = f"Swift transcribe failed: {reply['error']}"
+                raise RuntimeError(msg)
+            text = reply.get("text", "")
+            elapsed_ms = reply.get("elapsed_ms", 0)
             return text, elapsed_ms / 1000.0, None
         finally:
             if is_temp:
                 Path(path).unlink(missing_ok=True)
+
+    def _pipes(self) -> tuple[IO[str], IO[str], IO[str]]:
+        """The binary's stdin, stdout and stderr; all three are opened as PIPEs."""
+        proc = self.proc
+        assert proc.stdin is not None
+        assert proc.stdout is not None
+        assert proc.stderr is not None
+        return proc.stdin, proc.stdout, proc.stderr
 
     def _resolve_audio_path(self, audio) -> tuple[str, bool]:
         """Return (filesystem_path, is_temp) for the Swift binary to read.
@@ -1112,8 +1178,6 @@ class SwiftSDKEvaluator(Evaluator):
         - an AudioSamples-like object with `.data` and `.sample_rate`
         For arrays/decoders without a path, materialise to a temp wav.
         """
-        import numpy as np
-
         if isinstance(audio, str):
             return audio, False
         if isinstance(audio, dict):
@@ -1130,7 +1194,8 @@ class SwiftSDKEvaluator(Evaluator):
             # 'array' + 'sampling_rate': decoded numpy array — encode to wav.
             array_val = audio.get("array")
             if array_val is None:
-                raise ValueError("audio dict has no usable 'path', 'bytes', or 'array' field")
+                msg = "audio dict has no usable 'path', 'bytes', or 'array' field"
+                raise ValueError(msg)
             arr = np.asarray(array_val, dtype=np.float32)
             sr = int(audio.get("sampling_rate", 16000))
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
@@ -1148,12 +1213,13 @@ class SwiftSDKEvaluator(Evaluator):
                 tmp_name = tmp.name
             sf.write(tmp_name, data, sr, subtype="PCM_16")
             return tmp_name, True
-        raise ValueError(f"unsupported audio input type for Swift eval: {type(audio)}")
+        msg = f"unsupported audio input type for Swift eval: {type(audio)}"
+        raise ValueError(msg)
 
     def __del__(self):
         if hasattr(self, "proc") and self.proc.poll() is None:
             try:
-                self.proc.stdin.close()
+                self._pipes()[0].close()
                 self.proc.wait(timeout=5)
             except Exception:
                 self.proc.kill()

@@ -1,8 +1,9 @@
 """Dataset configuration and loading for ASR evaluation."""
 
 from dataclasses import dataclass
+from typing import cast
 
-from datasets import Audio, load_dataset
+from datasets import Audio, IterableDataset, load_dataset
 
 
 @dataclass
@@ -157,17 +158,22 @@ def load_eval_dataset(
             False only to reproduce a pre-2026-09-18 first-N number.
     """
     if name not in DATASET_REGISTRY:
-        raise ValueError(f"Unknown dataset: {name}. Available: {list(DATASET_REGISTRY.keys())}")
+        msg = f"Unknown dataset: {name}. Available: {list(DATASET_REGISTRY.keys())}"
+        raise ValueError(msg)
 
     cfg = DATASET_REGISTRY[name]
     config = config_override or cfg.config
 
     shuffle_note = f", shuffled seed={SHUFFLE_SEED}" if shuffle else ", UNSHUFFLED first-N"
     print(f"Loading {cfg.path} (config: {config}, split: {split}{shuffle_note})...")
-    ds = (
-        load_dataset(cfg.path, config, split=split, streaming=True)
-        if config
-        else load_dataset(cfg.path, split=split, streaming=True)
+    # streaming=True with a named split always yields an IterableDataset.
+    ds = cast(
+        IterableDataset,
+        (
+            load_dataset(cfg.path, config, split=split, streaming=True)
+            if config
+            else load_dataset(cfg.path, split=split, streaming=True)
+        ),
     )
     ds = ds.cast_column(cfg.audio_field, Audio(sampling_rate=16000))
     if shuffle:

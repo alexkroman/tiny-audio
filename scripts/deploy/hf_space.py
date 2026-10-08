@@ -21,7 +21,8 @@ def extract_repo_id(repo_id_or_url: str) -> str:
         return repo_id_or_url.strip("/")
     parsed = RepoUrl(repo_id_or_url)
     if parsed.repo_type != "space":
-        raise typer.BadParameter(f"Not a Space: {repo_id_or_url}")
+        msg = f"Not a Space: {repo_id_or_url}"
+        raise typer.BadParameter(msg)
     return parsed.repo_id
 
 
@@ -55,9 +56,8 @@ def deploy(
     required_files = ["app.py", "requirements.txt", "README.md"]
     missing = [f for f in required_files if not (demo_dir / f).exists()]
     if missing:
-        raise typer.BadParameter(
-            f"required files not found: {', '.join(missing)}", param_hint="--demo-dir"
-        )
+        msg = f"required files not found: {', '.join(missing)}"
+        raise typer.BadParameter(msg, param_hint="--demo-dir")
 
     typer.echo(f"\nDeploying to Hugging Face Space: {repo_id}")
     typer.echo(f"Demo directory: {demo_dir.absolute()}")

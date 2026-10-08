@@ -4,6 +4,7 @@ The ratchet tests pin the *minimum* each threshold may take. Raising a floor
 is a one-line edit here too; lowering one fails CI, which is the point.
 """
 
+import importlib
 import sys
 import tomllib
 from pathlib import Path
@@ -13,6 +14,7 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
+from scripts import cli as cli_module
 from scripts import dev
 from scripts.utils import get_project_root
 
@@ -122,7 +124,12 @@ class TestCommandWiring:
 
     def test_failed_build_skips_the_artifact_checks(self, monkeypatch):
         calls = []
-        monkeypatch.setattr(dev, "run", lambda *args: calls.append(args) or 1)
+
+        def failing_run(*args: str) -> int:
+            calls.append(args)
+            return 1
+
+        monkeypatch.setattr(dev, "run", failing_run)
         assert runner.invoke(dev.app, ["build"]).exit_code == 1
         assert calls == [tuple(dev.BUILD_COMMAND)]
 
@@ -246,17 +253,15 @@ class TestLazyRegistration:
     @staticmethod
     def _fresh_cli():
         """Reload scripts.cli so its LazyGroup starts with an empty cache."""
-        import importlib
-
-        from scripts import cli
-
-        return importlib.reload(cli)
+        importlib.reload(cli_module)  # re-executes the module in place
+        return cli_module
 
     def test_root_lists_every_subcommand_without_importing(self, monkeypatch):
         cli = self._fresh_cli()
         for module in cli.SUBCOMMANDS.values():
             monkeypatch.delitem(sys.modules, module, raising=False)
         group = typer.main.get_command(cli.app)
+        assert isinstance(group, cli.LazyGroup)
         ctx = typer.Context(group)
         assert group.list_commands(ctx) == list(cli.SUBCOMMANDS)
         assert not any(m in sys.modules for m in cli.SUBCOMMANDS.values())
@@ -266,6 +271,7 @@ class TestLazyRegistration:
         for module in cli.SUBCOMMANDS.values():
             monkeypatch.delitem(sys.modules, module, raising=False)
         group = typer.main.get_command(cli.app)
+        assert isinstance(group, cli.LazyGroup)
         ctx = typer.Context(group)
         command = group.get_command(ctx, "dev")
         assert command is not None
@@ -277,12 +283,14 @@ class TestLazyRegistration:
     def test_resolved_commands_are_cached(self):
         cli = self._fresh_cli()
         group = typer.main.get_command(cli.app)
+        assert isinstance(group, cli.LazyGroup)
         ctx = typer.Context(group)
         assert group.get_command(ctx, "dev") is group.get_command(ctx, "dev")
 
     def test_unknown_command_resolves_to_none(self):
         cli = self._fresh_cli()
         group = typer.main.get_command(cli.app)
+        assert isinstance(group, cli.LazyGroup)
         ctx = typer.Context(group)
         assert group.get_command(ctx, "nonsense") is None
 

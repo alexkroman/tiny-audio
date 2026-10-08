@@ -3,6 +3,8 @@
 import pytest
 import torch
 
+from tiny_audio.handler import EndpointHandler, _best_device
+
 
 class TestEndpointHandlerCall:
     """Tests for EndpointHandler.__call__ method."""
@@ -10,14 +12,12 @@ class TestEndpointHandlerCall:
     @pytest.fixture
     def mock_handler(self, mocker):
         """Create handler with mocked model and pipeline."""
-        from tiny_audio.handler import EndpointHandler
-
         handler = object.__new__(EndpointHandler)
-        handler.pipe = mocker.MagicMock()
-        handler.pipe.return_value = {"text": "hello world"}
+        pipe = mocker.MagicMock()
+        pipe.return_value = {"text": "hello world"}
+        handler.pipe = pipe
         handler.model = mocker.MagicMock()
-        handler.device = "cpu"
-        handler.dtype = None
+        handler.device = torch.device("cpu")
 
         return handler
 
@@ -62,8 +62,6 @@ class TestEndpointHandlerInit:
         mocker.patch("tiny_audio.handler.ASRPipeline")
         mock_model.from_pretrained.return_value = mocker.MagicMock()
 
-        from tiny_audio.handler import EndpointHandler
-
         handler = EndpointHandler("/fake/path")
 
         assert handler.device == torch.device("cpu")
@@ -82,8 +80,6 @@ class TestEndpointHandlerInit:
         mocker.patch("torch.cuda.is_available", return_value=cuda)
         mocker.patch("torch.backends.mps.is_available", return_value=mps)
 
-        from tiny_audio.handler import _best_device
-
         assert _best_device() == torch.device(expected)
 
     def test_handler_sets_tf32_flags(self):
@@ -100,6 +96,4 @@ class TestEndpointHandlerIntegration:
 
     def test_handler_importable(self):
         """EndpointHandler should be importable."""
-        from tiny_audio.handler import EndpointHandler
-
         assert EndpointHandler is not None

@@ -9,7 +9,8 @@ Tests below capture both the marker-stripping correctness (deterministic)
 and the truecase output (which depends on the truecase library's NLTK-backed
 vocab). The truecase-dependent expected values were captured from the live
 normalizer on 2026-05-13; if the truecase library updates and these expected
-values shift, update with `python -c "from scripts.train import _normalize_label; print(_normalize_label(...))"`.
+values shift, update with
+`python -c "from scripts.train import _normalize_label; print(_normalize_label(...))"`.
 """
 
 import pytest

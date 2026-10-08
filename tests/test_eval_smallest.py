@@ -3,6 +3,7 @@
 import io
 import json
 import urllib.error
+from email.message import Message
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -19,7 +20,7 @@ def _response(payload: dict) -> MagicMock:
 
 
 def _http_error(code: int) -> urllib.error.HTTPError:
-    return urllib.error.HTTPError("url", code, "err", {}, io.BytesIO(b"rate limited"))  # type: ignore[arg-type]
+    return urllib.error.HTTPError("url", code, "err", Message(), io.BytesIO(b"rate limited"))
 
 
 @pytest.fixture
@@ -30,7 +31,7 @@ def audio():
 @pytest.fixture(autouse=True)
 def no_backoff(monkeypatch):
     # tenacity sleeps between attempts; skip the wait so retry tests stay fast.
-    monkeypatch.setattr(SmallestEvaluator._post.retry, "sleep", lambda _s: None)
+    monkeypatch.setattr("tenacity.nap.time.sleep", lambda _s: None)
 
 
 class TestSmallestEvaluator:

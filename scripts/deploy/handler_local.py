@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """Local runner to test the HuggingFace inference endpoint handler."""
 
+import importlib
 import json
 import time
+import traceback
 from importlib import resources
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 
 from scripts.utils import get_project_root
+
+if TYPE_CHECKING:
+    from tiny_audio.handler import EndpointHandler
 
 app = typer.Typer(help="Test HuggingFace inference endpoint handler locally")
 
@@ -54,7 +59,7 @@ def find_test_audio() -> str | None:
 
 
 @app.command()
-def test(
+def run_handler(
     model: Annotated[
         str,
         typer.Option("--model", "-m", help="Model path/ID to load"),
@@ -90,7 +95,7 @@ def test(
     # (~2.8s), which every other `ta dev` command would otherwise pay because
     # scripts/dev.py imports this module to register the command.
     try:
-        from tiny_audio.handler import EndpointHandler
+        handler_module = importlib.import_module("tiny_audio.handler")
     except ImportError as e:
         typer.echo(f"Failed to import handler: {e}", err=True)
         typer.echo("   Make sure tiny_audio package is installed", err=True)
@@ -107,11 +112,9 @@ def test(
 
     start_time = time.time()
     try:
-        handler = EndpointHandler(path=model_path)
+        handler: EndpointHandler = handler_module.EndpointHandler(path=model_path)
     except Exception as e:
         typer.echo(f"Failed to load model: {e}")
-        import traceback
-
         traceback.print_exc()
         raise typer.Exit(1) from None
     typer.echo(f"Model loaded successfully in {time.time() - start_time:.2f} seconds")
@@ -123,9 +126,8 @@ def test(
         if audio_path:
             typer.echo(f"   Found test audio: {audio_path}")
         else:
-            raise typer.BadParameter(
-                "no test audio found; pass one explicitly", param_hint="--audio"
-            )
+            msg = "no test audio found; pass one explicitly"
+            raise typer.BadParameter(msg, param_hint="--audio")
 
     typer.echo(f"\nUsing audio file: {audio_path}")
     typer.echo("\nPreparing inference request...")
@@ -149,14 +151,15 @@ def test(
             result = handler(data)
         except Exception as e:
             typer.echo(f"Inference failed: {e}")
-            import traceback
-
             traceback.print_exc()
         else:
             typer.echo(f"Inference completed in {time.time() - start_time:.2f} seconds")
             typer.echo("\nTranscription Result:")
             typer.echo("-" * 40)
-            typer.echo(result.get("text", json.dumps(result, indent=2)))
+            if isinstance(result, dict):
+                typer.echo(result.get("text", json.dumps(result, indent=2)))
+            else:
+                typer.echo(json.dumps(result, indent=2))
             typer.echo("-" * 40)
 
     if batch_test:
@@ -171,8 +174,6 @@ def test(
             result = handler(data)
         except Exception as e:
             typer.echo(f"Batch inference failed: {e}")
-            import traceback
-
             traceback.print_exc()
         else:
             inference_time = time.time() - start_time
@@ -180,7 +181,7 @@ def test(
             typer.echo(f"   Average time per sample: {inference_time / batch_size:.2f} seconds")
             typer.echo("\nBatch Results:")
             typer.echo("-" * 40)
-            if "texts" in result:
+            if isinstance(result, dict) and "texts" in result:
                 for i, text in enumerate(result["texts"], 1):
                     typer.echo(f"Sample {i}: {text}")
             else:

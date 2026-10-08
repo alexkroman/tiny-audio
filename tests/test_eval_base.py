@@ -1,7 +1,11 @@
 """Tests for scripts/eval/evaluators/base.py - base evaluator and result types."""
 
+from unittest.mock import MagicMock
+
 import pytest
 
+import scripts.eval.cli as cli
+import scripts.eval.evaluators.asr as asr
 from scripts.eval.evaluators.base import (
     ASSEMBLYAI_MODELS,
     EvalResult,
@@ -247,8 +251,6 @@ class TestLocalEvaluatorNumWorkers:
     """`-w` must reach LocalEvaluator; `_build_evaluator` used to drop it silently."""
 
     def test_num_workers_forwarded(self, monkeypatch):
-        import scripts.eval.cli as cli
-
         captured = {}
 
         class StubLocalEvaluator:
@@ -275,10 +277,6 @@ class TestLocalEvaluatorNumWorkers:
     @pytest.mark.parametrize(("device", "expected"), [("mps", 1), (0, 2)])
     def test_mps_clamps_to_one_worker(self, monkeypatch, device, expected):
         """MPS segfaults under concurrent Metal encoding, so -w must not thread there."""
-        from unittest.mock import MagicMock
-
-        import scripts.eval.evaluators.asr as asr
-
         monkeypatch.setattr(asr, "_resolve_local_runtime", lambda: (device, "bfloat16"))
         monkeypatch.setattr(asr, "_build_local_pipeline", lambda *a, **k: MagicMock())
         monkeypatch.setattr(asr, "print_generation_config", lambda *a, **k: None)

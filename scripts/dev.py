@@ -9,6 +9,7 @@ import typer
 from rich.console import Console
 
 from scripts import quality
+from scripts.deploy import handler_local
 
 app = typer.Typer(
     name="dev",
@@ -277,13 +278,7 @@ def docstrings():
     raise typer.Exit(run_all(*[[*cmd, "-v"] for cmd in DOCSTRINGS_COMMANDS]))
 
 
-def _register_handler():
-    from scripts.deploy.handler_local import test as handler_test
-
-    app.command(name="handler")(handler_test)
-
-
-_register_handler()
+app.command(name="handler")(handler_local.run_handler)
 
 if __name__ == "__main__":
     app()

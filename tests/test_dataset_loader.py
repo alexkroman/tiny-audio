@@ -271,11 +271,12 @@ class TestEpochExpansion:
             }
         ).cast_column("audio", Audio(sampling_rate=16000))
 
-    def _load(self, fake, cfg_entry, expansion, epochs=1):
+    def _load(self, fake, cfg_entry, expansion, epochs=1) -> Dataset:
         cfg = _make_cfg([cfg_entry], epoch_expansion=expansion, epochs=epochs)
         loader = DatasetLoader(cfg)
         with patch("scripts.train.load_dataset", return_value=fake):
             train, _ = loader.load()
+        assert train is not None
         return train
 
     def test_capped_source_spends_expansion_on_fresh_rows_first(self):
@@ -339,6 +340,7 @@ class TestEpochExpansion:
             loader = DatasetLoader(cfg)
             with patch("scripts.train.load_dataset", side_effect=[fake, self._rows(20, "s")]):
                 train, _ = loader.load()
+            assert train is not None
             sizes[exp] = len(train)
         assert sizes[2] == 2 * sizes[1], "both sources must scale together"
 

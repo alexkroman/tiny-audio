@@ -1,10 +1,13 @@
 """Pytest configuration and fixtures."""
 
 import os
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, NonCallableMock
 
 import pytest
 import torch
+
+from tiny_audio.asr_config import ASRConfig
+from tiny_audio.asr_modeling import ASRModel
 
 # Disable tokenizers parallelism to avoid fork warnings in tests
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -13,6 +16,20 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 # =============================================================================
 # Mock Factories - Reusable mock components for testing
 # =============================================================================
+
+
+def stub(**attrs: object) -> NonCallableMock:
+    """Attribute bag standing in for ``self`` (or a typed attribute) in a test.
+
+    Behaves like ``SimpleNamespace(**attrs)`` -- reading an attribute that was
+    not given raises AttributeError, and new attributes can be assigned -- but
+    is accepted by the type checkers wherever the real class is expected, so
+    an unbound method can be called against it without pretending it is an
+    instance of that class.
+    """
+    obj = NonCallableMock(spec=sorted(attrs))
+    obj.configure_mock(**attrs)
+    return obj
 
 
 @pytest.fixture
@@ -102,8 +119,6 @@ def deepgram_transcription_response():
 @pytest.fixture(scope="session")
 def base_asr_config():
     """Session-scoped base ASR config (no LoRA) - loaded once per test session."""
-    from tiny_audio.asr_config import ASRConfig
-
     return ASRConfig(
         audio_model_id="openai/whisper-tiny",
         text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
@@ -116,16 +131,12 @@ def base_asr_config():
 @pytest.fixture(scope="session")
 def base_asr_model(base_asr_config):
     """Session-scoped base ASR model - loaded once per test session."""
-    from tiny_audio.asr_modeling import ASRModel
-
     return ASRModel(base_asr_config)
 
 
 @pytest.fixture(scope="session")
 def lora_asr_config():
     """Session-scoped LoRA ASR config - loaded once per test session."""
-    from tiny_audio.asr_config import ASRConfig
-
     return ASRConfig(
         audio_model_id="openai/whisper-tiny",
         text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
@@ -142,8 +153,6 @@ def lora_asr_config():
 @pytest.fixture(scope="session")
 def lora_asr_model(lora_asr_config):
     """Session-scoped LoRA ASR model - loaded once per test session."""
-    from tiny_audio.asr_modeling import ASRModel
-
     return ASRModel(lora_asr_config)
 
 

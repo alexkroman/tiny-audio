@@ -12,10 +12,11 @@ from typing import Annotated
 
 import typer
 from fabric import Connection
-from invoke import UnexpectedExit
+from invoke.exceptions import UnexpectedExit
 from rich.prompt import Prompt
 from tenacity import RetryError, retry, stop_after_attempt, wait_fixed
 
+from scripts.deploy import plan as deploy_plan
 from scripts.eval.constants import AssemblyAIModel
 from scripts.utils import get_project_root
 
@@ -257,7 +258,8 @@ def sync_project(conn: Connection, project_root: Path) -> None:
 
     file_list = _gitignore_aware_file_list(project_root)
     if not file_list.strip():
-        raise RuntimeError(f"git ls-files returned no files under {project_root}")
+        msg = f"git ls-files returned no files under {project_root}"
+        raise RuntimeError(msg)
 
     # argv form: nothing here needs a shell. rsync splits the `-e` command on
     # whitespace itself, so it stays one argument.
@@ -306,7 +308,8 @@ export PATH="/root/.local/bin:$PATH"
 # `import torch` dies with ImportError. Observed on
 # runpod/pytorch:...-torch291 against this repo's torch ~2.8.0 pin; it also
 # broke the flash-attn build, whose metadata hook imports torch.
-NVLIBS="$(python3 -c 'import glob;print(":".join(sorted(glob.glob("/usr/local/lib/python*/dist-packages/nvidia/*/lib"))))')"
+NVLIBS="$(python3 -c 'import glob;print(":".join(sorted(\
+glob.glob("/usr/local/lib/python*/dist-packages/nvidia/*/lib"))))')"
 # Spelled out with if/else on purpose: these scripts are built with Python
 # f-strings, so shell brace-expansion syntax would be parsed as an f-string
 # replacement field and raise NameError at build time.
@@ -398,7 +401,8 @@ pip install --user causal-conv1d --no-build-isolation --quiet \
 # correct and it actually runs. Verifying here means a bad combination fails at
 # deploy time instead of twenty minutes into training.
 pip install --user tilelang --quiet || echo "WARN: tilelang install failed"
-pip install --user flash-linear-attention --quiet || echo "WARN: flash-linear-attention install failed"
+pip install --user flash-linear-attention --quiet \
+|| echo "WARN: flash-linear-attention install failed"
 python - <<'FLA_CHECK' || pip uninstall -y flash-linear-attention fla-core >/dev/null 2>&1
 import sys
 try:
@@ -444,7 +448,8 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 # runs under (e.g., python3.10 vs python3.11 in the base image), and
 # every subsequent `ta dev <cmd>` will fail with `ModuleNotFoundError`.
 TA_PYTHON=$(head -1 /root/.local/bin/ta | sed 's|^#!||')
-if ! "$TA_PYTHON" -c "import typer, hydra, omegaconf, datasets, transformers, truecase, ftfy" 2>/tmp/tiny_audio_import_check.err; then
+if ! "$TA_PYTHON" -c "import typer, hydra, omegaconf, datasets, transformers, truecase, ftfy" \
+2>/tmp/tiny_audio_import_check.err; then
     echo "ERROR: deps did not install into the python that /root/.local/bin/ta uses." >&2
     echo "  ta interpreter: $TA_PYTHON" >&2
     echo "  pip used:        $(which pip) ($(pip --version))" >&2
@@ -499,9 +504,7 @@ def plan(
     overrides: Annotated[list[str] | None, typer.Argument(help=OVERRIDES_HELP)] = None,
 ):
     """Estimate GPU memory + disk for a config and emit a pod create command."""
-    from scripts.deploy.plan import plan_command
-
-    plan_command(
+    deploy_plan.plan_command(
         experiment=experiment,
         seq_len=seq_len,
         gpu=gpu,
@@ -530,9 +533,7 @@ def up(
     overrides: Annotated[list[str] | None, typer.Argument(help=OVERRIDES_HELP)] = None,
 ):
     """Size a config, then create a pod on the first GPU type with capacity."""
-    from scripts.deploy.plan import provision_command
-
-    provision_command(
+    deploy_plan.provision_command(
         experiment=experiment,
         seq_len=seq_len,
         name=name,
@@ -551,9 +552,7 @@ def wait(
     ] = 900,
 ):
     """Block until a pod exposes SSH, then print `<ip> <port>`."""
-    from scripts.deploy.plan import wait_command
-
-    wait_command(pod_id=pod_id, timeout_s=timeout)
+    deploy_plan.wait_command(pod_id=pod_id, timeout_s=timeout)
 
 
 @app.command()
@@ -602,7 +601,8 @@ ulimit -n 65536
 # `import torch` dies with ImportError. Observed on
 # runpod/pytorch:...-torch291 against this repo's torch ~2.8.0 pin; it also
 # broke the flash-attn build, whose metadata hook imports torch.
-NVLIBS="$(python3 -c 'import glob;print(":".join(sorted(glob.glob("/usr/local/lib/python*/dist-packages/nvidia/*/lib"))))')"
+NVLIBS="$(python3 -c 'import glob;print(":".join(sorted(\
+glob.glob("/usr/local/lib/python*/dist-packages/nvidia/*/lib"))))')"
 # Spelled out with if/else on purpose: these scripts are built with Python
 # f-strings, so shell brace-expansion syntax would be parsed as an f-string
 # replacement field and raise NameError at build time.
@@ -764,14 +764,12 @@ def _check_remote_disk(conn: Connection, experiment: str, overrides: list[str]) 
     `up` and `train` share a default, but either can be pointed elsewhere
     with -e.
     """
-    from scripts.deploy.plan import build_plan
-
     free = _remote_free_gib(conn)
     if free is None:
         print("Could not read `df /workspace`; skipping the disk preflight.")
         return
     try:
-        need = build_plan(experiment, overrides, 512).disk["recommended"]
+        need = deploy_plan.build_plan(experiment, overrides, 512).disk["recommended"]
     except Exception as exc:  # unresolvable config, gated repo, Hub outage
         print(f"Disk preflight skipped ({type(exc).__name__}: {exc}).")
         return
@@ -1017,10 +1015,8 @@ def eval_model(
         conn, session_name or _auto_session_name(f"eval_{model_short}"), force, hf_token
     )
     if model == "assemblyai" and not assemblyai_api_key:
-        raise typer.BadParameter(
-            "set ASSEMBLYAI_API_KEY or pass --assemblyai-api-key when --model is assemblyai",
-            param_hint="--assemblyai-api-key",
-        )
+        msg = "set ASSEMBLYAI_API_KEY or pass --assemblyai-api-key when --model is assemblyai"
+        raise typer.BadParameter(msg, param_hint="--assemblyai-api-key")
 
     if datasets is None:
         datasets = ["loquacious"]

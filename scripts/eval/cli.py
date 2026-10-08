@@ -5,7 +5,8 @@ import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
+from urllib.parse import urlparse
 
 import typer
 from rich.console import Console
@@ -38,7 +39,13 @@ console = Console()
 # `--datasets` choices, built from the registry so Click validates them and the
 # help text lists them. "all" expands to every ASR dataset (expresso is
 # TTS-style, ami-speakers a speaker-attribution set; opt in by name).
-Dataset = StrEnum("Dataset", {name: name for name in ("all", *DATASET_REGISTRY)})
+# The checkers cannot see members of a functionally built enum, so they get
+# the base class; at runtime Typer reads the real members for the choices.
+if TYPE_CHECKING:
+    Dataset = StrEnum
+else:
+    Dataset = StrEnum("Dataset", {name: name for name in ("all", *DATASET_REGISTRY)})
+DEFAULT_DATASET = "loquacious"
 ALL_DATASETS = [
     name for name in DATASET_REGISTRY if name != "expresso" and not DATASET_REGISTRY[name].speakers
 ]
@@ -57,7 +64,8 @@ def get_model_name(model_path: str) -> str:
 def _require_api_key(api_key: str | None, option: str, env_var: str) -> str:
     """Return a provider API key or fail like any other missing option."""
     if not api_key:
-        raise typer.BadParameter(f"set {env_var} or pass {option}", param_hint=option)
+        msg = f"set {env_var} or pass {option}"
+        raise typer.BadParameter(msg, param_hint=option)
     return api_key
 
 
@@ -99,8 +107,6 @@ def save_results(
     url_suffix = ""
     if base_url:
         # Extract hostname and create a short identifier
-        from urllib.parse import urlparse
-
         parsed = urlparse(base_url)
         host = parsed.netloc or parsed.path
         # Extract meaningful part (e.g., "sandbox013" from "api.sandbox013.assemblyai-labs.com")
@@ -245,17 +251,19 @@ def _build_evaluator(
     instance serves every dataset. Anything an evaluator accumulates across
     `transcribe` calls must be cleared in `_reset_run_state`.
     """
+    evaluator: Evaluator
     # Checked before anything is constructed, so the error lands before an API
     # client, a Swift build or an SFSpeechRecognizer authorization. A silent
     # no-op would be the worse failure: --local-code exists to make a working
     # tree edit visible in the WER, and ignoring it on a backend that has no
     # local code at all would read as "my change did nothing".
     if local_code and (endpoint or model in _NON_LOCAL_MODELS or model.startswith("swift://")):
-        raise typer.BadParameter(
+        msg = (
             f"--local-code has no meaning for --model {model!r}: it swaps the "
             "modeling code bundled with a checkpoint for this checkout's, and "
             "this backend runs no tiny_audio code. Drop the flag."
         )
+        raise typer.BadParameter(msg)
 
     if model == "assemblyai":
         api_key = _require_api_key(assemblyai_api_key, "--assemblyai-api-key", "ASSEMBLYAI_API_KEY")
@@ -311,9 +319,8 @@ def _build_evaluator(
         if suffix.startswith(("/", "~", "./", "../")):
             model_dir = Path(suffix).expanduser().resolve()
             if not model_dir.is_dir():
-                raise typer.BadParameter(
-                    f"swift:// path does not resolve to a directory: {model_dir}"
-                )
+                msg = f"swift:// path does not resolve to a directory: {model_dir}"
+                raise typer.BadParameter(msg)
             model_id = f"swift-local-{model_dir.name}"
             evaluator = SwiftSDKEvaluator(
                 model_dir=model_dir,
@@ -322,7 +329,7 @@ def _build_evaluator(
             model_id = "swift-default-bundle"
             evaluator = SwiftSDKEvaluator()
         else:
-            raise typer.BadParameter(
+            msg = (
                 f"swift://{suffix!r} is not supported — the Swift binary loads "
                 "the SDK-pinned bundle and ignores arbitrary repo ids, so this "
                 "form would silently evaluate the default bundle while labeling "
@@ -332,10 +339,13 @@ def _build_evaluator(
                 "  cd ~/Code/ios/tiny-audio-swift\n"
                 f"  poetry run python -m scripts.bundle.cli build-bundle --projector {suffix}\n"
                 "  cd -\n"
-                "  ta eval -m swift://~/Code/ios/tiny-audio-swift/swift/Sources/TinyAudio/Resources/Model -d ...\n\n"
+                "  ta eval -m "
+                "swift://~/Code/ios/tiny-audio-swift/swift/Sources/TinyAudio/Resources/Model "
+                "-d ...\n\n"
                 "Or evaluate the HF checkpoint directly (PyTorch path, no Swift):\n"
                 f"  ta eval -m {suffix} -d ..."
             )
+            raise typer.BadParameter(msg)
     elif endpoint:
         model_id = get_model_name(model)
         evaluator = EndpointEvaluator(
@@ -369,17 +379,21 @@ def main(
         typer.Option(
             "--model",
             "-m",
-            help="Model path/ID, 'assemblyai', 'deepgram', 'elevenlabs', 'smallest', or 'apple-speech'",
+            help=(
+                "Model path/ID, 'assemblyai', 'deepgram', 'elevenlabs', 'smallest', "
+                "or 'apple-speech'"
+            ),
         ),
     ],
     datasets: Annotated[
-        list[Dataset],
+        list[Dataset] | None,
         typer.Option(
             "--datasets",
             "-d",
             help="Datasets to evaluate on ('all' for every ASR dataset)",
+            show_default=DEFAULT_DATASET,
         ),
-    ] = (Dataset.loquacious,),
+    ] = None,
     split: Annotated[
         str | None, typer.Option("--split", help="Dataset split (default: the dataset's own)")
     ] = None,
@@ -497,7 +511,9 @@ def main(
         local_code=local_code,
     )
 
-    for dataset_name in expand_datasets([d.value for d in datasets]):
+    for dataset_name in expand_datasets(
+        [d.value for d in datasets] if datasets else [DEFAULT_DATASET]
+    ):
         console.print(f"\n[bold blue]Evaluating on: {dataset_name}[/bold blue]")
 
         cfg = DATASET_REGISTRY[dataset_name]

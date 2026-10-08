@@ -1,23 +1,42 @@
 """Tests for ASRModel — projector dispatch, tokenizer init, embeddings, audio token counting."""
 
+import inspect
+import json
 from typing import ClassVar
+from unittest.mock import MagicMock
 
 import pytest
 import torch
+from peft.tuners.lora import LoraLayer
+from torch.nn.modules.module import _IncompatibleKeys
+from transformers.modeling_utils import PreTrainedModel
+from transformers.models.whisper.modeling_whisper import WhisperEncoder
+
+import tiny_audio.asr_modeling as mod
+from tiny_audio.asr_config import ASRConfig
+from tiny_audio.asr_modeling import (
+    FLASH_ATTENTION_MAX_HEAD_DIM,
+    MPS_MAX_TENSOR_ELEMENTS,
+    VOCAB_PAD_MULTIPLE,
+    ASRModel,
+    _assert_projector_loaded,
+    _max_attention_head_dim,
+    _patch_gemma_decode_loop,
+    _resolve_attn_implementation,
+    chunk_oversized_embeddings,
+    mps_unsafe_parameters,
+)
+from tiny_audio.asr_processing import ASRProcessor
+from tiny_audio.projectors import MLPAudioProjector
 
 
 class TestProjectorDispatch:
     """_create_projector should dispatch on projector_type."""
 
     def test_default_mlp_projector(self, base_asr_model):
-        from tiny_audio.projectors import MLPAudioProjector
-
         assert isinstance(base_asr_model.projector, MLPAudioProjector)
 
     def test_unknown_projector_type_raises(self):
-        from tiny_audio.asr_config import ASRConfig
-        from tiny_audio.asr_modeling import ASRModel
-
         bad_config = ASRConfig(
             audio_model_id="openai/whisper-tiny",
             text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
@@ -113,9 +132,6 @@ class TestStateDict:
         assert all(k.startswith("projector.") for k in sd)
 
     def test_state_dict_includes_lm_when_unfrozen(self):
-        from tiny_audio.asr_config import ASRConfig
-        from tiny_audio.asr_modeling import ASRModel
-
         cfg = ASRConfig(
             audio_model_id="openai/whisper-tiny",
             text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
@@ -135,7 +151,6 @@ class TestLoadAudioEncoder:
     def test_whisper_branch_loads_encoder_only(self, base_asr_model):
         # base_asr_model uses whisper-tiny → audio_tower should be Whisper's encoder
         # (not the full WhisperModel)
-        from transformers.models.whisper.modeling_whisper import WhisperEncoder
 
         assert isinstance(base_asr_model.audio_tower, WhisperEncoder)
 
@@ -155,10 +170,6 @@ class TestLoadAudioEncoder:
         `.model`, and that inner model owns audio_tower; older versions hung
         audio_tower off the top-level model.
         """
-        from unittest.mock import MagicMock
-
-        from tiny_audio.asr_modeling import ASRModel
-
         tower = MagicMock(spec=torch.nn.Module)
         tower.requires_grad_ = MagicMock()
         tower.train = MagicMock()
@@ -202,10 +213,6 @@ class TestLoadAudioEncoder:
 
     def test_glm_branch_raises_when_audio_tower_missing(self, monkeypatch):
         """A future layout change should fail loudly, not hand back a stub."""
-        from unittest.mock import MagicMock
-
-        from tiny_audio.asr_modeling import ASRModel
-
         mock_full = MagicMock()
         del mock_full.model
         del mock_full.audio_tower
@@ -244,7 +251,6 @@ class TestLoRASetup:
 
     def test_lora_target_modules_applied(self, lora_asr_model):
         # PEFT replaces target Linear layers with LoraLayer wrappers
-        from peft.tuners.lora import LoraLayer
 
         has_lora = any(isinstance(m, LoraLayer) for m in lora_asr_model.language_model.modules())
         assert has_lora
@@ -257,9 +263,6 @@ class TestFreezeProjector:
     """freeze_projector=True freezes projector params."""
 
     def test_freeze_projector_disables_grad(self):
-        from tiny_audio.asr_config import ASRConfig
-        from tiny_audio.asr_modeling import ASRModel
-
         cfg = ASRConfig(
             audio_model_id="openai/whisper-tiny",
             text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
@@ -372,8 +375,6 @@ class TestSavePretrained:
         assert (save_dir / "diarization.py").exists()
 
     def test_save_then_load_round_trip(self, base_asr_model, tmp_path):
-        from tiny_audio.asr_modeling import ASRModel
-
         save_dir = tmp_path / "model"
         base_asr_model.save_pretrained(save_dir)
 
@@ -395,8 +396,6 @@ class TestSavePretrained:
         assert (save_dir / "adapter_model.safetensors").exists()
 
     def test_save_lora_clears_base_model_path_when_no_repo_id(self, lora_asr_model, tmp_path):
-        import json
-
         save_dir = tmp_path / "lora_model"
         lora_asr_model.save_pretrained(save_dir)
 
@@ -407,8 +406,6 @@ class TestSavePretrained:
         assert adapter_cfg["base_model_name_or_path"] == ""
 
     def test_save_lora_uses_repo_id_when_provided(self, lora_asr_model, tmp_path):
-        import json
-
         save_dir = tmp_path / "lora_model_with_repo"
         lora_asr_model.save_pretrained(save_dir, repo_id="alex/test-model")
 
@@ -422,8 +419,6 @@ class TestProcessor:
     """get_processor wires together feature extractor, tokenizer, projector."""
 
     def test_get_processor_returns_asrprocessor(self, base_asr_model):
-        from tiny_audio.asr_processing import ASRProcessor
-
         proc = base_asr_model.get_processor()
         assert isinstance(proc, ASRProcessor)
         assert proc.feature_extractor is base_asr_model.feature_extractor
@@ -455,10 +450,6 @@ class TestGradientCheckpointing:
         base_asr_model.gradient_checkpointing_disable()
 
     def test_signature_matches_upstream(self, base_asr_model):
-        import inspect
-
-        from transformers.modeling_utils import PreTrainedModel
-
         upstream = inspect.signature(PreTrainedModel._set_gradient_checkpointing).parameters
         ours = inspect.signature(base_asr_model._set_gradient_checkpointing).parameters
         accepts_var_kwargs = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in ours.values())
@@ -468,7 +459,6 @@ class TestGradientCheckpointing:
     def test_does_not_expose_legacy_value_param(self, base_asr_model):
         # Upstream treats a `value` parameter as the pre-4.35 format and routes
         # to a different code path entirely, silently skipping our override.
-        import inspect
 
         ours = inspect.signature(base_asr_model._set_gradient_checkpointing).parameters
         assert "value" not in ours
@@ -488,16 +478,12 @@ class TestFlashAttentionHeadDimGuard:
     layers use head_dim=512."""
 
     def test_reads_uniform_head_dim(self):
-        from tiny_audio.asr_modeling import _max_attention_head_dim
-
         class Cfg:
             head_dim = 128
 
         assert _max_attention_head_dim(Cfg()) == 128
 
     def test_takes_max_across_heterogeneous_layers(self):
-        from tiny_audio.asr_modeling import _max_attention_head_dim
-
         class Layer:
             def __init__(self, d):
                 self.head_dim = d
@@ -510,7 +496,6 @@ class TestFlashAttentionHeadDimGuard:
     def test_per_layer_wins_over_ambiguous_global(self):
         # Heterogeneous configs raise rather than return a number when the
         # global attribute is read, so per_layer_config must be consulted first.
-        from tiny_audio.asr_modeling import _max_attention_head_dim
 
         class Layer:
             def __init__(self, d):
@@ -521,14 +506,14 @@ class TestFlashAttentionHeadDimGuard:
 
             @property
             def head_dim(self):
-                raise RuntimeError("ambiguous per-layer attribute")
+                msg = "ambiguous per-layer attribute"
+                raise RuntimeError(msg)
 
         assert _max_attention_head_dim(Cfg()) == 512
 
     def test_unknown_head_dim_is_none(self):
         # None means "cannot determine" and must not be treated as 0, which
         # would wrongly leave FA2 enabled or wrongly disable it.
-        from tiny_audio.asr_modeling import _max_attention_head_dim
 
         class Cfg:
             pass
@@ -536,8 +521,6 @@ class TestFlashAttentionHeadDimGuard:
         assert _max_attention_head_dim(Cfg()) is None
 
     def test_guard_threshold_matches_flash_attention(self):
-        from tiny_audio.asr_modeling import FLASH_ATTENTION_MAX_HEAD_DIM
-
         assert FLASH_ATTENTION_MAX_HEAD_DIM == 256
 
 
@@ -567,8 +550,6 @@ class TestGemmaDecodeLoopPatch:
         return Stub()
 
     def test_keeps_per_layer_inputs_on_first_step(self):
-        from tiny_audio.asr_modeling import _patch_gemma_decode_loop
-
         stub = self._stub()
         _patch_gemma_decode_loop(stub)
         out = stub.prepare_inputs_for_generation(
@@ -579,7 +560,6 @@ class TestGemmaDecodeLoopPatch:
     def test_drops_per_layer_inputs_on_later_steps(self):
         # Step 2+ passes input_ids, and Gemma's forward raises if PLE comes
         # along with it.
-        from tiny_audio.asr_modeling import _patch_gemma_decode_loop
 
         stub = self._stub()
         _patch_gemma_decode_loop(stub)
@@ -592,9 +572,6 @@ class TestGemmaDecodeLoopPatch:
         # generation._prepare_model_inputs gates inputs_embeds support on this
         # exact introspection; a bare *args wrapper makes generate() reject
         # inputs_embeds, which is the only way audio reaches the decoder.
-        import inspect
-
-        from tiny_audio.asr_modeling import _patch_gemma_decode_loop
 
         stub = self._stub()
         _patch_gemma_decode_loop(stub)
@@ -689,9 +666,6 @@ class TestStateDictTrainableModules:
         assert any(k.startswith("projector.") for k in keys)
 
     def test_unfrozen_encoder_is_saved(self):
-        from tiny_audio.asr_config import ASRConfig
-        from tiny_audio.asr_modeling import ASRModel
-
         config = ASRConfig(
             audio_model_id="openai/whisper-tiny",
             text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
@@ -711,9 +685,6 @@ class TestStateDictTrainableModules:
         assert result.unexpected_keys == []
 
     def test_encoder_keys_cover_trainable_encoder_params(self):
-        from tiny_audio.asr_config import ASRConfig
-        from tiny_audio.asr_modeling import ASRModel
-
         config = ASRConfig(
             audio_model_id="openai/whisper-tiny",
             text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
@@ -733,11 +704,6 @@ class TestStateDictTrainableModules:
 
     def test_encoder_updates_survive_save_reload(self, tmp_path):
         """End-to-end: the checkpoint a training run writes must carry the encoder."""
-        import torch
-
-        from tiny_audio.asr_config import ASRConfig
-        from tiny_audio.asr_modeling import ASRModel
-
         config = ASRConfig(
             audio_model_id="openai/whisper-tiny",
             text_model_id="HuggingFaceTB/SmolLM2-135M-Instruct",
@@ -771,10 +737,6 @@ class TestMpsUnsafeParameters:
     """
 
     def test_flags_a_parameter_past_int32(self):
-        import torch
-
-        from tiny_audio.asr_modeling import MPS_MAX_TENSOR_ELEMENTS, mps_unsafe_parameters
-
         # `meta` gives a parameter with real shape metadata and no allocation,
         # so the test states the 2GB+ case without needing 2GB+.
         module = torch.nn.Module()
@@ -786,10 +748,6 @@ class TestMpsUnsafeParameters:
         assert flagged[0][1] > MPS_MAX_TENSOR_ELEMENTS
 
     def test_passes_a_parameter_at_the_limit(self):
-        import torch
-
-        from tiny_audio.asr_modeling import MPS_MAX_TENSOR_ELEMENTS, mps_unsafe_parameters
-
         module = torch.nn.Module()
         module.ok = torch.nn.Parameter(
             torch.empty(MPS_MAX_TENSOR_ELEMENTS, device="meta"), requires_grad=False
@@ -797,8 +755,6 @@ class TestMpsUnsafeParameters:
         assert mps_unsafe_parameters(module) == []
 
     def test_ordinary_model_is_safe(self, base_asr_model):
-        from tiny_audio.asr_modeling import mps_unsafe_parameters
-
         assert mps_unsafe_parameters(base_asr_model) == []
 
 
@@ -812,14 +768,10 @@ class TestChunkedEmbedding:
 
     def _forced(self, monkeypatch, limit):
         """Lower the element cap so a test-sized table counts as oversized."""
-        import tiny_audio.asr_modeling as mod
-
         monkeypatch.setattr(mod, "MPS_MAX_TENSOR_ELEMENTS", limit)
         return mod
 
     def test_matches_the_unchunked_lookup(self, monkeypatch):
-        import torch
-
         mod = self._forced(monkeypatch, 64)
         torch.manual_seed(0)
         emb = torch.nn.Embedding(50, 8)
@@ -831,8 +783,6 @@ class TestChunkedEmbedding:
         assert torch.equal(chunked(ids), expected)
 
     def test_preserves_the_gemma_embed_scale(self, monkeypatch):
-        import torch
-
         mod = self._forced(monkeypatch, 64)
         torch.manual_seed(0)
         emb = torch.nn.Embedding(50, 8)
@@ -844,8 +794,6 @@ class TestChunkedEmbedding:
         assert torch.equal(mod.ChunkedEmbedding(emb)(ids), expected)
 
     def test_chunk_oversized_embeddings_reports_and_is_idempotent(self, monkeypatch):
-        import torch
-
         mod = self._forced(monkeypatch, 64)
         root = torch.nn.Module()
         root.inner = torch.nn.Module()
@@ -857,10 +805,6 @@ class TestChunkedEmbedding:
         assert mod.chunk_oversized_embeddings(root) == []
 
     def test_leaves_small_tables_alone(self):
-        import torch
-
-        from tiny_audio.asr_modeling import chunk_oversized_embeddings
-
         root = torch.nn.Module()
         root.table = torch.nn.Embedding(10, 4)
         assert chunk_oversized_embeddings(root) == []
@@ -875,27 +819,15 @@ class TestAttnImplementationOnMps:
     """
 
     def test_prefers_eager_when_mps_is_available(self, monkeypatch):
-        import torch
-
-        from tiny_audio.asr_modeling import _resolve_attn_implementation
-
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
         for requested in (None, "sdpa", "flash_attention_2"):
             assert _resolve_attn_implementation(requested) == "eager"
 
     def test_respects_an_explicit_eager_request(self, monkeypatch):
-        import torch
-
-        from tiny_audio.asr_modeling import _resolve_attn_implementation
-
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
         assert _resolve_attn_implementation("eager") == "eager"
 
     def test_leaves_non_mps_resolution_unchanged(self, monkeypatch):
-        import torch
-
-        from tiny_audio.asr_modeling import _resolve_attn_implementation
-
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
         monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
         assert _resolve_attn_implementation("sdpa") == "sdpa"
@@ -913,8 +845,6 @@ class TestForwardPassesReturnDict:
     """
 
     def test_return_dict_true_reaches_the_language_model(self, base_asr_model):
-        import torch
-
         seen = {}
         real = base_asr_model.language_model
 
@@ -945,8 +875,6 @@ class TestForwardPassesReturnDict:
 
     def test_caller_can_override_return_dict(self, base_asr_model):
         """setdefault, not a hard set -- an explicit caller value must win."""
-        import inspect
-
         src = inspect.getsource(type(base_asr_model).forward)
         assert 'kwargs.setdefault("return_dict", True)' in src
 
@@ -962,8 +890,6 @@ class TestVocabPadding:
     """
 
     def test_embedding_rows_are_aligned(self, base_asr_model):
-        from tiny_audio.asr_modeling import VOCAB_PAD_MULTIPLE
-
         rows = base_asr_model.language_model.get_input_embeddings().weight.shape[0]
         assert rows % VOCAB_PAD_MULTIPLE == 0
 
@@ -989,14 +915,10 @@ class TestAssertProjectorLoaded:
 
     @staticmethod
     def _keys(missing=(), unexpected=()):
-        from torch.nn.modules.module import _IncompatibleKeys
-
         return _IncompatibleKeys(list(missing), list(unexpected))
 
     def test_accepts_frozen_module_keys(self):
         """Encoder/decoder keys are never saved, so their absence is expected."""
-        from tiny_audio.asr_modeling import _assert_projector_loaded
-
         _assert_projector_loaded(
             self._keys(
                 missing=["audio_tower.encoder.layers.0.weight", "language_model.norm.weight"]
@@ -1006,21 +928,15 @@ class TestAssertProjectorLoaded:
 
     def test_raises_on_missing_projector_key(self):
         """A projector left at random init must not load silently."""
-        from tiny_audio.asr_modeling import _assert_projector_loaded
-
         with pytest.raises(RuntimeError, match=r"projector\.linear_1\.weight"):
             _assert_projector_loaded(self._keys(missing=["projector.linear_1.weight"]), "mlp")
 
     def test_raises_on_unexpected_projector_key(self):
-        from tiny_audio.asr_modeling import _assert_projector_loaded
-
         with pytest.raises(RuntimeError, match=r"projector\.stale\.weight"):
             _assert_projector_loaded(self._keys(unexpected=["projector.stale.weight"]), "mlp")
 
     def test_legacy_layout_gets_an_actionable_hint(self):
         """norm_2 in the checkpoint means it predates the layout change."""
-        from tiny_audio.asr_modeling import _assert_projector_loaded
-
         with pytest.raises(RuntimeError, match="predates the MLP projector layout change"):
             _assert_projector_loaded(
                 self._keys(

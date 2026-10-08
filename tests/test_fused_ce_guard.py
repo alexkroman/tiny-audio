@@ -8,19 +8,20 @@ a hard error, and -- just as importantly -- pin the escape hatches, so a mac
 smoke run or a deliberate unfused run is never blocked.
 """
 
+import logging
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 from scripts.train import _require_fused_cross_entropy
+from tiny_audio import asr_modeling
 
 
 def _model(accepts: bool, vocab: int = 248320, name: str = "Qwen3_5ForCausalLM"):
     """Minimal stand-in: the guard reads only these three attributes."""
-    lm_cls = type(name, (), {})
+    lm_cls = type(name, (), {"config": SimpleNamespace(vocab_size=vocab)})
     lm = lm_cls()
-    lm.config = SimpleNamespace(vocab_size=vocab)
     return SimpleNamespace(_lm_accepts_skip_logits=accepts, language_model=lm)
 
 
@@ -77,10 +78,6 @@ class TestEscapeHatches:
 
 def test_linear_attention_notice_is_info_on_inference_load(caplog):
     """A from_pretrained load is inference: the slower torch path is not actionable there."""
-    import logging
-
-    from tiny_audio import asr_modeling
-
     caplog.set_level(logging.INFO, logger=asr_modeling.logger.name)
     asr_modeling._log_linear_attention_backends(logging.INFO)
     assert all(r.levelno < logging.WARNING for r in caplog.records)

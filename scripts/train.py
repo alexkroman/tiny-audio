@@ -1,32 +1,23 @@
 #!/usr/bin/env python3
 """Training script for ASR models using Hydra configuration."""
 
-# ruff: noqa: E402
-# The trl env-var must be set, and the noisy-logger silencer must run,
-# *before* their respective modules are imported below — so non-import
-# statements precede some imports here. Suppress E402 file-wide rather
-# than per-line.
-
 import contextlib
 import functools
+import importlib
 import logging
 import os
 import re
 import subprocess
+from collections.abc import Callable
 from dataclasses import fields
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
-os.environ["TRL_EXPERIMENTAL_SILENCE"] = "1"
-
-for _noisy in ("httpx", "httpcore", "urllib3", "huggingface_hub.file_download"):
-    logging.getLogger(_noisy).setLevel(logging.WARNING)
-
-logger = logging.getLogger(__name__)
-
+import ftfy
 import hydra
 import numpy as np
 import torch
+import truecase
 import wandb
 from datasets import (
     Audio,
@@ -38,19 +29,43 @@ from datasets import (
 from omegaconf import DictConfig, OmegaConf
 from tqdm.auto import tqdm
 from transformers import (
+    PreTrainedModel,
     Trainer,
     TrainerCallback,
+    TrainerControl,
+    TrainerState,
     TrainingArguments,
 )
-from trl.experimental.utils import DataCollatorForChatML  # pyright: ignore[reportMissingImports]
+from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
+from transformers.trainer_pt_utils import get_parameter_names
 
-from scripts import train_config  # noqa: F401  (registers the `base_config` schema)
+from scripts.train_config import register_configs
 from tiny_audio.asr_config import (
     DEFAULT_ENCODER_CONV_LAYERS,
     ASRConfig,
     compute_encoder_output_length,
 )
 from tiny_audio.asr_modeling import ASRModel
+
+# trl.experimental prints a notice when it is first imported unless this is
+# set, so the env-var must be in place *before* that import -- which is why
+# DataCollatorForChatML is imported through importlib here rather than with
+# the other imports above. Nothing imported above pulls in trl.
+os.environ["TRL_EXPERIMENTAL_SILENCE"] = "1"
+if TYPE_CHECKING:
+    from trl.experimental.utils import DataCollatorForChatML
+else:
+    DataCollatorForChatML = importlib.import_module("trl.experimental.utils").DataCollatorForChatML
+
+for _noisy in ("httpx", "httpcore", "urllib3", "huggingface_hub.file_download"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
+logger = logging.getLogger(__name__)
+
+# Register the `base_config` structured-config schema that configs/config.yaml
+# lists first in its defaults (scripts/train_config.py). Must happen before
+# @hydra.main composes the config.
+register_configs()
 
 TRANSCRIBE_PROMPT = "Transcribe the speech to text"
 # Used for sources whose transcripts natively carry punctuation, selected per
@@ -271,18 +286,16 @@ def _post_truecase_cleanup(text: str) -> str:
     return _GOTTA_ARTIFACT_RE.sub("gotta", text)
 
 
-# Unicode cleanup: ftfy fixes mojibake (â€™ → '), unescapes HTML entities
-# (&amp; → &), and folds smart quotes (' " → ' "); NFKC further normalizes
-# composed/decomposed forms (café vs cafe + ◌́) and width variants
-# (full-width Latin → half-width). Applied first in _normalize_label so
-# downstream regexes see canonical ASCII-leaning text.
-import ftfy
-
-# Truecase: NLTK-backed statistical recasing for transcripts that arrive
-# in mono-case form (all-upper or zero-caps). LOCAL_RANK=0 guard mirrors
-# Ultravox — avoids multiple workers racing on the punkt download.
-import truecase
-
+# Unicode cleanup (`ftfy`, imported above): ftfy fixes mojibake (â€™ → '),
+# unescapes HTML entities (&amp; → &), and folds smart quotes (' " → ' ");
+# NFKC further normalizes composed/decomposed forms (café vs cafe + ◌́) and
+# width variants (full-width Latin → half-width). Applied first in
+# _normalize_label so downstream regexes see canonical ASCII-leaning text.
+#
+# Truecase (`truecase`, imported above): NLTK-backed statistical recasing for
+# transcripts that arrive in mono-case form (all-upper or zero-caps).
+# LOCAL_RANK=0 guard mirrors Ultravox — avoids multiple workers racing on the
+# punkt download.
 if int(os.environ.get("LOCAL_RANK", "0")) == 0:
     try:
         truecase.get_true_case("test")
@@ -478,6 +491,13 @@ def _normalize_label(raw_text: str, text_case: str | None = None) -> str:
     return text
 
 
+# `Dataset.add_column` annotates `new_fingerprint: str` as a required argument,
+# but its @fingerprint_transform wrapper computes the fingerprint whenever the
+# caller leaves it out, which is how it is meant to be called. This is that
+# runtime signature, called exactly as `ds.add_column(name, column)` would be.
+_add_column = cast(Callable[[Dataset, str, list[Any]], Dataset], Dataset.add_column)
+
+
 class DatasetLoader:
     """Loads and prepares datasets for training.
 
@@ -498,7 +518,8 @@ class DatasetLoader:
     def _prepare_split(self, dataset_cfg: DictConfig, split: str) -> Dataset:
         dataset_path = dataset_cfg.get("path")
         if not dataset_path:
-            raise ValueError("Dataset path is required")
+            msg = "Dataset path is required"
+            raise ValueError(msg)
 
         ds = load_dataset(
             dataset_path,
@@ -508,6 +529,9 @@ class DatasetLoader:
             num_proc=self.num_proc,
             trust_remote_code=True,
         )
+        # A concrete `split` without streaming always yields a single Dataset
+        # (not a DatasetDict / IterableDataset).
+        assert isinstance(ds, Dataset)
 
         # Constant per-source provenance columns. These MUST be added here,
         # before any filter() below, and not down next to the other column
@@ -526,11 +550,12 @@ class DatasetLoader:
         text_case = dataset_cfg.get("text_case")
         if text_case is not None:
             if text_case not in (TEXT_CASE_MONO, TEXT_CASE_CASED):
-                raise ValueError(
+                msg = (
                     f"text_case must be {TEXT_CASE_MONO!r} or {TEXT_CASE_CASED!r}, "
                     f"got {text_case!r} for {dataset_path}"
                 )
-            ds = ds.add_column("_text_case", [text_case] * len(ds))
+                raise ValueError(msg)
+            ds = _add_column(ds, "_text_case", [text_case] * len(ds))
 
         # text_punct: declares whether this source's transcripts carry
         # punctuation. Deliberately separate from text_case -- they are not the
@@ -540,10 +565,9 @@ class DatasetLoader:
         text_punct = dataset_cfg.get("text_punct")
         if text_punct is not None:
             if not isinstance(text_punct, bool):
-                raise ValueError(
-                    f"text_punct must be a bool, got {text_punct!r} for {dataset_path}"
-                )
-            ds = ds.add_column("_text_punct", [text_punct] * len(ds))
+                msg = f"text_punct must be a bool, got {text_punct!r} for {dataset_path}"
+                raise ValueError(msg)
+            ds = _add_column(ds, "_text_punct", [text_punct] * len(ds))
 
         # CommonVoice strict-validated filter: Mozilla's `train` split is
         # already up-vote validated (up_votes >= 2 AND up_votes > down_votes),
@@ -585,18 +609,20 @@ class DatasetLoader:
             above = exclude_where.get("above")
             below = exclude_where.get("below")
             if not column or (not names and above is None and below is None):
-                raise ValueError(
+                msg = (
                     f"exclude_where needs 'column' plus at least one of "
                     f"'values' / 'above' / 'below', got {exclude_where!r} "
                     f"for {dataset_path}"
                 )
+                raise ValueError(msg)
             if column not in ds.column_names:
                 # Fail loudly: a silently-ignored filter would train on the
                 # rows you believe you excluded, and the mix table would lie.
-                raise ValueError(
+                msg = (
                     f"exclude_where column {column!r} not in {dataset_path} "
                     f"(available: {sorted(ds.column_names)})"
                 )
+                raise ValueError(msg)
             # Gigaspeech's `source` is a ClassLabel, so its rows hold ints
             # (0=audiobook, 1=podcast, 2=youtube), NOT the label strings the
             # datasets-server `statistics` endpoint renders. Comparing rows
@@ -610,10 +636,11 @@ class DatasetLoader:
                     # Report every bad name at once rather than dying on the first.
                     unknown = sorted(n for n in names if n not in feature.names)
                     if unknown:
-                        raise ValueError(
+                        msg = (
                             f"exclude_where value {unknown} not a label of {column!r} in "
                             f"{dataset_path} (defined: {feature.names})"
                         )
+                        raise ValueError(msg)
                     wanted = {feature.str2int(n) for n in names}
                 else:
                     wanted = set(names)
@@ -652,11 +679,12 @@ class DatasetLoader:
             # full run on the mix you thought you had excluded, and only
             # finding out from the eval.
             if dropped == 0:
-                raise ValueError(
+                msg = (
                     f"exclude_where on {dataset_path} matched 0 of {before} rows "
                     f"({column}: values={sorted(names)} above={above} below={below}). "
                     f"Check the column's value type and spelling -- feature is {feature!r}."
                 )
+                raise ValueError(msg)
 
         col_map = {
             "text": dataset_cfg.get("text_column", "text"),
@@ -757,7 +785,7 @@ class DatasetLoader:
             return ds
         return concatenate_datasets([ds] * times)
 
-    def load(self) -> tuple[Dataset, Dataset]:
+    def load(self) -> tuple[Dataset | None, Dataset | None]:
         train_datasets, val_datasets = [], []
 
         # epoch_expansion: build ONE physical epoch that is worth N logical
@@ -784,13 +812,14 @@ class DatasetLoader:
         # and silently training 4 epochs' worth would be worse than either.
         expansion = self.epoch_expansion
         if expansion > 1 and self.num_train_epochs > 1:
-            raise ValueError(
+            msg = (
                 f"epoch_expansion={expansion} and num_train_epochs="
                 f"{self.num_train_epochs} would compound to "
                 f"{expansion * self.num_train_epochs} epochs of exposure. "
                 f"epoch_expansion already folds the repeats into one physical "
                 f"epoch, so set num_train_epochs: 1 when using it."
             )
+            raise ValueError(msg)
         if expansion > 1:
             logger.info(
                 "epoch_expansion=%d: building one physical epoch worth %d "
@@ -836,7 +865,7 @@ class DatasetLoader:
         val_ds = concatenate_datasets(val_datasets) if val_datasets else None
 
         # Global cap still applied last as a backstop. With per-dataset
-        # cap set, this is usually a no-op (per-dataset × num-eval-sets
+        # cap set, this is usually a no-op (per-dataset x num-eval-sets
         # comes in under the global limit).
         if val_ds and self.config.get("max_eval_samples"):
             n_samples = min(len(val_ds), self.config.max_eval_samples)
@@ -972,7 +1001,8 @@ class DataCollator:
             finally:
                 f["audio"] = None
         if not audio_arrays:
-            raise ValueError("No valid audio samples in batch")
+            msg = "No valid audio samples in batch"
+            raise ValueError(msg)
         return audio_arrays, valid_features
 
     def _build_sample(self, feature: dict, num_audio_tokens: int) -> dict:
@@ -1009,7 +1039,8 @@ class DataCollator:
         audio_token_counts = token_counts_tensor.tolist()
 
         text_features = [
-            self._build_sample(f, n) for f, n in zip(valid_features, audio_token_counts)
+            self._build_sample(f, n)
+            for f, n in zip(valid_features, audio_token_counts, strict=True)
         ]
 
         batch = self.text_collator(text_features)
@@ -1037,7 +1068,7 @@ class ASRTrainer(Trainer):
         self.encoder_learning_rate = encoder_learning_rate
         self.encoder_weight_decay = encoder_weight_decay
 
-    def create_optimizer(self):
+    def create_optimizer(self, model: torch.nn.Module | None = None) -> torch.optim.Optimizer:
         """Optimizer with separate LR / weight decay per component.
 
         Mirrors HF Trainer.create_optimizer's decay/no-decay split, but adds a
@@ -1061,10 +1092,7 @@ class ASRTrainer(Trainer):
             or self.encoder_weight_decay is not None
         )
         if self.optimizer is not None or not overrides:
-            return super().create_optimizer()
-
-        from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
-        from transformers.trainer_pt_utils import get_parameter_names
+            return super().create_optimizer(model)
 
         # ALL_LAYERNORM_LAYERS only contains torch.nn.LayerNorm, but every
         # decoder here normalizes with an RMSNorm subclass instead, whose gain
@@ -1083,7 +1111,12 @@ class ASRTrainer(Trainer):
         # `linear_attn.norm.weight` gains (ones-init, so decay pulls them
         # toward zero) into the decay group, the exact failure this block
         # exists to prevent.
-        opt_model = self.model
+        # Same model resolution as Trainer.create_optimizer, which train() calls
+        # with the accelerator-prepared model when optimizer creation is delayed.
+        opt_model = self.model if model is None else model
+        if opt_model is None:
+            msg = "ASRTrainer.create_optimizer needs a model"
+            raise ValueError(msg)
         norm_modules = [type(m) for m in opt_model.modules() if "Norm" in type(m).__name__]
         forbidden = list(ALL_LAYERNORM_LAYERS) + norm_modules
         decay_parameters = set(get_parameter_names(opt_model, forbidden))
@@ -1194,7 +1227,9 @@ class ASRTrainer(Trainer):
         ]
         optimizer_grouped_parameters = [g for g in optimizer_grouped_parameters if g["params"]]
 
-        optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args, opt_model)
+        optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(
+            self.args, opt_model if isinstance(opt_model, PreTrainedModel) else None
+        )
         self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
         return self.optimizer
 
@@ -1202,13 +1237,21 @@ class ASRTrainer(Trainer):
 class PushToHubCallback(TrainerCallback):
     """Pushes model to Hub on every save."""
 
-    def on_save(self, args, state, control, **kwargs):
+    def on_save(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs: Any,
+    ) -> None:
+        # Returning None leaves `control` as is: CallbackHandler only replaces
+        # it when a callback returns a new one.
         if not (args.push_to_hub and args.hub_model_id):
-            return control
+            return
 
         model = kwargs.get("model")
         if model is None:
-            return control
+            return
 
         with contextlib.suppress(Exception):
             model.push_to_hub(
@@ -1216,8 +1259,6 @@ class PushToHubCallback(TrainerCallback):
                 commit_message=f"Training in progress - step {state.global_step}",
                 private=args.hub_private_repo,
             )
-
-        return control
 
 
 def get_valid_training_args(config: dict) -> dict:
@@ -1310,7 +1351,7 @@ def _require_fused_cross_entropy(model, cfg) -> None:
 
     batch = cfg.training.get("per_device_train_batch_size", 1)
     est_gib = batch * 330 * vocab * 4 * 2 / 2**30
-    raise RuntimeError(
+    msg = (
         f"liger's fused linear cross-entropy is NOT active for "
         f"{type(model.language_model).__name__} (vocab {vocab:,}). Every "
         f"training step would materialize a (batch, seq, {vocab:,}) logits "
@@ -1322,20 +1363,24 @@ def _require_fused_cross_entropy(model, cfg) -> None:
         f"Override with `training.allow_unfused_ce=true` if this is "
         f"deliberate."
     )
+    raise RuntimeError(msg)
 
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig) -> None:
     push_to_hub = cfg.training.get("push_to_hub") and cfg.training.get("hub_model_id")
     if push_to_hub and not os.environ.get("HF_TOKEN"):
-        raise ValueError(
+        msg = (
             "HF_TOKEN environment variable is required when push_to_hub is enabled. "
             "Set it with: export HF_TOKEN=your_token"
         )
+        raise ValueError(msg)
 
     if cfg.training.get("report_to") == "wandb":
-        wandb_config = OmegaConf.to_container(cfg, resolve=True)
-        assert isinstance(wandb_config, dict)
+        cfg_container = OmegaConf.to_container(cfg, resolve=True)
+        assert isinstance(cfg_container, dict)
+        # The root config's keys are the group names (model/data/training).
+        wandb_config = {str(k): v for k, v in cfg_container.items()}
         git_commit, git_dirty = _git_state()
         if git_commit:
             # Surface the commit in the run config so it's queryable/filterable
@@ -1344,13 +1389,13 @@ def main(cfg: DictConfig) -> None:
             # and can't be used to group/filter runs.
             wandb_config["git_commit"] = git_commit
             wandb_config["git_dirty"] = git_dirty
-        wandb.init(
+        run = wandb.init(
             project=cfg.training.get("wandb_project", "tiny-audio"),
             config=wandb_config,
         )
         if git_commit:
-            wandb.run.summary["git_commit"] = git_commit
-            wandb.run.summary["git_dirty"] = git_dirty
+            run.summary["git_commit"] = git_commit
+            run.summary["git_dirty"] = git_dirty
 
     # Patch the decoder's transformers module with liger fused kernels before
     # the LM class is instantiated. The big win is fused linear cross-entropy:
@@ -1383,8 +1428,9 @@ def main(cfg: DictConfig) -> None:
             )
         else:
             try:
-                import liger_kernel.transformers as liger
-
+                # Imported on demand: liger is a linux-only optional dependency
+                # and is only needed when a patcher is actually applied.
+                liger = importlib.import_module("liger_kernel.transformers")
                 getattr(liger, patcher_name)()
                 logger.info("Applied liger kernels via %s()", patcher_name)
             except (ImportError, AttributeError) as e:
@@ -1396,8 +1442,10 @@ def main(cfg: DictConfig) -> None:
                     e,
                 )
 
-    model_config_dict = OmegaConf.to_container(cfg.model, resolve=True)
-    assert isinstance(model_config_dict, dict), "model config must be a dict"
+    model_container = OmegaConf.to_container(cfg.model, resolve=True)
+    assert isinstance(model_container, dict), "model config must be a dict"
+    # Keys are ModelConfig field names (scripts/train_config.py), i.e. strings.
+    model_config_dict = {str(k): v for k, v in model_container.items()}
     for param in TRAINING_MODEL_PARAMS:
         val = cfg.training.get(param)
         if val is None:
@@ -1515,7 +1563,9 @@ def main(cfg: DictConfig) -> None:
     trainer.save_model(_internal_call=bool(push_to_hub))
 
     if push_to_hub:
-        trainer.model.push_to_hub(
+        # `model` is the object Trainer holds as `trainer.model` (no
+        # model_init, no FSDP re-wrapping here), typed as the ASRModel it is.
+        model.push_to_hub(
             cfg.training.hub_model_id,
             commit_message="Training complete - final model",
             private=cfg.training.get("hub_private_repo", False),

@@ -12,6 +12,7 @@ import pytest
 import torch
 import transformers
 
+from tiny_audio.alignment import QwenForcedAligner
 from tiny_audio.asr_pipeline import ASRPipeline
 
 
@@ -69,7 +70,9 @@ class TestForward:
         assert pipeline.model.generate.call_args.kwargs["return_dict_in_generate"] is True
         assert len(out["top1_logprob"]) == 2
         assert len(out["top2_logprob"]) == 2
-        for step, (top1, top2) in enumerate(zip(out["top1_logprob"], out["top2_logprob"])):
+        for step, (top1, top2) in enumerate(
+            zip(out["top1_logprob"], out["top2_logprob"], strict=True)
+        ):
             expected = torch.topk(torch.log_softmax(step_scores[step][0], dim=-1), k=2).values
             assert top1 == pytest.approx(expected[0].item())
             assert top2 == pytest.approx(expected[1].item())
@@ -195,8 +198,6 @@ class TestCallPromptHandling:
 
 class TestTranscribeTimed:
     def test_empty_transcript_never_loads_the_aligner(self, pipeline, monkeypatch):
-        from tiny_audio.alignment import QwenForcedAligner
-
         monkeypatch.setattr(
             transformers.AutomaticSpeechRecognitionPipeline,
             "__call__",
@@ -204,7 +205,8 @@ class TestTranscribeTimed:
         )
 
         def must_not_load():
-            raise AssertionError("aligner should not load for empty text")
+            msg = "aligner should not load for empty text"
+            raise AssertionError(msg)
 
         monkeypatch.setattr(QwenForcedAligner, "get_instance", must_not_load)
         result = pipeline({"array": np.zeros(160, dtype=np.float32)}, return_timestamps=True)

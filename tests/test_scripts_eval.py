@@ -4,7 +4,14 @@ Note: Audio utility tests (audio_to_wav_bytes, prepare_wav_bytes, TextNormalizer
 are in test_eval_audio.py to avoid duplication.
 """
 
+import types
+from typing import TypedDict
+
 import pytest
+import torch
+import torch.nn as nn
+from peft import LoraConfig, PeftModel, get_peft_model
+from transformers import PretrainedConfig, PreTrainedModel
 
 from scripts.eval.datasets import (
     DATASET_REGISTRY,
@@ -14,6 +21,28 @@ from scripts.eval.evaluators import (
     EvalResult,
     Evaluator,
 )
+from scripts.eval.evaluators.asr import (
+    DTYPE_CONFIG_FIELDS,
+    AssemblyAIStreamingEvaluator,
+    _merge_lora_adapters,
+    _resolve_local_runtime,
+    _use_sdpa_where_safe,
+)
+from tiny_audio.asr_config import ASRConfig
+
+
+class _DtypeOverrides(TypedDict):
+    """One value per entry of DTYPE_CONFIG_FIELDS, as ASRConfig kwargs."""
+
+    model_dtype: str
+    projector_dtype: str
+    encoder_dtype: str
+
+
+class _StreamClosedError(RuntimeError):
+    """A stream-close error carrying the close code the SDK attaches."""
+
+    streaming_code: int
 
 
 class TestDatasetConfig:
@@ -109,13 +138,9 @@ class TestResolveLocalRuntime:
 
     @staticmethod
     def _resolver():
-        from scripts.eval.evaluators.asr import _resolve_local_runtime
-
         return _resolve_local_runtime
 
     def test_cuda_prefers_bfloat16(self, monkeypatch):
-        import torch
-
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
         assert self._resolver()() == (0, "bfloat16")
 
@@ -126,15 +151,11 @@ class TestResolveLocalRuntime:
         while giving up the exponent range -- and both submodels of this stack
         are pretrained in bf16.
         """
-        import torch
-
         monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
         assert self._resolver()() == ("mps", "bfloat16")
 
     def test_cpu_stays_float32(self, monkeypatch):
-        import torch
-
         monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
         assert self._resolver()() == (-1, "float32")
@@ -146,8 +167,6 @@ class TestResolveLocalRuntime:
         torch.dtype instance, so this is the contract that makes the override
         land at all.
         """
-        import torch
-
         monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
         _, dtype = self._resolver()()
@@ -167,17 +186,11 @@ class TestModelDtypeIsTheWorkingOverride:
     """
 
     def test_dtype_kwarg_does_not_change_model_dtype(self, tmp_path):
-        import torch
-
-        from tiny_audio.asr_config import ASRConfig
-
         ASRConfig(model_dtype="float32").save_pretrained(tmp_path)
         cfg = ASRConfig.from_pretrained(tmp_path, dtype=torch.bfloat16)
         assert cfg.model_dtype == "float32"
 
     def test_model_dtype_kwarg_does_change_it(self, tmp_path):
-        from tiny_audio.asr_config import ASRConfig
-
         ASRConfig(model_dtype="float32").save_pretrained(tmp_path)
         cfg = ASRConfig.from_pretrained(tmp_path, model_dtype="bfloat16")
         assert cfg.model_dtype == "bfloat16"
@@ -195,21 +208,22 @@ class TestInferenceDtypeFieldsAllLand:
     """
 
     def test_all_three_fields_are_overridden_together(self, tmp_path):
-        from scripts.eval.evaluators.asr import DTYPE_CONFIG_FIELDS
-        from tiny_audio.asr_config import ASRConfig
-
         ASRConfig(
             model_dtype="bfloat16", projector_dtype="float32", encoder_dtype="float32"
         ).save_pretrained(tmp_path)
 
-        cfg = ASRConfig.from_pretrained(tmp_path, **dict.fromkeys(DTYPE_CONFIG_FIELDS, "bfloat16"))
+        overrides: _DtypeOverrides = {
+            "model_dtype": "bfloat16",
+            "projector_dtype": "bfloat16",
+            "encoder_dtype": "bfloat16",
+        }
+        assert set(overrides) == set(DTYPE_CONFIG_FIELDS)
+        cfg = ASRConfig.from_pretrained(tmp_path, **overrides)
 
         assert [getattr(cfg, f) for f in DTYPE_CONFIG_FIELDS] == ["bfloat16"] * 3
 
     def test_model_dtype_alone_leaves_the_encoder_in_float32(self, tmp_path):
         """The regression itself, so the constant cannot be quietly narrowed back."""
-        from tiny_audio.asr_config import ASRConfig
-
         ASRConfig(
             model_dtype="bfloat16", projector_dtype="float32", encoder_dtype="float32"
         ).save_pretrained(tmp_path)
@@ -230,35 +244,22 @@ class TestMergeLoraAdapters:
 
     @staticmethod
     def _peft_holder():
-        import types
+        class Tiny(PreTrainedModel):
+            config_class = PretrainedConfig
 
-        import torch.nn as nn
-        from peft import LoraConfig, get_peft_model
-
-        class Tiny(nn.Module):
             def __init__(self):
-                super().__init__()
+                super().__init__(PretrainedConfig())
                 self.lin = nn.Linear(4, 4)
 
         peft_model = get_peft_model(Tiny(), LoraConfig(target_modules=["lin"], r=2))
         return types.SimpleNamespace(language_model=peft_model)
 
     def test_merges_and_unwraps_a_peft_decoder(self):
-        from peft import PeftModel
-
-        from scripts.eval.evaluators.asr import _merge_lora_adapters
-
         holder = self._peft_holder()
         assert _merge_lora_adapters(holder) is True
         assert not isinstance(holder.language_model, PeftModel)
 
     def test_is_a_noop_without_lora(self):
-        import types
-
-        import torch.nn as nn
-
-        from scripts.eval.evaluators.asr import _merge_lora_adapters
-
         holder = types.SimpleNamespace(language_model=nn.Linear(4, 4))
         original = holder.language_model
 
@@ -279,8 +280,6 @@ class TestUseSdpaWhereSafe:
 
     @staticmethod
     def _holder(loaded_impl: str, requested: str = "sdpa"):
-        import types
-
         calls: list[str] = []
         language_model = types.SimpleNamespace(
             config=types.SimpleNamespace(_attn_implementation=loaded_impl),
@@ -296,8 +295,6 @@ class TestUseSdpaWhereSafe:
 
     @pytest.fixture
     def on_mps(self, monkeypatch):
-        import torch
-
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
 
     @staticmethod
@@ -307,8 +304,6 @@ class TestUseSdpaWhereSafe:
         )
 
     def test_corrects_a_stale_eager_decoder_to_sdpa(self, monkeypatch, on_mps):
-        from scripts.eval.evaluators.asr import _use_sdpa_where_safe
-
         self._set_sliding_window(monkeypatch, False)
         holder, calls = self._holder("eager")
 
@@ -318,8 +313,6 @@ class TestUseSdpaWhereSafe:
 
     def test_leaves_a_sliding_window_model_on_eager(self, monkeypatch, on_mps):
         """Metal's sdpa returns wrong results for cached decode against that mask."""
-        from scripts.eval.evaluators.asr import _use_sdpa_where_safe
-
         self._set_sliding_window(monkeypatch, True)
         holder, calls = self._holder("eager")
 
@@ -329,8 +322,6 @@ class TestUseSdpaWhereSafe:
 
     def test_is_a_noop_when_load_already_resolved_correctly(self, monkeypatch, on_mps):
         """--local-code already gets this right; re-applying must not churn the model."""
-        from scripts.eval.evaluators.asr import _use_sdpa_where_safe
-
         self._set_sliding_window(monkeypatch, False)
         holder, calls = self._holder("sdpa")
 
@@ -344,17 +335,15 @@ class TestStreamingRetry:
 
     @pytest.fixture
     def evaluator(self, monkeypatch):
-        from scripts.eval.evaluators.asr import AssemblyAIStreamingEvaluator
-
         # tenacity sleeps through time.sleep; skip the backoff in tests.
         monkeypatch.setattr("tenacity.nap.time.sleep", lambda _s: None)
         return AssemblyAIStreamingEvaluator(api_key="test")
 
     @staticmethod
     def _stream_error(code: int | None) -> RuntimeError:
-        exc = RuntimeError(f"closed with {code}")
+        exc = _StreamClosedError(f"closed with {code}")
         if code is not None:
-            exc.streaming_code = code  # type: ignore[attr-defined]
+            exc.streaming_code = code
         return exc
 
     def test_transient_close_code_is_retried(self, evaluator, monkeypatch):
@@ -387,8 +376,6 @@ class TestStreamingRetry:
         assert len(calls) == 1
 
     def test_gives_up_after_max_retries(self, evaluator, monkeypatch):
-        from scripts.eval.evaluators.asr import AssemblyAIStreamingEvaluator
-
         calls = []
 
         def run_session(_pcm):

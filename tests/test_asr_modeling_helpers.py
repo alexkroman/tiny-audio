@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+from conftest import stub
 
 from tiny_audio.asr_modeling import (
     ASRModel,
@@ -123,7 +124,8 @@ class TestHasSlidingWindowAttention:
         """Unknown architecture keeps the conservative eager path."""
 
         def boom(*_a, **_k):
-            raise OSError("no network")
+            msg = "no network"
+            raise OSError(msg)
 
         monkeypatch.setattr("tiny_audio.asr_modeling.AutoConfig.from_pretrained", boom)
         assert _has_sliding_window_attention("missing/model") is True
@@ -136,8 +138,6 @@ class _MaskOnDevice:
     `_assert_sdpa_safe_on_mps` only needs `.device`, `.shape` and `== 0`.
     """
 
-    __hash__ = None
-
     def __init__(self, rows, device):
         self._tensor = torch.tensor(rows)
         self.device = torch.device(device)
@@ -146,13 +146,16 @@ class _MaskOnDevice:
     def __eq__(self, other):
         return self._tensor == other
 
+    # Like a real Tensor, hash by identity even though __eq__ is elementwise.
+    __hash__ = object.__hash__
+
 
 class TestAssertSdpaSafeOnMps:
     """Metal's sdpa NaNs any left-padded row; refuse rather than emit '!!!!!!'."""
 
     @staticmethod
     def _call(impl, mask):
-        model = SimpleNamespace(
+        model = stub(
             language_model=SimpleNamespace(config=SimpleNamespace(_attn_implementation=impl))
         )
         ASRModel._assert_sdpa_safe_on_mps(model, mask)
@@ -256,7 +259,7 @@ class TestLeftPadPromptRows:
     """Generation prompts are left-padded so nothing sits before the first token."""
 
     def test_pads_on_the_left_with_pad_token(self):
-        fake = SimpleNamespace(tokenizer=SimpleNamespace(pad_token_id=9, eos_token_id=2))
+        fake = stub(tokenizer=SimpleNamespace(pad_token_id=9, eos_token_id=2))
         ids, mask = ASRModel._left_pad_prompt_rows(
             fake, [torch.tensor([1, 2]), torch.tensor([3])], torch.device("cpu")
         )
@@ -264,13 +267,13 @@ class TestLeftPadPromptRows:
         assert mask.tolist() == [[1, 1], [0, 1]]
 
     def test_falls_back_to_eos_then_zero(self):
-        fake = SimpleNamespace(tokenizer=SimpleNamespace(pad_token_id=None, eos_token_id=2))
+        fake = stub(tokenizer=SimpleNamespace(pad_token_id=None, eos_token_id=2))
         ids, _ = ASRModel._left_pad_prompt_rows(
             fake, [torch.tensor([1, 2]), torch.tensor([3])], torch.device("cpu")
         )
         assert ids[1, 0].item() == 2
 
-        fake = SimpleNamespace(tokenizer=SimpleNamespace(pad_token_id=None, eos_token_id=None))
+        fake = stub(tokenizer=SimpleNamespace(pad_token_id=None, eos_token_id=None))
         ids, _ = ASRModel._left_pad_prompt_rows(
             fake, [torch.tensor([1, 2]), torch.tensor([3])], torch.device("cpu")
         )
@@ -285,9 +288,7 @@ class TestRenderAudioPrompt:
         tokenizer.apply_chat_template.return_value = SimpleNamespace(
             input_ids=torch.tensor([[1, 2, 3]], dtype=torch.int32)
         )
-        fake = SimpleNamespace(
-            tokenizer=tokenizer, audio_token="<audio>", TRANSCRIBE_PROMPT="Transcribe"
-        )
+        fake = stub(tokenizer=tokenizer, audio_token="<audio>", TRANSCRIBE_PROMPT="Transcribe")
         row = ASRModel._render_audio_prompt(fake, 3)
         call = tokenizer.apply_chat_template.call_args
         assert call.args[0] == [{"role": "user", "content": "<audio><audio><audio> Transcribe"}]
@@ -299,7 +300,7 @@ class TestRenderAudioPrompt:
     def test_empty_instruction_leaves_placeholders_alone(self):
         tokenizer = MagicMock()
         tokenizer.apply_chat_template.return_value = SimpleNamespace(input_ids=torch.tensor([1]))
-        fake = SimpleNamespace(tokenizer=tokenizer, audio_token="<a>", TRANSCRIBE_PROMPT="")
+        fake = stub(tokenizer=tokenizer, audio_token="<a>", TRANSCRIBE_PROMPT="")
         ASRModel._render_audio_prompt(fake, 2)
         assert tokenizer.apply_chat_template.call_args.args[0][0]["content"] == "<a><a>"
 
@@ -308,7 +309,7 @@ class TestGetNumAudioTokens:
     """The batch-max token count chains encoder lengths into the projector."""
 
     def test_uses_longest_sample(self):
-        fake = SimpleNamespace(
+        fake = stub(
             _compute_encoder_output_lengths=lambda mask: torch.tensor([10, 20]),
             projector=SimpleNamespace(get_output_length=lambda n: (n - 4) // 4 + 1),
         )
@@ -326,7 +327,7 @@ class TestCreateOrUpdateModelCard:
 
     def test_delegates_to_peft_language_model(self, tmp_path):
         card_fn = MagicMock()
-        fake = SimpleNamespace(language_model=SimpleNamespace(create_or_update_model_card=card_fn))
+        fake = stub(language_model=SimpleNamespace(create_or_update_model_card=card_fn))
 
         ASRModel.create_or_update_model_card(fake, tmp_path)
 
@@ -334,9 +335,9 @@ class TestCreateOrUpdateModelCard:
 
     def test_no_adapter_is_a_noop(self, tmp_path):
         """A stale peft README from an earlier run must not take the save down."""
-        fake = SimpleNamespace(language_model=SimpleNamespace())
+        fake = stub(language_model=SimpleNamespace())
 
-        assert ASRModel.create_or_update_model_card(fake, tmp_path) is None
+        ASRModel.create_or_update_model_card(fake, tmp_path)
         assert list(tmp_path.iterdir()) == []  # nothing written without an adapter
 
     def test_method_is_reachable_on_the_class(self):

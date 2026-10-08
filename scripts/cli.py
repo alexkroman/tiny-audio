@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
 """Unified CLI for Tiny Audio."""
 
+from __future__ import annotations
+
 import importlib
+from typing import TYPE_CHECKING
 
 import typer
 import typer.core
 import typer.main
+
+if TYPE_CHECKING:
+    # Recent Typer vendors Click as `typer._click`; TyperGroup's methods are
+    # typed against it, so the overrides must be too.
+    from typer import _click
 
 # Subcommands, as name -> module. Each module exposes a Typer named `app`: a
 # multi-command module (train, runpod, debug, dev) mounts as a group, and a
@@ -37,11 +45,11 @@ class LazyGroup(typer.core.TyperGroup):
     because rendering the command table needs each one's help text.
     """
 
-    def list_commands(self, _ctx: typer.Context) -> list[str]:
+    def list_commands(self, ctx: _click.Context) -> list[str]:
         """Registration order, without importing any module."""
         return [*self.commands, *(name for name in SUBCOMMANDS if name not in self.commands)]
 
-    def get_command(self, _ctx: typer.Context, cmd_name: str):
+    def get_command(self, ctx: _click.Context, cmd_name: str) -> _click.Command | None:
         """Import the module behind `cmd_name` on first use and cache its command."""
         if cmd_name not in self.commands and cmd_name in SUBCOMMANDS:
             sub_app = importlib.import_module(SUBCOMMANDS[cmd_name]).app

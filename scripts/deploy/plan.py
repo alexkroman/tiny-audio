@@ -19,10 +19,26 @@ number can be argued with rather than trusted blindly.
 from __future__ import annotations
 
 import functools
+import importlib
 import json
+import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Annotated
 
 import typer
+from huggingface_hub import dataset_info, get_safetensors_metadata, model_info
+from hydra import compose, initialize_config_dir
+from tenacity import RetryError, retry, retry_if_result, stop_after_delay, wait_fixed
+
+from scripts.train_config import register_configs
+from scripts.utils import get_project_root
+
+if TYPE_CHECKING:
+    from transformers import AutoConfig
+
+    from tiny_audio.asr_config import ASRConfig
+    from tiny_audio.projectors import MLPAudioProjector
 
 GIB = 1024**3
 DTYPE_BYTES = {"float32": 4, "float16": 2, "bfloat16": 2}
@@ -130,15 +146,14 @@ def _safetensors_params(repo_id: str, exclude_prefixes: tuple[str, ...] = ()) ->
     prefixes, and for a checkpoint that IS the audio tower that would zero out
     the thing being measured.
     """
-    from huggingface_hub import get_safetensors_metadata
-
     meta = get_safetensors_metadata(repo_id)
+    counts: dict[str, int]
     if not exclude_prefixes:
-        counts = meta.parameter_count
+        counts = dict(meta.parameter_count.items())
     else:
         # parameter_count is pre-aggregated by dtype, so filtering by name
         # means re-deriving it from the per-tensor headers.
-        counts: dict[str, int] = {}
+        counts = {}
         for f in meta.files_metadata.values():
             for name, info in f.tensors.items():
                 if any(name.startswith(p) or f".{p}" in name for p in exclude_prefixes):
@@ -180,8 +195,6 @@ def _lora_trainable_params(repo_id: str, rank: int, target_modules) -> int:
     Validated against peft 0.20.0 on the real checkpoint: r=64 / "all-linear"
     on Qwen3.5-2B gives 67.28M over 186 matrices here and 67.28M there.
     """
-    from huggingface_hub import get_safetensors_metadata
-
     meta = get_safetensors_metadata(repo_id)
     shapes = {
         name: info.shape for f in meta.files_metadata.values() for name, info in f.tensors.items()
@@ -237,10 +250,8 @@ def _repo_weight_bytes(repo_id: str, repo_type: str = "model", name: str | None 
     we keep only files whose path mentions it. Falls back to the full repo when
     nothing matches, since a silent zero would be worse than an overestimate.
     """
-    from huggingface_hub import dataset_info, model_info
-
     info = (model_info if repo_type == "model" else dataset_info)(repo_id, files_metadata=True)
-    siblings = [s for s in info.siblings if (s.size or 0) > 0]
+    siblings = [s for s in (info.siblings or []) if (s.size or 0) > 0]
     if name:
         scoped = [s for s in siblings if name.lower() in s.rfilename.lower()]
         if scoped:
@@ -249,11 +260,9 @@ def _repo_weight_bytes(repo_id: str, repo_type: str = "model", name: str | None 
 
 
 def _load_cfg(experiment: str, overrides: list[str]):
-    from hydra import compose, initialize_config_dir
-
-    from scripts import train_config  # noqa: F401  (registers the `base_config` schema)
-    from scripts.utils import get_project_root
-
+    # Registers the `base_config` structured-config schema the experiment
+    # configs compose against (idempotent; train_config also does it on import).
+    register_configs()
     configs = get_project_root() / "configs"
     with initialize_config_dir(config_dir=str(configs), version_base=None):
         return compose(config_name="config", overrides=[f"+experiments={experiment}", *overrides])
@@ -278,10 +287,14 @@ def _hidden(cfg_obj) -> int | None:
 
 
 def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
-    from transformers import AutoConfig
-
-    from tiny_audio.asr_config import ASRConfig
-    from tiny_audio.projectors import PROJECTOR_CLASSES
+    # Imported lazily: transformers + tiny_audio cost several seconds, which
+    # every `ta runpod` command would otherwise pay because runpod.py imports
+    # this module.
+    auto_config: type[AutoConfig] = importlib.import_module("transformers").AutoConfig
+    asr_config_cls: type[ASRConfig] = importlib.import_module("tiny_audio.asr_config").ASRConfig
+    projector_classes: dict[str, type[MLPAudioProjector]] = importlib.import_module(
+        "tiny_audio.projectors"
+    ).PROJECTOR_CLASSES
 
     cfg = _load_cfg(experiment, overrides)
     plan = Plan()
@@ -295,7 +308,7 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
 
     # ---- encoder -----------------------------------------------------------
     enc_params, enc_dtype = _safetensors_params(audio_id)
-    enc_cfg_probe = AutoConfig.from_pretrained(audio_id)
+    enc_cfg_probe = auto_config.from_pretrained(audio_id)
     enc_probe_inner = getattr(enc_cfg_probe, "encoder_config", None) or enc_cfg_probe
     enc_depth = int(getattr(enc_probe_inner, "num_hidden_layers", 0) or 0)
     enc_top_n = int(_get(train, "encoder_trainable_top_layers", 0) or 0)
@@ -335,7 +348,7 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
     # ---- decoder -----------------------------------------------------------
     dec_params, dec_dtype = _safetensors_params(text_id, _NON_LM_TOWER_PREFIXES)
     dec_trainable = not _get(train, "freeze_language_model", True)
-    dec_cfg = AutoConfig.from_pretrained(text_id)
+    dec_cfg = auto_config.from_pretrained(text_id)
     text_cfg = dec_cfg.get_text_config() if hasattr(dec_cfg, "get_text_config") else dec_cfg
     # Split the frozen vocabulary table out of the trainable decoder. The
     # freeze flag acts on an individual tensor inside the language model, so a
@@ -393,13 +406,13 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
         )
 
     # ---- projector ---------------------------------------------------------
-    enc_cfg = AutoConfig.from_pretrained(audio_id)
+    enc_cfg = auto_config.from_pretrained(audio_id)
     enc_inner = getattr(enc_cfg, "encoder_config", None) or enc_cfg
     encoder_dim = _hidden(enc_inner)
     llm_dim = _hidden(text_cfg)
     proj_params = 0
     if encoder_dim and llm_dim:
-        shim = ASRConfig(
+        shim = asr_config_cls(
             audio_model_id=audio_id,
             text_model_id=text_id,
             encoder_dim=encoder_dim,
@@ -408,7 +421,7 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
             projector_pool_stride=int(_get(cfg.model, "projector_pool_stride", 4)),
             projector_hidden_dim=cfg.model.get("projector_hidden_dim"),
         )
-        cls = PROJECTOR_CLASSES[shim.projector_type]
+        cls = projector_classes[shim.projector_type]
         proj_params = sum(p.numel() for p in cls(shim).parameters())
     else:
         plan.warnings.append("Could not resolve encoder/llm dims; projector excluded.")
@@ -506,7 +519,7 @@ def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
         top_n = int(_get(train, "encoder_trainable_top_layers", 0) or 0)
         trainable_blocks = min(top_n, enc_layers)
 
-    enc_acts = 0
+    enc_acts = 0.0
     if trainable_blocks and encoder_dim:
         enc_layers = trainable_blocks
         # The encoder's sequence is its own, NOT the decoder's `seq_len`: it is
@@ -636,7 +649,11 @@ def plan_command(
     seq_len: int = typer.Option(
         320,
         "--seq-len",
-        help="Assumed tokens per sample. Default 320 is the measured granite_qwen sequence: 237 audio tokens at the 19s collator ceiling, plus prompt and transcript. Raise it for recipes with a longer window -- the activation term is linear in this.",
+        help=(
+            "Assumed tokens per sample. Default 320 is the measured granite_qwen sequence: "
+            "237 audio tokens at the 19s collator ceiling, plus prompt and transcript. "
+            "Raise it for recipes with a longer window -- the activation term is linear in this."
+        ),
     ),
     gpu: str | None = typer.Option(
         None,
@@ -645,7 +662,7 @@ def plan_command(
     ),
     image: str = typer.Option("runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404", "--image"),
     as_json: bool = typer.Option(False, "--json", help="Machine-readable output"),
-    overrides: list[str] = typer.Argument(None, help="Extra Hydra overrides"),
+    overrides: Annotated[list[str] | None, typer.Argument(help="Extra Hydra overrides")] = None,
 ):
     """Estimate GPU memory and disk for a training config, and emit a pod command."""
     plan = build_plan(experiment, list(overrides or []), seq_len)
@@ -799,9 +816,9 @@ def plan_command(
         )
         if capped:
             print(
-                f"  ! {plan.disk['recommended'] / 1024:.2f} TiB needed but a RunPod network volume\n"
-                f"    caps at {NETWORK_VOLUME_MAX_GB} GB. Cut the dataset mix, or stage sources\n"
-                f"    across runs -- this will not fit on one volume.\n"
+                f"  ! {plan.disk['recommended'] / 1024:.2f} TiB needed but a RunPod network "
+                f"volume\n    caps at {NETWORK_VOLUME_MAX_GB} GB. Cut the dataset mix, or stage "
+                "sources\n    across runs -- this will not fit on one volume.\n"
             )
         print(
             f"  Container disk stays at {CONTAINER_DISK_WITH_VOLUME_GB} GB on purpose: with the\n"
@@ -834,8 +851,6 @@ def _available_gpus(min_vram_gib: float) -> list[tuple[int, str]]:
     price field. The returned order is a candidate list rather than a choice,
     because `available` is not a promise -- see `provision`.
     """
-    import subprocess
-
     out = subprocess.run(
         ["runpodctl", "gpu", "list", "-o", "json"],
         check=False,
@@ -910,8 +925,6 @@ def _datacenter_catalog() -> tuple:
     otherwise only reads HTTP headers. Returns a tuple so the cache key is
     hashable; an empty tuple means the CLI was unavailable.
     """
-    import subprocess
-
     try:
         out = subprocess.run(
             ["runpodctl", "datacenter", "list", "-o", "json"],
@@ -962,7 +975,7 @@ def provision_command(
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Print the plan and candidates, create nothing"
     ),
-    overrides: list[str] = typer.Argument(None),
+    overrides: Annotated[list[str] | None, typer.Argument()] = None,
 ):
     """Size a config, then create a pod on the first GPU type that has capacity.
 
@@ -972,9 +985,6 @@ def provision_command(
     datacenter and racy, so a single hardcoded --gpu-id fails intermittently.
     This walks the fitting GPU types smallest-first until one actually comes up.
     """
-    import subprocess
-    from pathlib import Path
-
     plan = build_plan(experiment, list(overrides or []), seq_len)
     vram = plan.vram["recommended (x1.25)"]
     disk = int(plan.disk["recommended"] * 1.15) + 5
@@ -1061,9 +1071,6 @@ def wait_command(
     `runtime` stays null the whole time on these images, so watching it makes a
     perfectly healthy pod look hung for the 5-10 minutes the image pull takes.
     """
-    import subprocess
-
-    from tenacity import RetryError, retry, retry_if_result, stop_after_delay, wait_fixed
 
     @retry(
         retry=retry_if_result(lambda ep: ep is None),
@@ -1088,8 +1095,12 @@ def wait_command(
         return None
 
     try:
-        ip, port = poll()
+        endpoint = poll()
     except RetryError:
         print(f"Pod {pod_id} exposed no SSH endpoint within {timeout_s}s.")
         raise typer.Exit(1) from None
+    # retry_if_result keeps polling while the result is None, so a return
+    # without RetryError always carries an endpoint.
+    assert endpoint is not None
+    ip, port = endpoint
     print(f"{ip} {port}")

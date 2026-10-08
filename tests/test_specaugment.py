@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from conftest import stub
 
 from tiny_audio.asr_modeling import ASRModel
 
@@ -23,9 +24,9 @@ def make_masker(**config_fields):
         "mask_time_min_masks": 2,
     }
     defaults.update(config_fields)
-    stub = SimpleNamespace(config=SimpleNamespace(**defaults))
-    stub._sample_mask_indices = ASRModel._sample_mask_indices
-    return stub
+    masker = stub(config=SimpleNamespace(**defaults))
+    masker._sample_mask_indices = ASRModel._sample_mask_indices
+    return masker
 
 
 class TestSampleMaskIndices:

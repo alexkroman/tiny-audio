@@ -6,6 +6,9 @@ Uses pytest-mock and shared fixtures from conftest.py.
 import pytest
 import torch
 
+from tiny_audio.asr_config import DEFAULT_ENCODER_CONV_LAYERS
+from tiny_audio.asr_processing import ASRProcessor
+
 
 class TestComputeEncoderOutputLength:
     """Tests for ASRProcessor._compute_encoder_output_length method."""
@@ -13,7 +16,6 @@ class TestComputeEncoderOutputLength:
     @pytest.fixture
     def processor_method(self):
         """Get the method without creating full processor."""
-        from tiny_audio.asr_config import DEFAULT_ENCODER_CONV_LAYERS
 
         class MockProcessor:
             encoder_conv_layers = DEFAULT_ENCODER_CONV_LAYERS
@@ -50,22 +52,16 @@ class TestProcessorConstants:
 
     def test_audio_token_defined(self):
         """AUDIO_TOKEN constant should be defined."""
-        from tiny_audio.asr_processing import ASRProcessor
-
         assert hasattr(ASRProcessor, "AUDIO_TOKEN")
         assert ASRProcessor.AUDIO_TOKEN == "<audio>"
 
     def test_transcribe_prompt_defined(self):
         """TRANSCRIBE_PROMPT must match the prompt used in training (scripts/train.py)."""
-        from tiny_audio.asr_processing import ASRProcessor
-
         assert hasattr(ASRProcessor, "TRANSCRIBE_PROMPT")
         assert ASRProcessor.TRANSCRIBE_PROMPT == "Transcribe the speech to text"
 
     def test_default_conv_layers(self):
         """DEFAULT_ENCODER_CONV_LAYERS should match Whisper."""
-        from tiny_audio.asr_config import DEFAULT_ENCODER_CONV_LAYERS
-
         expected = [(1, 3, 1), (1, 3, 2)]
         assert expected == DEFAULT_ENCODER_CONV_LAYERS
 
@@ -75,8 +71,6 @@ class TestProcessorInit:
 
     def test_init_sets_attributes(self, mock_feature_extractor, mock_tokenizer, mock_projector):
         """Processor should store all attributes."""
-        from tiny_audio.asr_processing import ASRProcessor
-
         processor = ASRProcessor(mock_feature_extractor, mock_tokenizer, mock_projector)
 
         assert processor.feature_extractor is mock_feature_extractor
@@ -88,9 +82,6 @@ class TestProcessorInit:
         self, mock_feature_extractor, mock_tokenizer, mock_projector
     ):
         """Should use default conv layers when not specified."""
-        from tiny_audio.asr_config import DEFAULT_ENCODER_CONV_LAYERS
-        from tiny_audio.asr_processing import ASRProcessor
-
         processor = ASRProcessor(mock_feature_extractor, mock_tokenizer, mock_projector)
 
         assert processor.encoder_conv_layers == DEFAULT_ENCODER_CONV_LAYERS
@@ -99,8 +90,6 @@ class TestProcessorInit:
         self, mock_feature_extractor, mock_tokenizer, mock_projector
     ):
         """Should accept custom conv layer configuration."""
-        from tiny_audio.asr_processing import ASRProcessor
-
         custom_layers = [(0, 3, 2), (0, 3, 2)]
         processor = ASRProcessor(
             mock_feature_extractor,
@@ -118,8 +107,6 @@ class TestProcessorCall:
     @pytest.fixture
     def mock_processor(self, mocker):
         """Create processor with mocked components."""
-        from tiny_audio.asr_processing import ASRProcessor
-
         fe = mocker.MagicMock()
         fe.sampling_rate = 16000
         fe.return_value = {
@@ -183,8 +170,6 @@ class TestProcessorAudioTokenCount:
     @pytest.fixture
     def processor_with_variable_attention(self, mocker):
         """Create processor that returns variable attention masks."""
-        from tiny_audio.asr_processing import ASRProcessor
-
         fe = mocker.MagicMock()
         fe.sampling_rate = 16000
 
@@ -227,8 +212,6 @@ class TestProcessorRaggedBatch:
     @pytest.fixture
     def batch_processor(self, mocker):
         """Processor over a 2-sample batch: 80 valid mel frames vs 40."""
-        from tiny_audio.asr_processing import ASRProcessor
-
         fe = mocker.MagicMock()
         fe.sampling_rate = 16000
         fe.return_value = {
@@ -283,8 +266,6 @@ class TestProcessorRaggedBatch:
 
     def test_projector_is_required_for_audio(self, mock_feature_extractor, mock_tokenizer):
         """Without a projector the token count is unknowable -- say so."""
-        from tiny_audio.asr_processing import ASRProcessor
-
         processor = ASRProcessor(mock_feature_extractor, mock_tokenizer)
 
         with pytest.raises(ValueError, match="needs a projector"):
@@ -297,8 +278,6 @@ class TestProcessorAudioToken:
     def test_defaults_to_class_constant(
         self, mock_feature_extractor, mock_tokenizer, mock_projector
     ):
-        from tiny_audio.asr_processing import ASRProcessor
-
         processor = ASRProcessor(mock_feature_extractor, mock_tokenizer, mock_projector)
 
         assert processor.audio_token == ASRProcessor.AUDIO_TOKEN
@@ -307,8 +286,6 @@ class TestProcessorAudioToken:
         self, mock_feature_extractor, mock_tokenizer, mock_projector
     ):
         """Gemma 4's placeholder is its own pretrained "<|audio|>", not "<audio>"."""
-        from tiny_audio.asr_processing import ASRProcessor
-
         processor = ASRProcessor(
             mock_feature_extractor,
             mock_tokenizer,
@@ -323,10 +300,6 @@ class TestProcessorAudioToken:
         self, mock_feature_extractor, mock_tokenizer, mock_projector
     ):
         """The prompt must repeat the configured token, or masked_scatter mismatches."""
-        import torch
-
-        from tiny_audio.asr_processing import ASRProcessor
-
         mock_projector.get_output_length.return_value = 3
         mock_tokenizer.apply_chat_template.return_value = torch.tensor([[1, 2, 3]])
 
