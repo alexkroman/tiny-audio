@@ -14,7 +14,9 @@ import os
 try:
     import spaces
 except ImportError:
-    spaces = None
+    zero_gpu = None
+else:
+    zero_gpu = spaces.GPU
 
 
 # Fix OpenMP environment variable if invalid
@@ -30,11 +32,13 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import html
 import sys
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any, cast
 
 import gradio as gr
+import soundfile
 import torch
 import typer
+from gradio import themes
 from transformers import pipeline
 
 
@@ -47,8 +51,6 @@ def gpu_seconds(audio, kwargs):
     timestamps and diarization (46 s of speech in 8.7 s). Reserve twice that
     plus load overhead, within ZeroGPU's 20-120 s.
     """
-    import soundfile
-
     try:
         seconds = soundfile.info(audio).duration
     except Exception:  # unreadable here: let the pipeline report it, reserve the cap
@@ -58,7 +60,7 @@ def gpu_seconds(audio, kwargs):
 
 
 def gpu(fn):
-    return spaces.GPU(duration=gpu_seconds)(fn) if spaces else fn
+    return zero_gpu(duration=gpu_seconds)(fn) if zero_gpu else fn
 
 
 app = typer.Typer(add_completion=False)
@@ -105,7 +107,7 @@ SPEAKER_COLORS = [
 
 def speaker_turns(words):
     """Consecutive words of one speaker as turns: (speaker, start, end, text)."""
-    turns = []
+    turns: list[tuple[str, float, float, str]] = []
     for w in words or []:
         if turns and turns[-1][0] == w["speaker"]:
             speaker, start, _, text = turns[-1]
@@ -127,7 +129,7 @@ def conversation_html(words):
             '<p style="color:var(--body-text-color-subdued)">'
             "Turn on speaker diarization to see who said what.</p>"
         )
-    colors = {}
+    colors: dict[str, str] = {}
     for speaker, *_ in turns:
         colors.setdefault(speaker, SPEAKER_COLORS[len(colors) % len(SPEAKER_COLORS)])
     blocks = [
@@ -136,7 +138,7 @@ def conversation_html(words):
         f'<div style="color:{colors[s]};font-weight:600;font-size:0.85rem;margin-bottom:0.15rem">'
         f"{html.escape(speaker_label(s))}"
         '<span style="font-weight:400;color:var(--body-text-color-subdued);margin-left:0.5rem">'
-        f"{format_timestamp(start)} – {format_timestamp(end)}</span></div>"
+        f"{format_timestamp(start)} \u2013 {format_timestamp(end)}</span></div>"
         f"<div>{html.escape(text)}</div></div>"
         for s, start, end, text in turns
     ]
@@ -158,10 +160,10 @@ def segment_rows(segments):
     ]
 
 
-THEME = gr.themes.Soft(
+THEME = themes.Soft(
     primary_hue="indigo",
     neutral_hue="slate",
-    font=[gr.themes.GoogleFont("Inter"), "ui-sans-serif", "system-ui", "sans-serif"],
+    font=[themes.GoogleFont("Inter"), "ui-sans-serif", "system-ui", "sans-serif"],
 )
 
 CSS = """
@@ -185,6 +187,7 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
     """Create Gradio demo interface using transformers pipeline."""
 
     # Determine device
+    device: int | str
     if torch.cuda.is_available():
         device = 0
     elif torch.backends.mps.is_available():
@@ -207,16 +210,19 @@ def create_demo(model_path="mazesmazes/tiny-audio"):
     pipeline_module.NemotronDiarizer.get_instance()
 
     @gpu
-    def run_pipeline(audio, kwargs):
-        return pipe(audio, **kwargs)
+    def run_pipeline(audio, kwargs) -> dict[str, Any]:
+        # One audio input gives one result dict; transformers annotates the
+        # pipeline's __call__ with the batched (list) return type.
+        return cast(dict[str, Any], pipe(audio, **kwargs))
 
     def process_audio(audio, show_timestamps, show_diarization, num_speakers=0, max_speakers=0):
         """Process audio file for transcription."""
         if audio is None:
-            raise gr.Error("Record or upload some audio first.")
+            msg = "Record or upload some audio first."
+            raise gr.Error(msg)
 
         # Build kwargs
-        kwargs = {}
+        kwargs: dict[str, Any] = {}
         if show_timestamps:
             kwargs["return_timestamps"] = True
         if show_diarization:

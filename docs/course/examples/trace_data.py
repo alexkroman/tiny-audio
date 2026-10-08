@@ -1,6 +1,7 @@
 import base64
 import io
 import pathlib
+from typing import cast
 
 import matplotlib
 
@@ -8,7 +9,8 @@ matplotlib.use("Agg")  # Use non-interactive backend
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from datasets import load_dataset
+from datasets import Dataset, load_dataset
+from matplotlib.patches import Rectangle
 
 from tiny_audio.asr_modeling import ASRModel
 
@@ -16,7 +18,11 @@ from tiny_audio.asr_modeling import ASRModel
 def main():
     # --- 1. Load a single audio sample ---
     print("Loading audio sample...")
-    dataset = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation")
+    # A single named split loads as a Dataset (not a DatasetDict / IterableDataset).
+    dataset = cast(
+        Dataset,
+        load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation"),
+    )
     audio_sample = dataset[0]["audio"]
     waveform = audio_sample["array"]
     sampling_rate = audio_sample["sampling_rate"]
@@ -33,6 +39,7 @@ def main():
     print("\nLoading ASR model (this may take a moment)...")
     model = ASRModel.from_pretrained("mazesmazes/tiny-audio")
 
+    encoder_device: torch.device | str
     try:
         encoder_device = next(model.audio_tower.parameters()).device
     except StopIteration:
@@ -65,9 +72,8 @@ def main():
     # Find nearest text embeddings for each time step
     with torch.no_grad():
         # Get the text embedding matrix from the decoder
-        text_embeddings = (
-            model.language_model.get_input_embeddings().weight
-        )  # [vocab_size, hidden_dim]
+        text_embeddings = model.get_input_embeddings().weight  # [vocab_size, hidden_dim]
+        assert isinstance(text_embeddings, torch.Tensor)
 
         # Move to same device as projector output
         device = projector_output.device
@@ -139,7 +145,7 @@ def main():
     script_dir = pathlib.Path(__file__).parent.resolve()
     output_path = script_dir / "data_trace.html"
 
-    with open(output_path, "w") as f:
+    with output_path.open("w") as f:
         f.write(html_content)
     print(f"\n✓ Saved HTML report to '{output_path}'")
 
@@ -177,20 +183,20 @@ def create_pipeline_summary(data):
 
     # Draw boxes
     boxes = [
-        (0.05, 0.3, 0.15, 0.4, f"Waveform\n{len(data['waveform'])}×1", "#e8f4f8"),
-        (0.25, 0.3, 0.15, 0.4, f"Spectrogram\n{spec_shape[0]}×{spec_shape[1]}", "#d4e9f7"),
-        (0.45, 0.3, 0.15, 0.4, f"Encoder\n{enc_shape[1]}×{enc_shape[0]}", "#b8daf0"),
-        (0.65, 0.3, 0.15, 0.4, f"Projector\n{proj_shape[1]}×{proj_shape[0]}", "#9cc9e8"),
+        (0.05, 0.3, 0.15, 0.4, f"Waveform\n{len(data['waveform'])}\u00d71", "#e8f4f8"),
+        (0.25, 0.3, 0.15, 0.4, f"Spectrogram\n{spec_shape[0]}\u00d7{spec_shape[1]}", "#d4e9f7"),
+        (0.45, 0.3, 0.15, 0.4, f"Encoder\n{enc_shape[1]}\u00d7{enc_shape[0]}", "#b8daf0"),
+        (0.65, 0.3, 0.15, 0.4, f"Projector\n{proj_shape[1]}\u00d7{proj_shape[0]}", "#9cc9e8"),
         (0.85, 0.3, 0.15, 0.4, "Decoder\n(LLM)", "#7fb3d5"),
     ]
 
     for x, y, w, h, text, color in boxes:
-        rect = plt.Rectangle((x, y), w, h, facecolor=color, edgecolor="#333", linewidth=2)
+        rect = Rectangle((x, y), w, h, facecolor=color, edgecolor="#333", linewidth=2)
         ax.add_patch(rect)
         ax.text(x + w / 2, y + h / 2, text, ha="center", va="center", fontsize=9, fontweight="bold")
 
     # Draw arrows
-    arrow_props = dict(arrowstyle="->", lw=2, color="#333")
+    arrow_props = {"arrowstyle": "->", "lw": 2, "color": "#333"}
     arrows = [
         (0.20, 0.5, 0.05, 0),
         (0.40, 0.5, 0.05, 0),
@@ -305,7 +311,8 @@ def generate_observable_html(data):
     <title>ASR Data Trace</title>
     <style>
         body {{
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+                Arial, sans-serif;
             margin: 2em;
             background-color: #f0f2f5;
         }}
@@ -360,28 +367,37 @@ def generate_observable_html(data):
 
         <div class="section">
             <h2>The Big Picture</h2>
-            <p>Converting speech to text is like translating between two completely different languages. Sound waves are continuous and flowing, while text is discrete symbols. This model learns to bridge that gap.</p>
+            <p>Converting speech to text is like translating between two completely different
+                languages. Sound waves are continuous and flowing, while text is discrete symbols.
+                This model learns to bridge that gap.</p>
             <img src="{pipeline_summary_img}" alt="Pipeline Summary">
         </div>
 
         <div class="section">
             <h2>Input: The Audio Sample</h2>
             <p><strong>Reference Text:</strong> <em>"{data["reference_text"]}"</em></p>
-            <p>This is what the speaker actually said. Our goal is to recover this text from the raw audio signal alone.</p>
+            <p>This is what the speaker actually said. Our goal is to recover this text from the
+                raw audio signal alone.</p>
         </div>
 
         <div class="section">
             <h2>Step 1: Sound Waves</h2>
-            <p>Speech starts as vibrations in the air. A microphone captures these vibrations {data["sampling_rate"]:,} times per second, turning sound into numbers.</p>
+            <p>Speech starts as vibrations in the air. A microphone captures these vibrations
+                {data["sampling_rate"]:,} times per second, turning sound into numbers.</p>
             <img src="{waveform_img}" alt="Waveform">
-            <p><em>The ups and downs show how loud the sound is at each moment. Bigger waves = louder sounds.</em></p>
+            <p><em>The ups and downs show how loud the sound is at each moment. Bigger waves =
+                louder sounds.</em></p>
         </div>
 
         <div class="section">
             <h2>Step 2: Frequency Analysis (Spectrogram)</h2>
-            <p>Like a musical score shows different notes over time, a spectrogram shows different frequencies in the speech. Think of it as converting sound into a heat map.</p>
+            <p>Like a musical score shows different notes over time, a spectrogram shows
+                different frequencies in the speech. Think of it as converting sound into a heat
+                map.</p>
             <img src="{spectrogram_img}" alt="Spectrogram">
-            <p><em>Time flows left to right. Bottom = low sounds (like bass), Top = high sounds (like whistles). Bright = loud, Dark = quiet. The purple area on the right is just padding - ignore it.</em></p>
+            <p><em>Time flows left to right. Bottom = low sounds (like bass), Top = high sounds
+                (like whistles). Bright = loud, Dark = quiet. The purple area on the right is just
+                padding - ignore it.</em></p>
 
             <h3>What we're seeing:</h3>
             <ul>
@@ -393,9 +409,12 @@ def generate_observable_html(data):
 
         <div class="section">
             <h2>Step 3: Understanding Speech Sounds (Encoder)</h2>
-            <p>The AI "listens" to the spectrogram and identifies speech patterns. It recognizes things like individual sounds, speaking pace, and voice characteristics.</p>
+            <p>The AI "listens" to the spectrogram and identifies speech patterns. It recognizes
+                things like individual sounds, speaking pace, and voice characteristics.</p>
             <img src="{encoder_img}" alt="Encoder Output">
-            <p><em>This is what the AI "understands" about the audio. Each column is a moment in time. Brighter colors mean the AI detected something important at that moment.</em></p>
+            <p><em>This is what the AI "understands" about the audio. Each column is a moment in
+                time. Brighter colors mean the AI detected something important at that
+                moment.</em></p>
 
             <h3>What it's detecting:</h3>
             <ul>
@@ -404,13 +423,16 @@ def generate_observable_html(data):
                 <li>Pitch and rhythm patterns</li>
                 <li>Speaker characteristics (accent, gender, age)</li>
             </ul>
-            <p><strong>Important:</strong> At this stage, "to," "too," and "two" all look the same because they sound the same! The AI knows the sound but not yet the spelling.</p>
+            <p><strong>Important:</strong> At this stage, "to," "too," and "two" all look the
+                same because they sound the same! The AI knows the sound but not yet the
+                spelling.</p>
         </div>
             <table>
                 <tr><th>Property</th><th>Value</th></tr>
                 <tr><td>Shape</td><td><code>{data["encoder_output"]["stats"]["shape"]}</code></td></tr>
                 <tr><td>Mean</td><td><code>{data["encoder_output"]["stats"]["mean"]}</code></td></tr>
-                <tr><td>Std Dev</td><td><code>{data["encoder_output"]["stats"]["std"]}</code></td></tr>
+                <tr><td>Std Dev</td>
+                    <td><code>{data["encoder_output"]["stats"]["std"]}</code></td></tr>
                 <tr><td>Min</td><td><code>{data["encoder_output"]["stats"]["min"]}</code></td></tr>
                 <tr><td>Max</td><td><code>{data["encoder_output"]["stats"]["max"]}</code></td></tr>
             </table>
@@ -418,15 +440,19 @@ def generate_observable_html(data):
 
         <div class="section">
             <h2>Step 4: Translating to Text (Projector)</h2>
-            <p>The projector's job: convert "what was heard" into "how to write it." This is where sound becomes text-ready.</p>
+            <p>The projector's job: convert "what was heard" into "how to write it." This is
+                where sound becomes text-ready.</p>
             <img src="{projector_img}" alt="Projector Output">
-            <p><em>Now the AI is thinking in text, not sound. It's figuring out spelling, punctuation, and capitalization.</em></p>
+            <p><em>Now the AI is thinking in text, not sound. It's figuring out spelling,
+                punctuation, and capitalization.</em></p>
 
             <h3>The key trick:</h3>
             <p>The projector solves problems that sound alone can't answer:</p>
             <ul>
-                <li><strong>"to" vs "too" vs "two"</strong> - Same sound, different spelling based on meaning</li>
-                <li><strong>"their" vs "there" vs "they're"</strong> - Context determines which one</li>
+                <li><strong>"to" vs "too" vs "two"</strong> - Same sound, different spelling
+                    based on meaning</li>
+                <li><strong>"their" vs "there" vs "they're"</strong> - Context determines which
+                    one</li>
                 <li><strong>Question marks</strong> - Rising tone at the end → add "?"</li>
                 <li><strong>Capitalization</strong> - "apple" (fruit) vs "Apple" (company)</li>
             </ul>
@@ -435,7 +461,8 @@ def generate_observable_html(data):
                 <tr><th>Property</th><th>Value</th></tr>
                 <tr><td>Shape</td><td><code>{data["projector_output"]["stats"]["shape"]}</code></td></tr>
                 <tr><td>Mean</td><td><code>{data["projector_output"]["stats"]["mean"]}</code></td></tr>
-                <tr><td>Std Dev</td><td><code>{data["projector_output"]["stats"]["std"]}</code></td></tr>
+                <tr><td>Std Dev</td>
+                    <td><code>{data["projector_output"]["stats"]["std"]}</code></td></tr>
                 <tr><td>Min</td><td><code>{data["projector_output"]["stats"]["min"]}</code></td></tr>
                 <tr><td>Max</td><td><code>{data["projector_output"]["stats"]["max"]}</code></td></tr>
             </table>
@@ -443,10 +470,13 @@ def generate_observable_html(data):
             <h3>Checking: Does it Look Like Text?</h3>
             <p><strong>What was actually said:</strong> <em>"{data["reference_text"]}"</em></p>
             <p>If we check what vocabulary words are closest to each moment, we get this jumble:</p>
-            <p style="background-color: #f8f9fa; padding: 15px; border-radius: 4px; font-family: 'Courier New', monospace; max-height: 150px; overflow-y: scroll; font-size: 11px;">
+            <p style="background-color: #f8f9fa; padding: 15px; border-radius: 4px; font-family:
+                'Courier New', monospace; max-height: 150px; overflow-y: scroll; font-size: 11px;">
                 {data["projector_output"]["nearest_tokens"]}
             </p>
-            <p><em>This isn't the final transcription! But it proves the projector is working—the AI is now thinking in text-like patterns. The language model will clean this up into proper sentences.</em></p>
+            <p><em>This isn't the final transcription! But it proves the projector is
+                working—the AI is now thinking in text-like patterns. The language model will clean
+                this up into proper sentences.</em></p>
         </div>
 
         <div class="section">
@@ -458,7 +488,9 @@ def generate_observable_html(data):
                 <li><strong>Encoder</strong> → understands "what was said"</li>
                 <li><strong>Projector</strong> → translates to "how to write it"</li>
             </ol>
-            <p>The magic? We only had to train the tiny projector (step 4). The encoder and language model were already trained on massive datasets. This makes building powerful speech recognition affordable for everyone.</p>
+            <p>The magic? We only had to train the tiny projector (step 4). The encoder and
+                language model were already trained on massive datasets. This makes building
+                powerful speech recognition affordable for everyone.</p>
         </div>
     </div>
 </body>
