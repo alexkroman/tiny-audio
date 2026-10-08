@@ -620,7 +620,7 @@ def _fmt(n: float) -> str:
 
 
 def plan_command(
-    experiment: str = typer.Option("granite_qwen", "--experiment", "-e"),
+    experiment: str = typer.Option("granite_qwen_frozen", "--experiment", "-e"),
     seq_len: int = typer.Option(
         320,
         "--seq-len",
@@ -940,7 +940,7 @@ def _datacenters_for_gpu(
 
 
 def provision_command(
-    experiment: str = typer.Option("granite_qwen", "--experiment", "-e"),
+    experiment: str = typer.Option("granite_qwen_frozen", "--experiment", "-e"),
     seq_len: int = typer.Option(320, "--seq-len"),
     name: str | None = typer.Option(
         None, "--name", help="Pod name (default tiny-audio-<experiment>)"

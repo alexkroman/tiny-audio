@@ -475,7 +475,7 @@ echo "Dependencies verified for $TA_PYTHON"
 def plan(
     experiment: Annotated[
         str, typer.Option("--experiment", "-e", help=EXPERIMENT_HELP)
-    ] = "granite_qwen",
+    ] = "granite_qwen_frozen",
     # 320, not 512: the measured granite_qwen sequence is 237 audio tokens at
     # the 19s collator ceiling plus prompt and transcript. This default
     # shadows plan_command's own, so the two have to be kept in sync -- it was
@@ -510,7 +510,7 @@ def plan(
 def up(
     experiment: Annotated[
         str, typer.Option("--experiment", "-e", help=EXPERIMENT_HELP)
-    ] = "granite_qwen",
+    ] = "granite_qwen_frozen",
     seq_len: Annotated[int, typer.Option("--seq-len", help=SEQ_LEN_HELP)] = 512,
     name: Annotated[
         str | None, typer.Option("--name", help="Pod name (default: derived from the experiment)")
@@ -799,7 +799,7 @@ def train(
     port: PortArg,
     experiment: Annotated[
         str, typer.Option("--experiment", "-e", help=EXPERIMENT_HELP)
-    ] = "granite_qwen",
+    ] = "granite_qwen_frozen",
     session_name: Annotated[
         str | None, typer.Option("--session-name", help=SESSION_NAME_HELP)
     ] = None,
