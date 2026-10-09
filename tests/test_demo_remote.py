@@ -79,3 +79,16 @@ class TestRemoteRunner:
         self._serve(monkeypatch, 413)
         with pytest.raises(gr.Error, match="too large"):
             app.remote_runner("https://pod", None)("clip.wav", {})
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
+def test_playlist_upload_is_not_followed(tmp_path: Path) -> None:
+    """An HLS playlist could make ffmpeg read Space files or fetch URLs: it isn't converted."""
+    playlist = tmp_path / "upload.m3u8"
+    playlist.write_text(
+        "#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:10,\nfile:///etc/hosts\n#EXT-X-ENDLIST\n"
+    )
+    assert app.compact_audio(str(playlist)) == (
+        playlist.read_bytes(),
+        "application/octet-stream",
+    )

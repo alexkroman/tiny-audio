@@ -348,6 +348,19 @@ def local_runner(model_path: str) -> Callable[[str, dict[str, Any]], dict[str, A
 WAKING_UP = "The model server is starting up or offline. Please try again in a few minutes."
 
 
+# Uploads come from anyone, and ffmpeg follows references: an HLS playlist or
+# concat list can make it read files on the Space (its environment holds the
+# endpoint and API key) or fetch URLs. So only the local-file protocol and
+# plain media containers -- what browsers record and people upload.
+UNTRUSTED_INPUT_OPTIONS = (
+    "-protocol_whitelist", "file",
+    "-format_whitelist",
+    "wav,w64,mp3,flac,ogg,mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,aac,aiff,caf,amr,au",
+)  # fmt: skip
+# Longest audio converted; RunPod's 100 s request limit ends far shorter files.
+MAX_UPLOAD_SECONDS = 6 * 3600
+
+
 def compact_audio(audio: str) -> tuple[bytes, str]:
     """`(body, content type)` for an upload: 16 kHz mono FLAC, or the file as-is.
 
@@ -364,12 +377,14 @@ def compact_audio(audio: str) -> tuple[bytes, str]:
     with tempfile.TemporaryDirectory() as tmp:
         flac = Path(tmp) / "upload.flac"
         command = [
-            "ffmpeg", "-nostdin", "-v", "error", "-i", audio,
+            "ffmpeg", "-nostdin", "-v", "error",
+            *UNTRUSTED_INPUT_OPTIONS, "-i", f"file:{audio}",
+            "-t", str(MAX_UPLOAD_SECONDS),
             "-ac", "1", "-ar", "16000", "-sample_fmt", "s16", str(flac),
         ]  # fmt: skip
         try:
-            subprocess.run(command, check=True, capture_output=True)
-        except (OSError, subprocess.CalledProcessError):
+            subprocess.run(command, check=True, capture_output=True, timeout=600)
+        except (OSError, subprocess.SubprocessError):
             return Path(audio).read_bytes(), "application/octet-stream"
         return flac.read_bytes(), "audio/flac"
 
