@@ -7,12 +7,13 @@
   />
 </div>
 
-**A tiny, hackable, open-source speech LLM.**
+**A speech-to-text system you can train for $25.**
 
 Tiny Audio connects a frozen, pretrained speech encoder to a pretrained LLM with a small trainable
-projector. The model published from this repo gets **1.8% WER on LibriSpeech test-clean and 8.4%
-averaged over 12 benchmarks** while training only ~80M parameters. The codebase is small enough to
-read in an afternoon, and you can run a training loop on your laptop in about five minutes.
+projector. The model published from this repo gets **1.8% WER on LibriSpeech test-clean and 7.4%
+across 12 benchmarks** (11,822 samples pooled) while training only ~80M parameters. The codebase is
+small enough to read in an afternoon, and you can run a training loop on your laptop in about five
+minutes.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
@@ -218,7 +219,8 @@ poetry run ta runpod attach <HOST> <PORT>       # watch the run in tmux
 The **[free 3.5-hour course](docs/course/0-course-overview.md)** walks you through the full loop:
 how the encoder, projector, and decoder fit together (with real tensor shapes), training a model,
 evaluating it against commercial APIs, and publishing it with a live demo. You need Python, the
-command line, and git.
+command line, and git. The course trains the smaller `stage_1` recipe, not the published model, so
+your WER will be higher than the table above.
 
 Want to try a new projector architecture, add a dataset, or change the codebase? See
 [CONTRIBUTING.md](CONTRIBUTING.md) for the CLI reference, config layout, and quality gates.

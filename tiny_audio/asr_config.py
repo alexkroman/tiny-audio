@@ -397,10 +397,12 @@ class ASRConfig(transformers.PretrainedConfig):
         # The pipeline looks for config.encoder._name_or_path for feature extractor
         self.encoder = self.audio_config
 
+        # The Hub infers the model's task from the first model class listed, so
+        # AutoModelForSpeechSeq2Seq must precede AutoModel (else: feature-extraction).
         self.auto_map = {
             "AutoConfig": "asr_config.ASRConfig",
-            "AutoModel": "asr_modeling.ASRModel",
             "AutoModelForSpeechSeq2Seq": "asr_modeling.ASRModel",
+            "AutoModel": "asr_modeling.ASRModel",
             "AutoProcessor": "asr_processing.ASRProcessor",
         }
         self.custom_pipelines = {

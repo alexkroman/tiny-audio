@@ -7,18 +7,23 @@ sdk: gradio
 sdk_version: "6.26.0"
 python_version: "3.12"
 app_file: app.py
-pinned: false
+pinned: true
 license: mit
-short_description: ASR with a Granite Speech encoder and Qwen3.5-2B decoder
+short_description: Fast English ASR with word timestamps and speaker labels
+thumbnail: https://huggingface.co/spaces/mazesmazes/tiny-audio/resolve/main/thumbnail.png
 models:
   - mazesmazes/tiny-audio
 tags:
   - audio
   - automatic-speech-recognition
+  - speech-recognition
+  - speech-to-text
+  - transcription
+  - word-timestamps
+  - speaker-diarization
   - granite-speech
   - qwen3.5
   - lora
-  - mlp
 ---
 
 ## Demo Overview
