@@ -200,7 +200,13 @@ CSS = """
 #header p { color: var(--body-text-color-subdued); margin-top: 0; }
 """
 
-EXAMPLE = Path(__file__).parent / "examples" / "ami_meeting.wav"
+EXAMPLES_DIR = Path(__file__).parent / "examples"
+# (file, timestamps, speakers, label). Each row's result is cached after its first run.
+EXAMPLES = [
+    ("librispeech.wav", False, False, "Audiobook (LibriSpeech, CC BY 4.0)"),
+    ("earnings_call.wav", True, False, "Earnings call with numbers (Earnings-22, CC BY-SA 4.0)"),
+    ("ami_meeting.wav", True, True, "Two-person meeting (AMI Meeting Corpus, CC BY 4.0)"),
+]
 
 HEADER = """
 <div id="header">
@@ -506,12 +512,20 @@ def create_demo(
             fn=process_audio, inputs=inputs, outputs=outputs, api_name="transcribe"
         )
 
-        if EXAMPLE.exists():
+        examples = [row for row in EXAMPLES if (EXAMPLES_DIR / row[0]).exists()]
+        if examples:
+            # Lazy caching runs an example on its first click and replays the stored
+            # result after that, so the examples don't depend on the server at startup.
             gr.Examples(
-                examples=[[str(EXAMPLE), True, True, 0, 0]],
+                examples=[[str(EXAMPLES_DIR / f), ts, spk, 0, 0] for f, ts, spk, _ in examples],
+                example_labels=[label for *_, label in examples],
                 inputs=inputs,
-                label="Try a two-person meeting (AMI Meeting Corpus, CC BY 4.0)",
-                cache_examples=False,
+                # Typed as Components only, but caching a Tabs update works at runtime.
+                outputs=outputs,  # pyright: ignore[reportArgumentType]
+                fn=process_audio,
+                cache_examples=True,
+                cache_mode="lazy",
+                label="Try an example",
             )
 
     return demo

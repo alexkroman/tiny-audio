@@ -18,11 +18,164 @@ pipeline_tag: automatic-speech-recognition
 tags:
   - asr
   - speech-recognition
+  - speech-to-text
   - audio
+  - speech-llm
+  - word-timestamps
+  - speaker-diarization
   - qwen
   - granite-speech
   - lora
 library_name: transformers
+metrics:
+  - wer
+model-index:
+  - name: tiny-audio
+    results:
+      - task:
+          type: automatic-speech-recognition
+          name: Automatic Speech Recognition
+        dataset:
+          name: "LibriSpeech test-clean, subset of up to 1,000 samples"
+          type: openslr/librispeech_asr
+          config: clean
+          split: test
+        metrics:
+          - type: wer
+            value: 1.84
+            name: WER (normalized, subset of up to 1,000 samples)
+      - task:
+          type: automatic-speech-recognition
+          name: Automatic Speech Recognition
+        dataset:
+          name: "LibriSpeech test-other, subset of up to 1,000 samples"
+          type: openslr/librispeech_asr
+          config: other
+          split: test
+        metrics:
+          - type: wer
+            value: 6.38
+            name: WER (normalized, subset of up to 1,000 samples)
+      - task:
+          type: automatic-speech-recognition
+          name: Automatic Speech Recognition
+        dataset:
+          name: "SPGISpeech, subset of up to 1,000 samples"
+          type: kensho/spgispeech
+          config: test
+          split: test
+        metrics:
+          - type: wer
+            value: 2.29
+            name: WER (normalized, subset of up to 1,000 samples)
+      - task:
+          type: automatic-speech-recognition
+          name: Automatic Speech Recognition
+        dataset:
+          name: "TED-LIUM, subset of up to 1,000 samples"
+          type: sanchit-gandhi/tedlium-data
+          config: default
+          split: test
+        metrics:
+          - type: wer
+            value: 3.71
+            name: WER (normalized, subset of up to 1,000 samples)
+      - task:
+          type: automatic-speech-recognition
+          name: Automatic Speech Recognition
+        dataset:
+          name: "LoquaciousSet (held out), subset of up to 1,000 samples"
+          type: speechbrain/LoquaciousSet
+          config: small
+          split: test
+        metrics:
+          - type: wer
+            value: 6.2
+            name: WER (normalized, subset of up to 1,000 samples)
+      - task:
+          type: automatic-speech-recognition
+          name: Automatic Speech Recognition
+        dataset:
+          name: "VoxPopuli, subset of up to 1,000 samples"
+          type: facebook/voxpopuli
+          config: en
+          split: test
+        metrics:
+          - type: wer
+            value: 7.11
+            name: WER (normalized, subset of up to 1,000 samples)
+      - task:
+          type: automatic-speech-recognition
+          name: Automatic Speech Recognition
+        dataset:
+          name: "Common Voice 17, subset of up to 1,000 samples"
+          type: fixie-ai/common_voice_17_0
+          config: en
+          split: test
+        metrics:
+          - type: wer
+            value: 7.18
+            name: WER (normalized, subset of up to 1,000 samples)
+      - task:
+          type: automatic-speech-recognition
+          name: Automatic Speech Recognition
+        dataset:
+          name: "AMI (IHM), subset of up to 1,000 samples"
+          type: edinburghcstr/ami
+          config: ihm
+          split: test
+        metrics:
+          - type: wer
+            value: 8.99
+            name: WER (normalized, subset of up to 1,000 samples)
+      - task:
+          type: automatic-speech-recognition
+          name: Automatic Speech Recognition
+        dataset:
+          name: "GigaSpeech (dev), subset of up to 1,000 samples"
+          type: fixie-ai/gigaspeech
+          config: dev
+          split: dev
+        metrics:
+          - type: wer
+            value: 9.06
+            name: WER (normalized, subset of up to 1,000 samples)
+      - task:
+          type: automatic-speech-recognition
+          name: Automatic Speech Recognition
+        dataset:
+          name: "Earnings22 (held out), subset of up to 1,000 samples"
+          type: sanchit-gandhi/earnings22_robust_split
+          config: default
+          split: test
+        metrics:
+          - type: wer
+            value: 10.58
+            name: WER (normalized, subset of up to 1,000 samples)
+      - task:
+          type: automatic-speech-recognition
+          name: Automatic Speech Recognition
+        dataset:
+          name: "People's Speech, subset of up to 1,000 samples"
+          type: fixie-ai/peoples_speech
+          config: clean
+          split: test
+        metrics:
+          - type: wer
+            value: 17.59
+            name: WER (normalized, subset of up to 1,000 samples)
+      - task:
+          type: automatic-speech-recognition
+          name: Automatic Speech Recognition
+        dataset:
+          name: "AMI (SDM), subset of up to 1,000 samples"
+          type: edinburghcstr/ami
+          config: sdm
+          split: test
+        metrics:
+          - type: wer
+            value: 23.53
+            name: WER (normalized, subset of up to 1,000 samples)
 ---
 
 # Tiny Audio
@@ -30,8 +183,8 @@ library_name: transformers
 **A tiny, hackable, open-source speech LLM.**
 
 It transcribes English with punctuation, capitalization, word timestamps, and speaker labels: 1.8%
-WER on LibriSpeech test-clean and 8.4% averaged over 12 benchmarks. Built and trained with
-[Tiny Audio](https://github.com/alexkroman/tiny-audio).
+WER on LibriSpeech test-clean and 7.4% across 12 benchmarks (11,822 samples pooled). Built and
+trained with [Tiny Audio](https://github.com/alexkroman/tiny-audio).
 
 **[Try the live demo](https://huggingface.co/spaces/mazesmazes/tiny-audio)** ·
 **[Train your own](https://github.com/alexkroman/tiny-audio)** ·

@@ -5,7 +5,7 @@ build-backend = "poetry.core.masonry.api"
 [project]
 name = "tiny-audio"
 version = "0.1.0"
-description = "Learn ASR by Building One - A minimal speech recognition model combining a GLM-ASR encoder with Qwen3-0.6B"
+description = "A speech-to-text system you can train yourself: a frozen speech encoder and an LLM joined by a small trained projector"
 authors = [{ name = "Alex Kroman", email = "alex@alexkroman.com" }]
 license = "MIT"
 readme = "README.md"

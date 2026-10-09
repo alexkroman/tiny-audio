@@ -24,6 +24,12 @@ You reuse two pretrained models and teach them to talk to each other. The projec
 built from nothing; the decoder gets a gentle fine-tune so it learns to read audio tokens. Then you
 publish the result to the Hugging Face Hub and put a live demo on the web.
 
+> **This is not the published model.** `mazesmazes/tiny-audio` and the WER table in the README come
+> from the `granite_qwen_frozen` recipe: a Granite Speech 470M encoder and a frozen Qwen3.5-2B with
+> LoRA, trained on the full `multiasr` mix. The course swaps in a smaller encoder and decoder,
+> fine-tunes the decoder instead of adding LoRA, and trains on far less data, so expect a higher WER
+> from your course run.
+
 ______________________________________________________________________
 
 ## Course Structure
