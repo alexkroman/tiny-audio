@@ -31,6 +31,7 @@ from tiny_audio.asr_layers import (
 from tiny_audio.asr_modeling import (
     VOCAB_PAD_MULTIPLE,
     ASRModel,
+    TensorNoRepeatNGram,
     _assert_projector_loaded,
     _patch_gemma_decode_loop,
 )
@@ -342,7 +343,12 @@ class TestGenerate:
             return real_generate(**kwargs)
 
         monkeypatch.setattr(base_asr_model.language_model, "generate", spy)
-        processor_list: list[Any] = []
+
+        def keep(_ids: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
+            return scores
+
+        caller_processor = MagicMock(side_effect=keep)
+        processor_list: list[Any] = [caller_processor]
         out = base_asr_model.generate(
             input_features=torch.zeros(1, 80, 3000),
             audio_attention_mask=torch.ones(1, 3000, dtype=torch.long),
@@ -358,7 +364,14 @@ class TestGenerate:
         assert gen_cfg.return_dict_in_generate is True
         for flag in ("max_new_tokens", "output_scores", "return_dict_in_generate"):
             assert flag not in captured
-        assert captured["logits_processor"] is processor_list
+        # The caller's processors run first and their list is not mutated; the
+        # n-gram guard is the tensor one, with the stock processor switched off
+        # (0, since generate refills None from the decoder's config).
+        assert list(captured["logits_processor"])[:-1] == [caller_processor]
+        assert isinstance(captured["logits_processor"][-1], TensorNoRepeatNGram)
+        assert processor_list == [caller_processor]
+        assert gen_cfg.no_repeat_ngram_size == 0
+        assert caller_processor.called
         assert not base_asr_model.generation_config.output_scores
         assert not base_asr_model.generation_config.return_dict_in_generate
         assert not isinstance(out, torch.Tensor)

@@ -82,8 +82,11 @@ def decoder(monkeypatch: pytest.MonkeyPatch) -> tuple[GraphedDecoder, FakeModel]
 class TestGraphedDecoder:
     def test_buckets_and_tiers(self, decoder: tuple[GraphedDecoder, FakeModel]) -> None:
         dec, _ = decoder
-        assert dec.buckets == [1, 2, 4, 8, 16, 24]
-        assert [dec.bucket(n) for n in (1, 3, 9, 17, 24)] == [1, 4, 16, 24, 24]
+        assert dec.buckets == [1, 2, 4, 6, 8, 12, 16, 24]
+        assert [dec.bucket(n) for n in (1, 3, 5, 9, 13, 17, 24)] == [1, 4, 6, 12, 16, 24, 24]
+        # Room for every bucket on both tiers, or the rest would run eagerly.
+        dynamo_config = torch._dynamo.config  # pyright: ignore[reportPrivateUsage]
+        assert dynamo_config.recompile_limit >= 2 * len(dec.buckets)
         assert dec.short_enabled  # 253 prompt + 128 budget fits 416 slots
         assert dec.short_max_frames == 40
         assert (dec.full_cache_len, dec.full_budget) == (256 + 384, 256)

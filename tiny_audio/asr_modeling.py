@@ -23,6 +23,8 @@ from transformers import (
     AutoModelForCausalLM,
     AutoModelForSeq2SeqLM,
     AutoTokenizer,
+    LogitsProcessor,
+    LogitsProcessorList,
     PreTrainedModel,
     PreTrainedTokenizerBase,
     SequenceFeatureExtractor,
@@ -218,6 +220,33 @@ def _splice_audio(
     return inputs_embeds.masked_scatter(
         is_audio_token.unsqueeze(-1).to(dev), audio_embeds.to(dev, dtype=inputs_embeds.dtype)
     )
+
+
+class TensorNoRepeatNGram(LogitsProcessor):
+    """`NoRepeatNGramLogitsProcessor`'s bans, computed as tensor ops on the ids' device.
+
+    The stock processor rebuilds a Python dict of every n-gram in every row
+    each step, with a `.tolist()` (a GPU sync) per row: 0.3-0.7 ms of host work
+    a step at batch 8-32 against a 6.8 ms CUDA-graphed decode step. Same
+    semantics: a token is banned when the last n-1 ids plus it would repeat an
+    n-gram already in the row, prompt included.
+    """
+
+    def __init__(self, ngram_size: int) -> None:
+        self.ngram_size = ngram_size
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        n = self.ngram_size
+        if input_ids.shape[1] < n:
+            return scores
+        windows = input_ids.unfold(1, n, 1)  # (batch, positions, n)
+        tail = input_ids[:, None, input_ids.shape[1] - n + 1 :]
+        repeats = (windows[..., :-1] == tail).all(dim=-1)
+        # Non-repeating windows point at a spare column, so every write is True.
+        vocab = scores.shape[-1]
+        banned = torch.zeros(scores.shape[0], vocab + 1, dtype=torch.bool, device=scores.device)
+        banned.scatter_(1, torch.where(repeats, windows[..., -1], vocab), True)
+        return cast("torch.FloatTensor", scores.masked_fill(banned[:, :vocab], -float("inf")))
 
 
 def _patch_gemma_decode_loop(model: "GenerativeDecoder") -> None:
@@ -1864,6 +1893,13 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # actually populate .scores on the output object.
         if gen_cfg.output_scores:
             gen_cfg.return_dict_in_generate = True
+        if gen_cfg.no_repeat_ngram_size:
+            processors = LogitsProcessorList(generate_kwargs.pop("logits_processor", None) or [])
+            processors.append(TensorNoRepeatNGram(gen_cfg.no_repeat_ngram_size))
+            generate_kwargs["logits_processor"] = processors
+            # 0, not None: generate refills None from the decoder's own config
+            # and would build the stock processor alongside this one.
+            gen_cfg.no_repeat_ngram_size = 0
 
         lm_inputs = self._lm_generate_inputs(input_ids, inputs_embeds)
         output = self.language_model.generate(

@@ -445,17 +445,28 @@ class GraphedDecoder:
     guards on the cache's identity, so every call recompiled (~5 s). So the
     caches live here, one per batch-size bucket, reset between calls.
 
-    Graphs replay fixed shapes, so a batch is padded up to the next bucket
-    (powers of two up to `max_batch_size`) with copies of its last chunk, whose
-    texts are dropped. Measured on an RTX 4090 (18 s AMI clip, 2 chunks):
-    batch 1 601 -> 192 ms, batch 32 949 -> 565 ms. Each bucket compiles once,
-    30-50 s, so `warm_up` every bucket before serving.
+    Graphs replay fixed shapes, so a batch is padded up to the next bucket with
+    copies of its last chunk, whose texts are dropped. Measured on an RTX 4090
+    (18 s AMI clip, 2 chunks): batch 1 601 -> 192 ms, batch 32 949 -> 565 ms,
+    so a padded row costs ~12 ms, mostly encoder and prefill. Buckets are the
+    powers of two plus the 1.5x points between them (1, 2, 4, 6, 8, 12, 16,
+    24, 32): the served mean batch of 12 padded to 16 under powers of two
+    alone. Each bucket compiles once, so `warm_up` every bucket before serving.
     """
 
     def __init__(self, pipe: ASRPipeline, max_batch_size: int) -> None:
         self.pipe = pipe
-        sizes = [1 << i for i in range(max(1, max_batch_size).bit_length())]
-        self.buckets = sorted({*(b for b in sizes if b < max_batch_size), max_batch_size})
+        top = max(1, max_batch_size)
+        sizes = [1 << i for i in range(top.bit_length())]
+        sizes += [3 * s // 2 for s in sizes if s >= 4]
+        self.buckets = sorted({*(b for b in sizes if b < top), top})
+        # Every bucket is a recompile of the one decode frame, short tier and
+        # full, and dynamo's default limit of 8 would quietly run the rest
+        # eagerly (no CUDA graph, correct but several times slower).
+        dynamo_config = torch._dynamo.config  # pyright: ignore[reportPrivateUsage]
+        dynamo_config.recompile_limit = max(
+            dynamo_config.recompile_limit, 2 * len(self.buckets) + 4
+        )
         model = pipe.model
         self.eos_ids = set(_as_list(model.generation_config.eos_token_id))
         # Full tier: every token generate may add, plus the longest prompt (an
