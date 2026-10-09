@@ -98,7 +98,7 @@ async def _bench(
         typer.echo(f"{audio.name}: {seconds:.1f} s of audio, parameters {parameters or '{}'}")
         typer.echo(
             f"{'conc':>5} {'reqs':>5} {'fail':>5} {'p50 s':>8} {'p90 s':>8} {'max s':>8} "
-            f"{'RTFx':>8} {'batch':>6}"
+            f"{'RTFx':>8} {'batch':>6} {'gpu%':>5} {'wait ms':>8} {'srv ms':>7}"
         )
         texts: list[str] = []
         for concurrency in levels:
@@ -106,16 +106,25 @@ async def _bench(
             before = (await client.get(f"{base}/stats")).json()
             level = await _run_level(client, f"{base}/", payload, concurrency, count)
             after = (await client.get(f"{base}/stats")).json()
-            batches = after["batches"] - before["batches"]
-            chunks = after["chunks"] - before["chunks"]
+            delta = server_deltas(before, after)
             ordered = sorted(level.latencies) or [float("nan")]
             p90 = ordered[min(len(ordered) - 1, int(0.9 * len(ordered)))]
             typer.echo(
                 f"{concurrency:>5} {count:>5} {len(level.errors):>5} "
                 f"{statistics.median(ordered):>8.2f} {p90:>8.2f} {ordered[-1]:>8.2f} "
                 f"{len(level.latencies) * seconds / level.wall:>8.1f} "
-                f"{(chunks / batches if batches else 0):>6.1f}"
+                f"{delta['mean_batch']:>6.1f} {100 * delta['gpu_seconds'] / level.wall:>5.0f} "
+                f"{1000 * delta['queue_wait_per_chunk']:>8.0f} {1000 * delta['request_mean']:>7.0f}"
             )
+            if delta["requests"]:
+                typer.echo(
+                    "  server per request: "
+                    f"audio decode {1000 * delta['audio_decode_mean']:.0f} ms, "
+                    f"waiting on GPU {1000 * delta['gpu_wait_mean']:.0f} ms, "
+                    f"other CPU {1000 * delta['other_mean']:.0f} ms; "
+                    f"client p50 minus server mean = "
+                    f"{1000 * (statistics.median(ordered) - delta['request_mean']):.0f} ms network"
+                )
             if level.errors:
                 typer.echo(f"  ! {len(level.errors)} failed, e.g. {level.errors[0]}")
             texts = level.texts or texts
@@ -123,6 +132,32 @@ async def _bench(
                 typer.echo(f"  ! {divergence(level.texts)}")
         if texts:
             typer.echo(f"\ntext: {texts[0][:200]}")
+
+
+def server_deltas(before: dict[str, Any], after: dict[str, Any]) -> dict[str, float]:
+    """What the server spent during one level, from two `GET /stats` snapshots.
+
+    Missing keys (an older server) read as 0.
+    """
+
+    def d(key: str) -> float:
+        return float(after.get(key, 0)) - float(before.get(key, 0))
+
+    batches, chunks, requests = d("batches"), d("chunks"), d("requests")
+
+    def per_request(key: str) -> float:
+        return d(key) / requests if requests else 0.0
+
+    return {
+        "mean_batch": chunks / batches if batches else 0.0,
+        "gpu_seconds": d("gpu_seconds"),
+        "queue_wait_per_chunk": d("queue_wait_seconds") / chunks if chunks else 0.0,
+        "requests": requests,
+        "request_mean": per_request("request_seconds"),
+        "audio_decode_mean": per_request("audio_decode_seconds"),
+        "gpu_wait_mean": per_request("gpu_wait_seconds"),
+        "other_mean": per_request("other_seconds"),
+    }
 
 
 def divergence(texts: list[str]) -> str:

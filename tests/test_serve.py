@@ -272,6 +272,16 @@ class TestApp:
         assert client.get("/health").json() == {"status": "ok", "model": "me/model"}
         assert client.get("/stats").json()["max_batch_size"] == 4
 
+    def test_stats_break_down_request_time(self, make_client: MakeClient) -> None:
+        client, _ = make_client()
+        client.post("/", content=b"RIFF", headers={"content-type": "audio/wav"})
+        stats = client.get("/stats").json()
+        assert stats["requests"] == 1
+        assert stats["request_seconds"] >= stats["audio_decode_seconds"] >= 0
+        assert {"gpu_seconds", "queue_wait_seconds", "gpu_wait_seconds", "other_seconds"} <= set(
+            stats
+        )
+
 
 def test_client_disconnect_mid_upload_is_quiet(make_client: MakeClient) -> None:
     """A client that hangs up while sending its body gets no traceback, just a 499."""

@@ -27,6 +27,7 @@ import logging
 import os
 import queue
 import threading
+import time
 from collections.abc import AsyncGenerator, Callable, Mapping
 from concurrent.futures import Future
 from contextlib import asynccontextmanager
@@ -80,6 +81,7 @@ class _Job:
 
     prepared: PreparedChunk
     future: "Future[str]" = field(default_factory=Future)
+    queued_at: float = field(default_factory=time.perf_counter)
 
     @property
     def frames(self) -> int:
@@ -88,11 +90,33 @@ class _Job:
 
 @dataclass
 class BatcherStats:
-    """Counters for `GET /stats`: how full the GPU's batches run."""
+    """Counters for `GET /stats`: how full and how busy the GPU's batches run."""
 
     batches: int = 0
     chunks: int = 0
     largest_batch: int = 0
+    gpu_seconds: float = 0.0  # inside generate
+    queue_wait_seconds: float = 0.0  # summed over chunks: queued -> its batch starts
+
+
+@dataclass
+class RequestStats:
+    """Where requests spend their time server-side, summed (written by request threads)."""
+
+    requests: int = 0
+    total_seconds: float = 0.0
+    audio_decode_seconds: float = 0.0
+    gpu_wait_seconds: float = 0.0  # chunks queued or decoding on the GPU
+    other_seconds: float = 0.0  # features, chunking, alignment, diarization, JSON
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def add(self, total: float, audio_decode: float, gpu_wait: float) -> None:
+        with self.lock:
+            self.requests += 1
+            self.total_seconds += total
+            self.audio_decode_seconds += audio_decode
+            self.gpu_wait_seconds += gpu_wait
+            self.other_seconds += total - audio_decode - gpu_wait
 
 
 class ChunkBatcher:
@@ -106,6 +130,7 @@ class ChunkBatcher:
         self._inbox: queue.SimpleQueue[_Job | None] = queue.SimpleQueue()
         self._thread = threading.Thread(target=self._loop, name="tiny-audio-gpu", daemon=True)
         self.stats = BatcherStats()
+        self._waits = threading.local()  # per request thread: seconds blocked in run()
 
     def start(self) -> None:
         self._thread.start()
@@ -121,10 +146,20 @@ class ChunkBatcher:
         Installed as `ASRPipeline.chunk_runner`, so every transcription path --
         plain, timestamps, per-speaker streams -- batches through here.
         """
+        start = time.perf_counter()
         jobs = [_Job(p) for p in prepared]
         for job in jobs:
             self._inbox.put(job)
-        return [job.future.result() for job in jobs]
+        texts = [job.future.result() for job in jobs]
+        self._waits.seconds = self.thread_wait() + time.perf_counter() - start
+        return texts
+
+    def thread_wait(self, *, reset: bool = False) -> float:
+        """Seconds the calling thread has spent in `run` (since the last reset)."""
+        seconds = float(getattr(self._waits, "seconds", 0.0))
+        if reset:
+            self._waits.seconds = 0.0
+        return seconds
 
     def _loop(self) -> None:
         pending: list[_Job] = []
@@ -163,6 +198,8 @@ class ChunkBatcher:
         return batch
 
     def _execute(self, batch: list[_Job]) -> None:
+        start = time.perf_counter()
+        self.stats.queue_wait_seconds += sum(start - job.queued_at for job in batch)
         try:
             texts = self._generate([job.prepared for job in batch])
         except BaseException as e:  # every waiter must hear about it
@@ -171,6 +208,7 @@ class ChunkBatcher:
             return
         for job, text in zip(batch, texts, strict=True):
             job.future.set_result(text)
+        self.stats.gpu_seconds += time.perf_counter() - start
         self.stats.batches += 1
         self.stats.chunks += len(batch)
         self.stats.largest_batch = max(self.stats.largest_batch, len(batch))
@@ -261,15 +299,29 @@ def decode_audio(audio: bytes) -> dict[str, Any]:
 
 
 def transcribe_request(
-    pipe: ASRPipeline, body: bytes, content_type: str, query: Mapping[str, str]
+    pipe: ASRPipeline,
+    body: bytes,
+    content_type: str,
+    query: Mapping[str, str],
+    batcher: ChunkBatcher | None = None,
+    stats: RequestStats | None = None,
 ) -> bytes:
     """One request's whole blocking path, run on a request thread: bytes in, JSON out."""
+    start = time.perf_counter()
     audio, params = decode_request(body, content_type, query)
+    decoded = decode_audio(audio)
+    decode_seconds = time.perf_counter() - start
+    if batcher is not None:
+        batcher.thread_wait(reset=True)
     try:
-        result = pipe(decode_audio(audio), **params)
+        result = pipe(decoded, **params)
     except ValueError as e:  # undecodable audio, bad speaker hints
         raise RequestError(str(e)) from e
-    return json.dumps(_jsonable(result)).encode()
+    content = json.dumps(_jsonable(result)).encode()
+    if stats is not None:
+        gpu_wait = batcher.thread_wait() if batcher is not None else 0.0
+        stats.add(time.perf_counter() - start, decode_seconds, gpu_wait)
+    return content
 
 
 def _authorized(request: Request, api_key: str | None) -> bool:
@@ -297,6 +349,8 @@ async def _read_body(request: Request) -> bytes | None:
 def create_app(pipe: ASRPipeline, batcher: ChunkBatcher, model_id: str) -> Starlette:
     """The HTTP app over a loaded pipeline whose chunks run through `batcher`."""
     limiter = anyio.CapacityLimiter(REQUEST_THREADS)
+    request_stats = RequestStats()
+    started = time.perf_counter()
     api_key = os.environ.get(API_KEY_ENV)
 
     async def transcribe(request: Request) -> Response:
@@ -312,6 +366,8 @@ def create_app(pipe: ASRPipeline, batcher: ChunkBatcher, model_id: str) -> Starl
                 body,
                 request.headers.get("content-type", ""),
                 dict(request.query_params),
+                batcher,
+                request_stats,
                 limiter=limiter,
             )
         except RequestError as e:
@@ -325,14 +381,22 @@ def create_app(pipe: ASRPipeline, batcher: ChunkBatcher, model_id: str) -> Starl
         return JSONResponse({"status": "ok", "model": model_id})
 
     async def stats(_request: Request) -> Response:
-        s = batcher.stats
+        s, r = batcher.stats, request_stats
         return JSONResponse(
             {
+                "uptime_seconds": round(time.perf_counter() - started, 3),
                 "batches": s.batches,
                 "chunks": s.chunks,
                 "mean_batch_size": round(s.chunks / s.batches, 2) if s.batches else 0.0,
                 "largest_batch": s.largest_batch,
                 "max_batch_size": batcher.max_batch_size,
+                "gpu_seconds": round(s.gpu_seconds, 3),
+                "queue_wait_seconds": round(s.queue_wait_seconds, 3),
+                "requests": r.requests,
+                "request_seconds": round(r.total_seconds, 3),
+                "audio_decode_seconds": round(r.audio_decode_seconds, 3),
+                "gpu_wait_seconds": round(r.gpu_wait_seconds, 3),
+                "other_seconds": round(r.other_seconds, 3),
             }
         )
 
@@ -353,14 +417,19 @@ def create_app(pipe: ASRPipeline, batcher: ChunkBatcher, model_id: str) -> Starl
     )
 
 
+def warm_chunk(pipe: ASRPipeline) -> PreparedChunk:
+    """A 10 s noise chunk to decode before serving."""
+    noise = np.random.default_rng(0).normal(0, 0.05, 16000 * 10).astype(np.float32)
+    return pipe.prepare_chunk(noise, 16000)
+
+
 def warm_up(
     pipe: ASRPipeline,
     generate: Callable[[list[PreparedChunk]], list[str]],
     sizes: list[int],
 ) -> None:
-    """Decode a batch of each size, so no request pays autotuning or graph compiles."""
-    noise = np.random.default_rng(0).normal(0, 0.05, 16000 * 10).astype(np.float32)
-    prepared = pipe.prepare_chunk(noise, 16000)
+    """Decode a batch of each size, so no request pays kernel autotuning."""
+    prepared = warm_chunk(pipe)
     for size in sizes:
         typer.echo(f"  batch {size}")
         generate([prepared] * size)
@@ -411,13 +480,14 @@ def serve(
     # pod, 32 request threads: 63.6 -> 115.7 clips/s of CPU-side work.
     torch.set_num_threads(1)
     generate: Callable[[list[PreparedChunk]], list[str]] = pipe.generate_prepared
-    sizes = sorted({1, batch})
     if device.type == "cuda" and cuda_graphs:
         decoder = GraphedDecoder(pipe, batch)
-        generate, sizes = decoder, decoder.buckets
-        typer.echo(f"CUDA graphs for batch sizes {sizes}; compiling each (~30-50 s)...")
-    typer.echo("Warming up...")
-    warm_up(pipe, generate, sizes)
+        generate = decoder
+        typer.echo(f"CUDA graphs for batch sizes {decoder.buckets}; compiling (~10-50 s each)...")
+        decoder.warm_up(warm_chunk(pipe))
+    else:
+        typer.echo("Warming up...")
+        warm_up(pipe, generate, sorted({1, batch}))
     batcher = ChunkBatcher(generate, batch)
     pipe.chunk_runner = batcher.run
     batcher.start()

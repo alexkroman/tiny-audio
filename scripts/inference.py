@@ -4,6 +4,7 @@ import importlib.util
 import logging
 from typing import TYPE_CHECKING, Any, cast
 
+import numpy as np
 import torch
 from peft import PeftModel
 from peft.tuners.tuners_utils import BaseTuner
@@ -13,7 +14,7 @@ from transformers.masking_utils import sdpa_mask
 
 from tiny_audio.alignment import QwenForcedAligner
 from tiny_audio.asr_modeling import ASRModel
-from tiny_audio.asr_pipeline import ASRPipeline, PreparedChunk
+from tiny_audio.asr_pipeline import CHUNK_MAX_S, ASRPipeline, PreparedChunk, collate_chunks
 from tiny_audio.diarization import NemotronDiarizer
 
 if TYPE_CHECKING:
@@ -26,6 +27,10 @@ logger = logging.getLogger(__name__)
 # implementation: same numerics, several times slower prefill and decode.
 FAST_KERNEL_MODULES = {"causal-conv1d": "causal_conv1d", "flash-linear-attention": "fla"}
 
+
+# Short static-cache tier for `GraphedDecoder` (see its __init__).
+SHORT_BUDGET = 128
+SHORT_CACHE_LEN = 416
 
 # Registered attention implementation: sdpa that survives left padding on MPS.
 MPS_SAFE_SDPA = "sdpa_mps_safe"
@@ -188,25 +193,101 @@ class GraphedDecoder:
         self.pipe = pipe
         sizes = [1 << i for i in range(max(1, max_batch_size).bit_length())]
         self.buckets = sorted({*(b for b in sizes if b < max_batch_size), max_batch_size})
-        # Longest prompt (an 18 s chunk plus lead-in is ~230 audio tokens plus
-        # the chat template) and every token generate may add, with headroom.
-        self.cache_len = int(pipe.model.generation_config.max_new_tokens) + 384
-        self._caches: dict[int, StaticCache] = {}
+        model = pipe.model
+        self.eos_ids = set(_as_list(model.generation_config.eos_token_id))
+        # Full tier: every token generate may add, plus the longest prompt (an
+        # 18 s chunk with lead-in is ~253 tokens) with headroom.
+        self.full_budget = int(model.generation_config.max_new_tokens)
+        self.full_cache_len = self.full_budget + 384
+        # Short tier, the default: attention over the static cache costs per
+        # slot, filled or not, so a 416-slot cache decodes a batch-32 step in
+        # 10.6 ms against 640's 12.1. Its 128-token budget covers 11,999 of the
+        # 12,000 transcripts in the n=1000 x 12-dataset eval (median 15, max
+        # 157); a row that hits it unfinished is redone on the full tier.
+        # Calibrated on the longest chunk the pipeline cuts (prompt length
+        # grows with audio), so any chunk up to that length fits.
+        longest = pipe.prepare_chunk(np.zeros(int(CHUNK_MAX_S * 16000), np.float32), 16000)
+        self.short_max_frames = int(longest["attention_mask"].shape[-1])
+        self.short_enabled = prompt_tokens(pipe, longest) + SHORT_BUDGET <= SHORT_CACHE_LEN
+        self._caches: dict[tuple[int, int], StaticCache] = {}
+        self.redone = 0  # rows re-decoded on the full tier (for /stats-style logging)
 
     def bucket(self, n: int) -> int:
         """The smallest bucket that holds `n` chunks."""
         return next(b for b in self.buckets if b >= n)
 
-    # The caches' tensors are made under generate_prepared's inference_mode, and
-    # an in-place reset of an inference tensor must happen under it too.
-    @torch.inference_mode()
-    def __call__(self, prepared: list[PreparedChunk]) -> list[str]:
-        size = self.bucket(len(prepared))
-        padded = [*prepared, *[prepared[-1]] * (size - len(prepared))]
-        cache = self._caches.get(size)
+    def _cache(self, size: int, length: int) -> StaticCache:
+        cache = self._caches.get((size, length))
         if cache is None:
             config = self.pipe.model.language_model.config
-            cache = self._caches[size] = StaticCache(config=config, max_cache_len=self.cache_len)
+            cache = self._caches[size, length] = StaticCache(config=config, max_cache_len=length)
         else:
             cache.reset()
-        return self.pipe.generate_prepared(padded, past_key_values=cache)[: len(prepared)]
+        return cache
+
+    def _decode(
+        self, prepared: list[PreparedChunk], cache_len: int, budget: int
+    ) -> tuple[list[str], list[bool]]:
+        """Texts, and whether each row ran out of budget before an end token."""
+        size = self.bucket(len(prepared))
+        padded = [*prepared, *[prepared[-1]] * (size - len(prepared))]
+        batch = collate_chunks(padded)
+        model = self.pipe.model
+        tokens = model.generate(
+            input_features=batch["input_features"].to(model.device),
+            audio_attention_mask=batch["attention_mask"].to(model.device),
+            past_key_values=self._cache(size, cache_len),
+            max_new_tokens=budget,
+        )
+        assert torch.is_tensor(tokens)  # no output_scores: plain token ids
+        rows = tokens[: len(prepared)].cpu()
+        texts = [self.pipe.postprocess({"tokens": row})["text"] for row in rows]
+        cut = [row.shape[-1] >= budget and not self.eos_ids & set(row.tolist()) for row in rows]
+        return texts, cut
+
+    # The caches' tensors are made under generate's inference_mode, and an
+    # in-place reset of an inference tensor must happen under it too.
+    @torch.inference_mode()
+    def __call__(self, prepared: list[PreparedChunk]) -> list[str]:
+        longest = max(int(p["attention_mask"].shape[-1]) for p in prepared)
+        if not self.short_enabled or longest > self.short_max_frames:
+            return self._decode(prepared, self.full_cache_len, self.full_budget)[0]
+        texts, cut = self._decode(prepared, SHORT_CACHE_LEN, SHORT_BUDGET)
+        redo = [i for i, was_cut in enumerate(cut) if was_cut]
+        if redo:
+            self.redone += len(redo)
+            again, _ = self._decode(
+                [prepared[i] for i in redo], self.full_cache_len, self.full_budget
+            )
+            for i, text in zip(redo, again, strict=True):
+                texts[i] = text
+        return texts
+
+    @torch.inference_mode()
+    def warm_up(self, prepared: PreparedChunk) -> None:
+        """Compile every short-tier bucket, and the full tier at batch 1 (the usual redo).
+
+        Larger full-tier buckets compile on first use: redos are rare, and
+        compiling all of them would double startup.
+        """
+        for size in self.buckets:
+            if self.short_enabled:
+                self._decode([prepared] * size, SHORT_CACHE_LEN, SHORT_BUDGET)
+        self._decode([prepared], self.full_cache_len, self.full_budget)
+
+
+def _as_list(ids: int | list[int] | None) -> list[int]:
+    if ids is None:
+        return []
+    return [ids] if isinstance(ids, int) else list(ids)
+
+
+def prompt_tokens(pipe: ASRPipeline, prepared: PreparedChunk) -> int:
+    """Prompt length (chat template plus audio tokens) the decoder sees for one chunk."""
+    batch = collate_chunks([prepared])
+    model = pipe.model
+    with torch.inference_mode():
+        input_ids, _, _ = model._prepare_audio_inputs(  # pyright: ignore[reportPrivateUsage]
+            batch["input_features"].to(model.device), batch["attention_mask"].to(model.device)
+        )
+    return int(input_ids.shape[1])

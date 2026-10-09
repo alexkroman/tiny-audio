@@ -66,7 +66,7 @@ def test_reports_each_concurrency_level(
     assert len(posted) == 1 + 3 + 3  # warm-up, then each level
     assert posted[0]["parameters"] == {"return_timestamps": True}
     rows = [line.split() for line in out.splitlines() if line.strip()[:1].isdigit()]
-    assert [(row[0], row[1], row[-1]) for row in rows] == [("1", "3", "2.0"), ("2", "3", "2.0")]
+    assert [(row[0], row[1], row[7]) for row in rows] == [("1", "3", "2.0"), ("2", "3", "2.0")]
     assert "2.0 s of audio" in out
     assert "text: hello" in out
     assert "different transcripts" not in out
@@ -133,3 +133,43 @@ def test_failed_warm_up_exits(monkeypatch: pytest.MonkeyPatch, wav: Path) -> Non
             timestamps=False,
             speakers=False,
         )
+
+
+def test_server_deltas_break_down_a_level() -> None:
+    before = {
+        "batches": 10,
+        "chunks": 20,
+        "gpu_seconds": 1.0,
+        "queue_wait_seconds": 0.5,
+        "requests": 5,
+        "request_seconds": 2.0,
+        "audio_decode_seconds": 0.1,
+        "gpu_wait_seconds": 1.5,
+        "other_seconds": 0.4,
+    }
+    after = {
+        "batches": 12,
+        "chunks": 28,
+        "gpu_seconds": 2.0,
+        "queue_wait_seconds": 1.3,
+        "requests": 9,
+        "request_seconds": 4.0,
+        "audio_decode_seconds": 0.14,
+        "gpu_wait_seconds": 3.1,
+        "other_seconds": 0.76,
+    }
+    d = bench_serve.server_deltas(before, after)
+    assert d["mean_batch"] == pytest.approx(4.0)
+    assert d["gpu_seconds"] == pytest.approx(1.0)
+    assert d["queue_wait_per_chunk"] == pytest.approx(0.1)
+    assert d["request_mean"] == pytest.approx(0.5)
+    assert d["audio_decode_mean"] == pytest.approx(0.01)
+    assert d["gpu_wait_mean"] == pytest.approx(0.4)
+    assert d["other_mean"] == pytest.approx(0.09)
+
+
+def test_server_deltas_tolerate_an_older_server() -> None:
+    d = bench_serve.server_deltas({"batches": 1, "chunks": 2}, {"batches": 2, "chunks": 4})
+    assert d["mean_batch"] == pytest.approx(2.0)
+    assert d["requests"] == 0
+    assert d["request_mean"] == 0.0

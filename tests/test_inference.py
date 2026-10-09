@@ -19,7 +19,7 @@ def _chunk(frames: int) -> PreparedChunk:
 
 
 class FakeCache:
-    """Stands in for StaticCache: records construction and resets."""
+    """Stands in for StaticCache: records its length and resets."""
 
     def __init__(self, config: object, max_cache_len: int) -> None:
         self.max_cache_len = max_cache_len
@@ -29,52 +29,114 @@ class FakeCache:
         self.resets += 1
 
 
+EOS = 99
+LONG = 30  # a chunk with this many frames "talks" past any budget (short-tier length)
+
+
+class FakeModel:
+    """generate() returns, per row: the row's frame count, then EOS (or no EOS for LONG)."""
+
+    def __init__(self) -> None:
+        self.generation_config = SimpleNamespace(max_new_tokens=256, eos_token_id=[EOS, 98])
+        self.language_model = SimpleNamespace(config=object())
+        self.device = torch.device("cpu")
+        self.calls: list[dict[str, Any]] = []
+
+    def generate(self, **kwargs: Any) -> torch.Tensor:
+        frames = kwargs["audio_attention_mask"].sum(dim=-1).tolist()
+        budget = kwargs["max_new_tokens"]
+        self.calls.append({"frames": frames, **kwargs})
+        rows = [[f] * budget if f == LONG else [f, EOS] + [0] * (budget - 2) for f in frames]
+        return torch.tensor(rows)
+
+
 @pytest.fixture
-def decoder(monkeypatch: pytest.MonkeyPatch) -> tuple[GraphedDecoder, list[dict[str, Any]]]:
+def decoder(monkeypatch: pytest.MonkeyPatch) -> tuple[GraphedDecoder, FakeModel]:
     monkeypatch.setattr(inference, "StaticCache", FakeCache)
-    calls: list[dict[str, Any]] = []
 
-    def generate_prepared(prepared: list[PreparedChunk], **kwargs: Any) -> list[str]:
-        calls.append({"frames": [int(p["attention_mask"].shape[-1]) for p in prepared], **kwargs})
-        return [f"t{i}" for i in range(len(prepared))]
+    def prompt_253(pipe: object, prepared: object) -> int:
+        return 253
 
-    model = SimpleNamespace(
-        generation_config=SimpleNamespace(max_new_tokens=256),
-        language_model=SimpleNamespace(config=object()),
-    )
-    pipe = SimpleNamespace(model=model, generate_prepared=generate_prepared)
-    return GraphedDecoder(cast(ASRPipeline, pipe), max_batch_size=24), calls
+    monkeypatch.setattr(inference, "prompt_tokens", prompt_253)
+    model = FakeModel()
+
+    def postprocess(outputs: dict[str, torch.Tensor]) -> dict[str, str]:
+        return {"text": f"f{int(outputs['tokens'][0])}"}
+
+    def prepare_chunk(chunk: Any, sample_rate: int) -> PreparedChunk:
+        return _chunk(40)  # the longest chunk the pipeline cuts is 40 frames here
+
+    pipe = SimpleNamespace(model=model, postprocess=postprocess, prepare_chunk=prepare_chunk)
+    return GraphedDecoder(cast(ASRPipeline, pipe), max_batch_size=24), model
 
 
 class TestGraphedDecoder:
-    def test_buckets_are_powers_of_two_up_to_the_max(
-        self, decoder: tuple[GraphedDecoder, list[dict[str, Any]]]
-    ) -> None:
+    def test_buckets_and_tiers(self, decoder: tuple[GraphedDecoder, FakeModel]) -> None:
         dec, _ = decoder
         assert dec.buckets == [1, 2, 4, 8, 16, 24]
         assert [dec.bucket(n) for n in (1, 3, 9, 17, 24)] == [1, 4, 16, 24, 24]
-        assert dec.cache_len == 256 + 384
+        assert dec.short_enabled  # 253 prompt + 128 budget fits 416 slots
+        assert dec.short_max_frames == 40
+        assert (dec.full_cache_len, dec.full_budget) == (256 + 384, 256)
 
-    def test_pads_to_the_bucket_and_drops_the_padding(
-        self, decoder: tuple[GraphedDecoder, list[dict[str, Any]]]
+    def test_short_tier_pads_to_the_bucket_and_drops_the_padding(
+        self, decoder: tuple[GraphedDecoder, FakeModel]
     ) -> None:
-        dec, calls = decoder
-        texts = dec([_chunk(5), _chunk(7), _chunk(9)])
-        assert texts == ["t0", "t1", "t2"]  # the padded fourth row is dropped
-        assert calls[0]["frames"] == [5, 7, 9, 9]  # padded with copies of the last chunk
+        dec, model = decoder
+        assert dec([_chunk(5), _chunk(7), _chunk(9)]) == ["f5", "f7", "f9"]
+        [call] = model.calls
+        assert call["frames"] == [5, 7, 9, 9]  # padded with copies of the last chunk
+        assert call["max_new_tokens"] == inference.SHORT_BUDGET
+        assert call["past_key_values"].max_cache_len == inference.SHORT_CACHE_LEN
 
-    def test_one_cache_per_bucket_reused_and_reset(
-        self, decoder: tuple[GraphedDecoder, list[dict[str, Any]]]
+    def test_row_out_of_budget_is_redone_on_the_full_tier(
+        self, decoder: tuple[GraphedDecoder, FakeModel]
     ) -> None:
-        dec, calls = decoder
+        dec, model = decoder
+        assert dec([_chunk(5), _chunk(LONG - 10)]) == ["f5", f"f{LONG - 10}"]
+        model.calls.clear()
+        texts = dec([_chunk(5), _chunk(LONG), _chunk(7)])
+        short, full = model.calls
+        assert full["frames"] == [LONG]  # only the cut-off row, alone
+        assert full["max_new_tokens"] == 256
+        assert full["past_key_values"].max_cache_len == 640
+        assert texts == ["f5", f"f{LONG}", "f7"]
+        assert dec.redone == 1
+        assert short["max_new_tokens"] == inference.SHORT_BUDGET
+
+    def test_chunk_longer_than_calibrated_goes_straight_to_full(
+        self, decoder: tuple[GraphedDecoder, FakeModel]
+    ) -> None:
+        dec, model = decoder
+        dec([_chunk(41)])
+        [call] = model.calls
+        assert call["max_new_tokens"] == 256
+
+    def test_one_cache_per_bucket_and_tier_reused_and_reset(
+        self, decoder: tuple[GraphedDecoder, FakeModel]
+    ) -> None:
+        dec, model = decoder
         dec([_chunk(5)])
         dec([_chunk(6)])
         dec([_chunk(5), _chunk(6)])
-        one, again, two = (c["past_key_values"] for c in calls)
+        one, again, two = (c["past_key_values"] for c in model.calls)
         assert one is again  # same object: the compiled graph's guards hold
         assert one is not two
         assert cast(FakeCache, one).resets == 1
-        assert cast(FakeCache, two).resets == 0
+
+    def test_short_tier_disabled_when_the_prompt_cannot_fit(
+        self, monkeypatch: pytest.MonkeyPatch, decoder: tuple[GraphedDecoder, FakeModel]
+    ) -> None:
+        dec, model = decoder
+
+        def prompt_300(pipe: object, prepared: object) -> int:
+            return 300
+
+        monkeypatch.setattr(inference, "prompt_tokens", prompt_300)
+        dec2 = GraphedDecoder(dec.pipe, max_batch_size=4)
+        assert not dec2.short_enabled
+        dec2([_chunk(5)])
+        assert model.calls[-1]["max_new_tokens"] == 256
 
 
 class TestMpsSafeSdpa:
