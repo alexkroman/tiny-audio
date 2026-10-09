@@ -64,14 +64,14 @@ def main(
     ]
     console.print("Added .gitattributes (excludes tokenizer_config.json from LFS)")
 
-    def _add(src: Path, path_in_repo: str | None = None, note: str = "") -> None:
+    def _add(src: Path, path_in_repo: str | None = None) -> None:
         if not src.exists():
             console.print(f"[yellow]Warning: {src} not found, skipping[/yellow]")
             return
         operations.append(
             CommitOperationAdd(path_in_repo=path_in_repo or src.name, path_or_fileobj=str(src))
         )
-        console.print(f"Added {src} as {path_in_repo or src.name}{note}")
+        console.print(f"Added {src} as {path_in_repo or src.name}")
 
     for filename in (
         "asr_config.py",
@@ -84,12 +84,8 @@ def main(
         "projectors.py",
         "alignment.py",
         "diarization.py",
-        "handler.py",
     ):
-        _add(
-            Path("tiny_audio") / filename,
-            note=" (for Inference Endpoints)" if filename == "handler.py" else "",
-        )
+        _add(Path("tiny_audio") / filename)
 
     # MODEL_CARD.md is published as README.md on the Hub.
     _add(Path("MODEL_CARD.md"), "README.md")

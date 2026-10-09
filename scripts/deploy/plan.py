@@ -20,10 +20,8 @@ from __future__ import annotations
 
 import importlib
 import json
-import subprocess
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
@@ -40,6 +38,7 @@ from scripts.deploy.hub_sizes import (
     safetensors_params,
     vocab_table_params,
 )
+from scripts.deploy.pods import POD_PORTS, create_first_available, ssh_public_key
 from scripts.train_config import register_configs
 from scripts.utils import get_project_root
 
@@ -768,7 +767,7 @@ def _print_volume_provision(plan: Plan, experiment: str, gpu: str, image: str) -
         f"  runpodctl pod create --name tiny-audio-{experiment} \\\n"
         f'    --gpu-id "{gpu}" --image {image} \\\n'
         f"    --network-volume-id <VOLUME_ID> --data-center-ids {dc_id} \\\n"
-        f"    --container-disk-in-gb {CONTAINER_DISK_WITH_VOLUME_GB} --ports '22/tcp' \\\n"
+        f"    --container-disk-in-gb {CONTAINER_DISK_WITH_VOLUME_GB} --ports '{POD_PORTS}' \\\n"
         f'    --env "{{\\"SSH_PUBLIC_KEY\\":\\"$(cat ~/.ssh/id_ed25519.pub)\\"}}"\n'
     )
     if capped:
@@ -825,7 +824,7 @@ def plan_command(
         print(
             f"  runpodctl pod create --name tiny-audio-{experiment} \\\n"
             f'    --gpu-id "{gpu}" --image {image} \\\n'
-            f"    --container-disk-in-gb {disk_gb} --ports '22/tcp' \\\n"
+            f"    --container-disk-in-gb {disk_gb} --ports '{POD_PORTS}' \\\n"
             f'    --env "{{\\"SSH_PUBLIC_KEY\\":\\"$(cat ~/.ssh/id_ed25519.pub)\\"}}"\n'
         )
     print(f"  Needs a GPU with >= {plan.need_vram_gib:.0f} GiB VRAM.")
@@ -878,63 +877,27 @@ def provision_command(
         raise typer.Exit(1)
     print(f"candidates (smallest first): {', '.join(g for _, g in candidates[:max_attempts])}\n")
 
-    pubkey = Path("~/.ssh/id_ed25519.pub").expanduser()
-    if not pubkey.exists():
-        print(f"Missing {pubkey}; `ta runpod deploy` authenticates with that key.")
-        raise typer.Exit(1)
+    pubkey = ssh_public_key()
 
     if dry_run:
         return None
 
-    pod_name = name or f"tiny-audio-{experiment}"
-    for vram_gib, gpu_id in candidates[:max_attempts]:
-        print(f"trying {gpu_id} ({vram_gib} GB)... ", end="", flush=True)
-        result = subprocess.run(
-            check=False,
-            args=[
-                "runpodctl",
-                "pod",
-                "create",
-                "--name",
-                pod_name,
-                "--gpu-id",
-                gpu_id,
-                "--image",
-                image,
-                "--container-disk-in-gb",
-                str(disk),
-                "--ports",
-                "22/tcp",
-                "--env",
-                json.dumps({"SSH_PUBLIC_KEY": pubkey.read_text().strip()}),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-        blob = result.stdout + result.stderr
-        if "no longer any instances" in blob or '"error"' in blob:
-            print("no capacity")
-            continue
-        try:
-            pod = json.loads(blob[blob.index("{") :])
-            pod_id: str = pod["id"]
-        except Exception:
-            print(f"unexpected response:\n{blob[:400]}")
-            continue
-        print(f"created {pod_id}")
-        print("\nNext:")
-        print(f"  poetry run ta runpod wait {pod_id}          # prints <ip> <port>")
-        print("  poetry run ta runpod deploy <ip> <port>")
-        print(
-            f"  poetry run ta runpod train <ip> <port> -e {experiment} "
-            "--no-attach --session-name run1 -f"
-        )
-        print(f"  runpodctl pod delete {pod_id}               # when finished\n")
-        return pod_id
-
-    print("\nEvery candidate GPU type was out of capacity. Retry shortly.")
-    raise typer.Exit(1)
+    pod_id = create_first_available(
+        name or f"tiny-audio-{experiment}",
+        [gpu_id for _, gpu_id in candidates[:max_attempts]],
+        image=image,
+        disk_gb=disk,
+        pubkey=pubkey,
+    )
+    print("\nNext:")
+    print(f"  poetry run ta runpod wait {pod_id}          # prints <ip> <port>")
+    print("  poetry run ta runpod deploy <ip> <port>")
+    print(
+        f"  poetry run ta runpod train <ip> <port> -e {experiment} "
+        "--no-attach --session-name run1 -f"
+    )
+    print(f"  runpodctl pod delete {pod_id}               # when finished\n")
+    return pod_id
 
 
 def wait_command(

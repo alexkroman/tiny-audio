@@ -1,14 +1,7 @@
-# Speaker diarization uses Nemotron-3-Diarization, in transformers main after 5.17.
-# Pinned to the commit the pipeline was verified on; move to a release once one ships it.
-transformers @ git+https://github.com/huggingface/transformers@91ea1192a00e0ebb684400434375fbd2345c8449
-torch
-torchaudio
-peft
-safetensors
-numpy
-librosa
+# The Space sends requests to a tiny-audio server on RunPod (ENDPOINT_URL, `ta serve`),
+# so it needs no torch or transformers. gradio itself comes from the README's sdk_version.
+httpx
 soundfile
-spaces
-# Fast path for Qwen3.5's gated-delta-rule layers (transformers falls back to a
-# slower reference implementation without it). Pure Triton, nothing to compile.
-flash-linear-attention>=0.2.2
+typer
+# Running the model in-process instead (no ENDPOINT_URL, e.g. `ta demo` locally)
+# needs the model's own dependencies: see the repo's requirements.txt.

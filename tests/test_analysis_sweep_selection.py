@@ -50,6 +50,21 @@ MATCH = [("alpha beta gamma", "alpha beta gamma")] * 5
 MISS = [("alpha beta gamma", "alpha beta delta")] * 5
 
 
+class TestExcludeDatasets:
+    def test_excluded_dataset_cannot_shadow_a_full_sweep(self, tmp_path: Path) -> None:
+        """A later one-dataset run hides the full sweep -- unless that dataset is excluded."""
+        for ds in ("ami", "loquacious"):
+            _write(tmp_path, "20260101_000000", "modelA", ds, "full", MATCH, 0.0)
+        _write(tmp_path, "20260105_000000", "modelA", "ami-speakers-long", "later", MATCH, 0.0)
+
+        shadowed = collect_model_metrics("modelA", tmp_path)
+        assert sorted(shadowed["datasets"]) == ["ami-speakers-long"]
+
+        full = collect_model_metrics("modelA", tmp_path, exclude_datasets=["ami-speakers-long"])
+        assert full["sweep"] == "full"
+        assert sorted(full["datasets"]) == ["ami", "loquacious"]
+
+
 class TestLatestSweep:
     def test_picks_newest_run_id_and_drops_older_sweep(self, tmp_path: Path) -> None:
         _write(tmp_path, "20260101_000000", "modelA", "ami", "oldrun", MATCH, 0.0)

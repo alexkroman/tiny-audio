@@ -36,8 +36,8 @@ poetry run ta --help  # Show all commands
 Every command follows the same rules, and `tests/test_cli_conventions.py` checks them against the
 built command tree:
 
-- Commands that *run* something (`eval`, `demo`, `runpod eval`, `dev handler`) take the model as
-  `--model/-m`. Commands that *inspect* a model (`debug *`) take it as the first positional
+- Commands that *run* something (`eval`, `demo`, `serve`, `runpod eval`, `runpod serve`) take the
+  model as `--model/-m`. Commands that *inspect* a model (`debug *`) take it as the first positional
   argument.
 - `ta runpod` commands that talk to a pod take `<HOST> <PORT>` as their first two arguments.
 - Every option has an explicit `--long-name` and help text. Secrets and IDs that usually come from
@@ -62,8 +62,7 @@ built command tree:
 | `--repo-id`     | `-r`  | Hub repo to push or deploy to                     |
 | `--branch`      | `-b`  | Hub branch (`ta push`)                            |
 | `--list`        | `-l`  | List tmux sessions (`ta runpod attach`)           |
-| `--port`        | `-p`  | Server port (`ta demo`)                           |
-| `--audio`       | `-a`  | Audio file (`ta dev handler`)                     |
+| `--port`        | `-p`  | Server port (`ta demo`, `ta serve`)               |
 
 ## Configuration
 
@@ -145,12 +144,13 @@ tiny-audio/
 │   ├── asr_processing.py    # ASRProcessor: audio/text preprocessing
 │   ├── projectors.py        # Projector architectures
 │   ├── alignment.py         # Forced alignment for word timestamps
-│   ├── diarization.py       # Speaker diarization
-│   └── handler.py           # HF Inference Endpoints handler
+│   └── diarization.py       # Speaker diarization
 ├── scripts/
 │   ├── train.py             # Training script (Hydra)
 │   ├── cli.py               # Unified CLI entry point
 │   ├── dev.py               # Development utilities
+│   ├── serve.py             # Batched HTTP inference server (`ta serve`)
+│   ├── inference.py         # Fast-inference loading shared by serve and eval
 │   ├── eval/                # Evaluation framework
 │   │   ├── evaluators/      # ASR evaluators
 │   │   └── datasets.py      # Dataset loading

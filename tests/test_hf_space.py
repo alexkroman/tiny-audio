@@ -5,6 +5,7 @@ from typing import ClassVar
 
 import pytest
 import typer
+from huggingface_hub import SpaceHardware
 
 from scripts.deploy import hf_space
 from scripts.deploy.hf_space import extract_repo_id
@@ -29,12 +30,19 @@ def test_extract_repo_id_rejects_non_space_urls() -> None:
 
 
 class FakeHfApi:
-    """Records `create_repo` calls instead of hitting the Hub."""
+    """Records Hub calls instead of making them."""
 
     create_repo_calls: ClassVar[list[dict[str, object]]] = []
+    space_calls: ClassVar[list[tuple[object, ...]]] = []
 
     def create_repo(self, **kwargs: object) -> None:
         FakeHfApi.create_repo_calls.append(kwargs)
+
+    def add_space_variable(self, repo_id: str, key: str, value: str) -> None:
+        FakeHfApi.space_calls.append(("variable", repo_id, key, value))
+
+    def request_space_hardware(self, repo_id: str, hardware: SpaceHardware) -> None:
+        FakeHfApi.space_calls.append(("hardware", repo_id, hardware))
 
 
 @pytest.fixture
@@ -47,6 +55,7 @@ def demo_dir(tmp_path: Path) -> Path:
 @pytest.fixture
 def uploads(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
     FakeHfApi.create_repo_calls = []
+    FakeHfApi.space_calls = []
     calls: list[dict[str, object]] = []
 
     def fake_upload_folder(**kwargs: object) -> None:
@@ -90,6 +99,19 @@ def test_deploy_creates_space_and_uploads(
         }
     ]
     assert "https://huggingface.co/spaces/me/demo" in capsys.readouterr().out
+    assert FakeHfApi.space_calls == []
+
+
+def test_deploy_with_endpoint_points_space_at_it(
+    demo_dir: Path, uploads: list[dict[str, object]]
+) -> None:
+    """--endpoint-url sets the Space's ENDPOINT_URL and drops it to CPU hardware."""
+    url = "https://abc123-8000.proxy.runpod.net"
+    hf_space.deploy(repo_id="me/demo", demo_dir=demo_dir, endpoint_url=url)
+    assert FakeHfApi.space_calls == [
+        ("variable", "me/demo", "ENDPOINT_URL", url),
+        ("hardware", "me/demo", SpaceHardware.CPU_BASIC),
+    ]
 
 
 def test_deploy_rejects_incomplete_demo_dir(

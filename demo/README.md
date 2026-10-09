@@ -19,13 +19,6 @@ tags:
   - qwen3.5
   - lora
   - mlp
-suggested_hardware: zero-a10g
-preload_from_hub:
-  - mazesmazes/tiny-audio
-  - ibm-granite/granite-speech-5.0-470m-turboctc
-  - Qwen/Qwen3.5-2B
-  - Qwen/Qwen3-ForcedAligner-0.6B-hf
-  - nvidia/Nemotron-3-Diarization
 ---
 
 ## Demo Overview
@@ -64,8 +57,8 @@ The model bridges audio and text with a trained projector and LoRA adapters:
 
 - Plain transcription works best on clips up to about 19 seconds (the training length); with
   timestamps or diarization on, longer audio is transcribed in chunks automatically
-- Each request reserves GPU time from your ZeroGPU quota in proportion to the audio's length (20-120
-  s), so roughly up to five minutes of speech per request
+- Requests run on a GPU server on RunPod; while it is starting up or offline, requests fail with a
+  "try again" message
 - Optimized for English language
 - Best performance with clear speech and minimal background noise
 

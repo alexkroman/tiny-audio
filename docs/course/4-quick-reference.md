@@ -71,7 +71,7 @@ poetry run ta eval -m assemblyai -n 200 -w 4            # needs ASSEMBLYAI_API_K
 poetry run ta eval -m deepgram -n 200 -w 4              # needs DEEPGRAM_API_KEY
 poetry run ta eval -m elevenlabs -n 200 -w 4            # needs ELEVENLABS_API_KEY
 poetry run ta eval -m apple-speech -n 200               # macOS only
-poetry run ta eval -m https://<endpoint>.endpoints.huggingface.cloud --endpoint -n 50
+poetry run ta eval -m https://<pod-id>-8000.proxy.runpod.net --endpoint -n 50 -w 8
 ```
 
 Results: `outputs/<timestamp>_<short-name>_<dataset>/{results.txt,metrics.txt}`

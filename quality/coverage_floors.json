@@ -4,7 +4,6 @@
   "scripts/debug/__init__.py": 100.0,
   "scripts/debug/cli.py": 100.0,
   "scripts/deploy/__init__.py": 100.0,
-  "scripts/deploy/handler_local.py": 15.5,
   "scripts/deploy/hf_space.py": 51.8,
   "scripts/deploy/plan.py": 18.1,
   "scripts/deploy/runpod.py": 43.3,
@@ -32,6 +31,5 @@
   "tiny_audio/asr_pipeline.py": 85.9,
   "tiny_audio/asr_processing.py": 98.6,
   "tiny_audio/diarization.py": 80.6,
-  "tiny_audio/handler.py": 100.0,
   "tiny_audio/projectors.py": 100.0
 }

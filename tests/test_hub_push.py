@@ -27,7 +27,7 @@ class FakeHfApi:
 def repo_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A working directory holding a partial set of the files `push` publishes."""
     (tmp_path / "tiny_audio").mkdir()
-    for name in ("asr_config.py", "asr_modeling.py", "handler.py"):
+    for name in ("asr_config.py", "asr_modeling.py", "asr_pipeline.py"):
         (tmp_path / "tiny_audio" / name).write_text(f"# {name}")
     (tmp_path / "MODEL_CARD.md").write_text("# card")
     (tmp_path / "requirements.txt").write_text("torch\n")
@@ -70,7 +70,7 @@ def test_push_uses_login_cache_and_skips_missing_files(monkeypatch: pytest.Monke
         ".gitattributes",
         "asr_config.py",
         "asr_modeling.py",
-        "handler.py",
+        "asr_pipeline.py",
         "README.md",
         "requirements.txt",
     ]
@@ -78,7 +78,7 @@ def test_push_uses_login_cache_and_skips_missing_files(monkeypatch: pytest.Monke
     assert isinstance(gitattributes, bytes)
     assert b"tokenizer_config.json -filter" in gitattributes
     assert files["README.md"] == "MODEL_CARD.md"
-    assert files["handler.py"] == str(Path("tiny_audio") / "handler.py")
+    assert files["asr_pipeline.py"] == str(Path("tiny_audio") / "asr_pipeline.py")
 
 
 def test_push_includes_checkpoint_tokenizer_files(repo_root: Path) -> None:

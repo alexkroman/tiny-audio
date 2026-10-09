@@ -77,12 +77,21 @@ numpy = "*"
 hydra-core = "*"
 omegaconf = "*"
 gradio = "*"
+# `ta serve` (scripts/serve.py), its clients (demo/app.py, `ta eval --endpoint`).
+# Already locked through gradio; declared because they are imported directly.
+starlette = "*"
+uvicorn = "*"
+anyio = "*"
+httpx = "*"
+# `ta serve` decodes request audio in-process (scripts/serve.py: decode_audio).
+# 0.7.x is the last line built against torch 2.8's ABI; 0.8+ requires torch 2.9+.
+torchcodec = ">=0.5.0,<0.8"
 assemblyai = "*"
 deepgram-sdk = "*"
 typer = ">=0.19.2"
 trl = ">=0.26.0"
-peft = ">=0.13.0"                                                                                                            # LoRA adapters for Stage 2 fine-tuning
-torchaudio = "~2.8.0"                                                                                                        # torchaudio's major.minor must match torch's
+peft = ">=0.13.0"           # LoRA adapters for Stage 2 fine-tuning
+torchaudio = "~2.8.0"       # torchaudio's major.minor must match torch's
 # >=0.8.0, NOT the previous >=0.5.0. `apply_liger_kernel_to_qwen3_5` first
 # ships in 0.8.0 (verified against the wheels: 0.7.0 does not export it), and
 # without it scripts/train.py's patcher lookup raises AttributeError, gets
@@ -123,6 +132,11 @@ ftfy = ">=6.0"        # Unicode cleanup (mojibake, smart quotes) + NFKC before n
 nltk = "<3.10"
 
 [tool.poetry.group.dev.dependencies]
+# Not used directly (transitive). Held below their 2026-10-07 releases only
+# because Aikido safe-chain hides packages younger than its minimum age, which
+# crashes `poetry lock`; drop both pins once those releases age in.
+tomli = "<2.5"
+toolz = "<1.2"
 pytest = ">=8.0.0"
 pytest-cov = ">=4.0.0"
 black = ">=2.3.0"
@@ -147,7 +161,6 @@ elevenlabs = "^2.31.0"
 # Already a runtime dep on macOS, but pinning it in dev too so the dev env
 # doesn't fail-import when running tests/CLI flows that touch the backend.
 pyobjc-framework-Speech = { version = "*", markers = "sys_platform == 'darwin'" }
-torchcodec = ">=0.5.0,<0.8"                                                       # 0.7.x is the last line built against torch 2.8 ABI; 0.8+ requires torch 2.9+
 
 # Optional fast path for Qwen3.5's hybrid linear-attention layers (three of
 # every four). Without these, transformers logs `causal_conv1d_fn` and

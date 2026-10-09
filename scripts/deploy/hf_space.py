@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
-from huggingface_hub import HfApi, RepoUrl, upload_folder
+from huggingface_hub import HfApi, RepoUrl, SpaceHardware, upload_folder
 
 app = typer.Typer(add_completion=False)
 
@@ -49,6 +49,13 @@ def deploy(
     private: Annotated[
         bool, typer.Option("--private", help="Create the Space as private (if creating new)")
     ] = False,
+    endpoint_url: Annotated[
+        str | None,
+        typer.Option(
+            "--endpoint-url",
+            help="`ta serve` URL for the Space to call; also moves it to free CPU hardware",
+        ),
+    ] = None,
 ) -> None:
     """Deploy demo files to a Hugging Face Space."""
     repo_id = extract_repo_id(repo_id)
@@ -64,7 +71,8 @@ def deploy(
 
     # `exist_ok` makes this a no-op on an existing Space; a real auth or
     # network failure surfaces here instead of being swallowed.
-    HfApi().create_repo(
+    api = HfApi()
+    api.create_repo(
         repo_id=repo_id,
         repo_type="space",
         space_sdk="gradio",
@@ -80,6 +88,16 @@ def deploy(
         delete_patterns=["*"] if delete_existing else None,
         commit_message="Deploy demo to HF Space",
     )
+
+    if endpoint_url:
+        # The model runs on the endpoint, so the Space only serves the UI.
+        api.add_space_variable(repo_id, "ENDPOINT_URL", endpoint_url)
+        api.request_space_hardware(repo_id, SpaceHardware.CPU_BASIC)
+        typer.echo(f"\nSpace calls {endpoint_url} on {SpaceHardware.CPU_BASIC.value} hardware.")
+        typer.echo(
+            "If the server requires a key, add it as a TINY_AUDIO_API_KEY secret: "
+            f"https://huggingface.co/spaces/{repo_id}/settings"
+        )
 
     typer.echo("\nSuccessfully deployed to Hugging Face Space!")
     typer.echo(f"Your Space is available at: https://huggingface.co/spaces/{repo_id}")

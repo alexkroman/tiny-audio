@@ -1,5 +1,7 @@
 """Tests for scripts.eval.datasets.load_eval_dataset (Hub calls mocked)."""
 
+from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -76,3 +78,27 @@ def test_dataset_without_config_omits_it(
     )
     ds_mod.load_eval_dataset("plain", "test")
     load.assert_called_once_with("org/plain", split="test", streaming=True)
+
+
+def test_load_eval_samples_caches_the_undecoded_stream(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`ta eval` reads through a sample cache keyed by dataset, config, split and shuffle."""
+    seen: dict[str, Any] = {}
+
+    def fake_load(
+        name: str, split: str, config_override: str | None = None, *, decode_audio: bool = True
+    ) -> str:
+        seen.update(name=name, split=split, decode_audio=decode_audio)
+        return "stream"
+
+    monkeypatch.setattr(ds_mod, "load_eval_dataset", fake_load)
+    monkeypatch.setattr(ds_mod, "SAMPLE_CACHE_DIR", tmp_path)
+    samples = ds_mod.load_eval_samples("loquacious", "test")
+    assert isinstance(samples, ds_mod.CachedSamples)
+    assert seen == {"name": "loquacious", "split": "test", "decode_audio": False}
+    assert samples.raw == "stream"
+    assert samples.audio_field == ds_mod.DATASET_REGISTRY["loquacious"].audio_field
+    assert samples.cache_dir == tmp_path / (
+        f"loquacious--{ds_mod.DATASET_REGISTRY['loquacious'].config}--test--seed42--buf10000"
+    )

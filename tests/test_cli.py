@@ -60,7 +60,7 @@ class TestSubcommandHelp:
             (["runpod"], ["deploy", "train", "attach"]),
             (["debug"], ["check-gradient-flow"]),
             (["demo"], ["--model", "-m", "--port", "-p"]),
-            (["dev"], ["lint", "format", "test", "handler"]),
+            (["dev"], ["lint", "format", "test"]),
         ],
     )
     def test_subcommand_help(self, cmd: list[str], expected_keywords: list[str]) -> None:
@@ -90,7 +90,6 @@ class TestNestedCommands:
             (["dev", "format"], "format"),
             (["dev", "test"], "test"),
             (["dev", "build"], "build"),
-            (["dev", "handler"], "model"),
         ],
     )
     def test_nested_command_help(self, cmd_path: list[str], expected_keyword: str) -> None:
@@ -122,7 +121,6 @@ class TestDevCommands:
             "security",
             "dead-code",
             "docstrings",
-            "handler",
         ]
         for cmd in expected_commands:
             assert cmd in output, f"Expected '{cmd}' in dev --help output"

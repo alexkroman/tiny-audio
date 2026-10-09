@@ -16,7 +16,7 @@ from rich.table import Table
 from scripts.eval.constants import DEFAULT_DATASET, get_model_name
 from scripts.eval.datasets import (
     DATASET_REGISTRY,
-    load_eval_dataset,
+    load_eval_samples,
 )
 from scripts.eval.evaluators import (
     AppleSpeechEvaluator,
@@ -306,12 +306,12 @@ def _build_tiny_audio_evaluator(
     user_prompt: str | None,
     local_code: bool,
 ) -> tuple[str, Evaluator]:
-    """Build an evaluator for a tiny_audio checkpoint: HF endpoint, streaming or local."""
+    """Build an evaluator for a tiny_audio checkpoint: `ta serve` URL, streaming or local."""
     model_id = get_model_name(model)
     if endpoint:
-        return model_id, EndpointEvaluator(
-            endpoint_url=model,
-        )
+        # HTTP threads, no model in this process: safe at any count, on a Mac too.
+        # The server batches the in-flight requests together on its GPU.
+        return model_id, EndpointEvaluator(endpoint_url=model, num_workers=num_workers)
     if streaming:
         return model_id, LocalStreamingEvaluator(
             model_path=model,
@@ -430,7 +430,7 @@ def main(
         typer.Option("--max-samples", "-n", help="Maximum samples to evaluate per dataset"),
     ] = None,
     endpoint: Annotated[
-        bool, typer.Option("--endpoint", help="Treat --model as an HF Inference Endpoint URL")
+        bool, typer.Option("--endpoint", help="Treat --model as the URL of a running `ta serve`")
     ] = False,
     assemblyai_model: Annotated[
         AssemblyAIModel, typer.Option("--assemblyai-model", help="AssemblyAI model")
@@ -545,7 +545,7 @@ def main(
         console.print(f"\n[bold blue]Evaluating on: {dataset_name}[/bold blue]")
 
         cfg = DATASET_REGISTRY[dataset_name]
-        dataset = load_eval_dataset(dataset_name, split or cfg.default_split, config)
+        dataset = load_eval_samples(dataset_name, split or cfg.default_split, config)
 
         results = evaluator.evaluate(
             dataset,
