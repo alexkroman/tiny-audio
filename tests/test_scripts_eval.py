@@ -356,3 +356,49 @@ def test_endpoint_evaluator_bypasses_local_proxy(monkeypatch: pytest.MonkeyPatch
     assert text == "hello"
     assert seen["trust_env"] is False
     assert seen["headers"]["authorization"] == "Bearer k"
+
+
+@pytest.mark.usefixtures("no_retry_backoff")
+def test_endpoint_evaluator_retries_proxy_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A proxy 502 or dropped connection is retried, not scored as an empty prediction."""
+    outcomes: list[Any] = [
+        httpx.ConnectError("tunnel dropped"),
+        502,
+        524,
+        200,
+    ]
+
+    def fake_post(url: str, **_kwargs: Any) -> httpx.Response:
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return httpx.Response(outcome, json={"text": "hello"}, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    evaluator = EndpointEvaluator(endpoint_url="https://pod-8000.proxy.runpod.net")
+    text, _, _ = evaluator.transcribe(
+        {"array": np.zeros(1600, dtype=np.float32), "sampling_rate": 16000}
+    )
+    assert text == "hello"
+    assert outcomes == []
+
+
+@pytest.mark.usefixtures("no_retry_backoff")
+def test_endpoint_evaluator_does_not_retry_client_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 401 (bad API key) fails at once instead of burning the backoff budget."""
+    calls = 0
+
+    def fake_post(url: str, **_kwargs: Any) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            401, json={"error": "unauthorized"}, request=httpx.Request("POST", url)
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    evaluator = EndpointEvaluator(endpoint_url="https://pod-8000.proxy.runpod.net")
+    with pytest.raises(httpx.HTTPStatusError):
+        evaluator.transcribe({"array": np.zeros(1600, dtype=np.float32), "sampling_rate": 16000})
+    assert calls == 1
