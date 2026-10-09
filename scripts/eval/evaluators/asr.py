@@ -474,9 +474,25 @@ class EndpointEvaluator(Evaluator):
         if api_key:
             self.headers["authorization"] = f"Bearer {api_key}"
 
-    def transcribe(self, audio: object) -> Transcription:
-        wav_bytes = prepare_wav_bytes(audio)
+    # Retried here because the base Evaluator turns any exception into an empty
+    # prediction: a RunPod proxy blip under `-w N` once scored 35 test-other rows
+    # as 100% WER (3.1 -> 6.4). 524 is the Cloudflare timeout the proxy returns.
+    _RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504, 524})
 
+    @staticmethod
+    def _is_retryable(exc: BaseException) -> bool:
+        if isinstance(exc, httpx.HTTPStatusError):
+            return exc.response.status_code in EndpointEvaluator._RETRYABLE_STATUSES
+        return isinstance(exc, httpx.TransportError)
+
+    @retry(
+        retry=retry_if_exception(_is_retryable),
+        # ~90 s of backoff in total, long enough to ride out a proxy outage.
+        stop=stop_after_attempt(8),
+        wait=wait_exponential_jitter(initial=1.0, max=30.0),
+        reraise=True,
+    )
+    def _post(self, wav_bytes: bytes) -> tuple[str, float]:
         start = time.time()
         # trust_env=False: straight to the server, past any local HTTPS_PROXY
         # (e.g. Aikido safe-chain), which drops tunnels under `-w` concurrency.
@@ -486,6 +502,10 @@ class EndpointEvaluator(Evaluator):
         elapsed = time.time() - start
         response.raise_for_status()
         text: str = response.json().get("text", "")
+        return text, elapsed
+
+    def transcribe(self, audio: object) -> Transcription:
+        text, elapsed = self._post(prepare_wav_bytes(audio))
         return text, elapsed, None
 
 
