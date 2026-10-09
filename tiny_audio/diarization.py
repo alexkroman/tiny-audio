@@ -18,11 +18,14 @@ if TYPE_CHECKING:
     )
 
     from .alignment import AlignedWord, get_device, to_16k
+    from .asr_processing import CHUNK_MAX_S, chunk_bounds
 else:
     try:
         from .alignment import get_device, to_16k
+        from .asr_processing import CHUNK_MAX_S, chunk_bounds
     except ImportError:  # flat layout on the Hub: sibling modules, no package
         from alignment import get_device, to_16k
+        from asr_processing import CHUNK_MAX_S, chunk_bounds
 
 
 class SpeakerSegment(TypedDict):
@@ -81,6 +84,19 @@ def pack_spans(spans: list[tuple[int, int]], limit: int) -> list[tuple[int, int]
         else:
             ranges.append((s, e))
     return ranges
+
+
+def stream_chunks(
+    audio: npt.NDArray[np.float32],
+    spans: list[tuple[int, int]],
+    sample_rate: int,
+    max_s: float = CHUNK_MAX_S,
+) -> list[tuple[int, int]]:
+    """Ranges of at most `max_s` over one speaker's `spans`; long turns cut by `chunk_bounds`."""
+    pieces: list[tuple[int, int]] = []
+    for s, e in spans:
+        pieces.extend((s + a, s + b) for a, b in chunk_bounds(audio[s:e], sample_rate, max_s))
+    return pack_spans(pieces, int(max_s * sample_rate))
 
 
 class StreamChunk(TypedDict):

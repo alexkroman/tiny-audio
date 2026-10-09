@@ -31,6 +31,25 @@ class TestTruncateRepetitions:
         repeated = " ".join([phrase] * 5)
         assert _truncate_repetitions(repeated) == phrase
 
+    def test_punctuated_and_cased_loops(self) -> None:
+        """Loops the model punctuates or capitalizes still collapse (served eval rows)."""
+        assert (
+            _truncate_repetitions("will start at 4:20. The The The The The The The The")
+            == "will start at 4:20. The"
+        )
+        assert _truncate_repetitions("Yeah Yeah Yeah Yeah. Yeah. Yeah. Yeah,") == "Yeah"
+        assert (
+            _truncate_repetitions("to be quick, quick, quick, quick, quick, quick, quick.")
+            == "to be quick,"
+        )
+
+    def test_short_punctuated_repetition_is_speech(self) -> None:
+        """'No, no, no,' is what was said, not a loop: punctuated runs under six stay."""
+        assert _truncate_repetitions("No, no, no,") == "No, no, no,"
+        assert _truncate_repetitions("Practice, practice, practice.") == (
+            "Practice, practice, practice."
+        )
+
     def test_no_repetition(self) -> None:
         """Should leave text unchanged when no repetition."""
         assert _truncate_repetitions("this is fine") == "this is fine"

@@ -175,6 +175,81 @@ def prepend_lead_in(audio: AudioInput, sampling_rate: int, seconds: float | None
     return padded
 
 
+# Audio is transcribed in chunks cut at the quietest point between
+# these lengths. The model trained on clips of at most 19 s; 18 leaves room for
+# the inference lead-in. Short clips are one chunk, so their text is unchanged.
+CHUNK_MAX_S = 18.0
+CHUNK_MIN_S = 8.0
+
+
+def chunk_bounds(
+    audio: npt.NDArray[np.float32],
+    sample_rate: int,
+    max_s: float = CHUNK_MAX_S,
+    min_s: float = CHUNK_MIN_S,
+) -> list[tuple[int, int]]:
+    """Sample ranges of at most `max_s`, each cut at the quietest 100 ms frame after `min_s`."""
+    frame = int(0.1 * sample_rate)
+    bounds: list[tuple[int, int]] = []
+    start, n = 0, len(audio)
+    while n - start > max_s * sample_rate:
+        lo = start + int(min_s * sample_rate)
+        hi = start + int(max_s * sample_rate)
+        cut = lo + int(np.argmin(_frame_rms(audio[lo:hi], frame))) * frame + frame // 2
+        bounds.append((start, cut))
+        start = cut
+    bounds.append((start, n))
+    return bounds
+
+
+def _frame_rms(audio: npt.NDArray[np.float32], frame: int) -> npt.NDArray[np.float32]:
+    """RMS of each whole `frame`-sample frame of `audio` (a trailing partial frame is dropped)."""
+    k = len(audio) // frame
+    return np.sqrt(np.mean(np.square(audio[: k * frame].reshape(k, frame)), axis=1))
+
+
+# A chunk whose loudest 100 ms frame is this far below the recording's speech
+# level (its 95th-percentile frame) holds no speech, only the room tone after
+# the talker stopped. Decoded, such a tail comes back as a memorized sentence
+# ("The film was directed by the director of the same name.", 0.7 WER on
+# CommonVoice) or a stray "the"/"ok". On the cached eval clips over 18 s every
+# noise-only chunk sat at -36 dB or below and every chunk with speech at
+# -17.5 dB or above; -30 keeps the wider margin on the speech side.
+QUIET_CHUNK_DB = -30.0
+
+
+def audible_chunks(
+    audio: npt.NDArray[np.float32], bounds: list[tuple[int, int]], sample_rate: int
+) -> list[npt.NDArray[np.float32]]:
+    """The chunks of `audio` at `bounds`, those quieter than `QUIET_CHUNK_DB` emptied.
+
+    An empty chunk `is_silent`, so it transcribes as "" without the model. A
+    one-chunk recording is never emptied: its loudest frame is its own level.
+    """
+    chunks = [audio[s:e] for s, e in bounds]
+    if len(chunks) < 2:
+        return chunks
+    frame = int(0.1 * sample_rate)
+    floor = np.percentile(_frame_rms(audio, frame), 95) * 10 ** (QUIET_CHUNK_DB / 20)
+    return [
+        chunk if len(chunk) >= frame and _frame_rms(chunk, frame).max() >= floor else chunk[:0]
+        for chunk in chunks
+    ]
+
+
+# Below this RMS (-100 dBFS) a chunk is digital silence: exact zeros, as in
+# edited or remixed recordings. Given one, the model answers with a memorized
+# training sentence ("The film was directed by the same director who directed
+# 'The Man with the Moustache'") -- ten such chunks cost 2.3 WER on one AMI
+# meeting -- so it is skipped. Quiet real speech sits near -60 dBFS.
+SILENCE_RMS = 1e-5
+
+
+def is_silent(audio: npt.NDArray[np.float32]) -> bool:
+    """True for digital silence (or an empty array): nothing for the model to hear."""
+    return audio.size == 0 or float(np.sqrt(np.mean(np.square(audio)))) < SILENCE_RMS
+
+
 class ASRProcessor(ProcessorMixin):
     """Processor for Whisper-based ASR models."""
 
