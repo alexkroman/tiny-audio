@@ -9,6 +9,7 @@ import pytest
 
 from scripts.eval.formatting import (
     MIN_SCORABLE_SAMPLES,
+    _aligned_word_pairs,
     compute_formatting_metrics,
     is_case_scorable,
     is_orthographic_reference,
@@ -57,6 +58,31 @@ class TestLightNormalize:
         """
         assert light_normalize("yeah .") == "yeah."
         assert light_normalize("hello , world .") == "hello, world."
+
+
+class TestAlignment:
+    def test_leading_punctuation_only_token_does_not_shift_pairs(self) -> None:
+        """Regression: jiwer dropped the empty key of `...` on split, so every
+        later pair was off by one (`'Hello'` paired with `'world.'`)."""
+        assert _aligned_word_pairs("... Hello World.", "hello world.") == [
+            ("Hello", "hello"),
+            ("World.", "world."),
+        ]
+
+    def test_punctuation_only_tokens_never_pair_with_words(self) -> None:
+        """Pairing a bare mark like `?` with a word would charge that word
+        a mark it never carried. Levenshtein would do it (one substitution is
+        cheaper than delete + insert), so they are excluded from alignment."""
+        pairs = _aligned_word_pairs("? Hello world", "Yes hello world")
+        assert pairs == [("Hello", "hello"), ("world", "world")]
+        assert _aligned_word_pairs("...", "hello") == []
+
+    def test_substitution_and_deletion_alignment(self) -> None:
+        assert _aligned_word_pairs("a b c d", "a x d") == [("a", "a"), ("b", "x"), ("d", "d")]
+
+    def test_leading_punct_only_token_does_not_change_scores(self) -> None:
+        assert score_case("... Hello World.", "hello world.") == (2, 2)
+        assert score_punct("... Hello World.", "hello world.") == (1, 1, 1)
 
 
 class TestCaseScoring:

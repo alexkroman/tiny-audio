@@ -7,6 +7,8 @@ from typing import Literal, NamedTuple, Required, TypedDict
 
 import jiwer
 import numpy as np
+import numpy.typing as npt
+from scipy import stats
 
 from scripts.analysis.common import (
     Entity,
@@ -16,7 +18,13 @@ from scripts.analysis.common import (
     normalize_text,
 )
 from scripts.eval.audio import TextNormalizer
-from scripts.eval.speaker_metrics import cp_errors, has_speakers, scoring_text, speaker_count
+from scripts.eval.speaker_metrics import (
+    cp_errors,
+    has_speakers,
+    scoring_text,
+    speaker_count,
+    word_errors,
+)
 from scripts.itn import merge_scores, score_sample
 from scripts.utils import ResultSample, extract_model_from_dir, find_model_dirs, parse_results_file
 
@@ -415,9 +423,12 @@ def _set_corpus_wer(m: ModelMetrics, refs: list[str], preds: list[str]) -> None:
     # between two models can carry a confidence interval. They are recorded
     # HERE because this is the only place the paired row set exists: same
     # datasets, same rows, same order for every model.
-    per_utt = [jiwer.process_words([r], [p]) for r, p in zip(refs, preds, strict=True)]
-    m["corpus_utt_errors"] = [o.substitutions + o.deletions + o.insertions for o in per_utt]
-    m["corpus_utt_ref_words"] = [o.substitutions + o.deletions + o.hits for o in per_utt]
+    # Only S+D+I and the reference length are needed per row, so a bare
+    # Levenshtein distance replaces a full jiwer alignment per utterance.
+    m["corpus_utt_errors"] = [
+        word_errors(r.split(), p.split()) for r, p in zip(refs, preds, strict=True)
+    ]
+    m["corpus_utt_ref_words"] = [len(r.split()) for r in refs]
 
 
 def _set_corpus_cpwer(m: ModelMetrics, usable: list[tuple[str, int]]) -> None:
@@ -512,17 +523,28 @@ def paired_bootstrap_delta(
         return float("nan"), float("nan"), float("nan")
     point = float((a_err.sum() / a_ref.sum() - b_err.sum() / b_ref.sum()) * 100)
 
-    rng = np.random.default_rng(seed)
-    deltas = np.empty(resamples, dtype=np.float64)
-    # Chunked: a single (resamples, n) index matrix is 10k x 6k x 8B = 480 MB.
-    chunk = max(1, min(resamples, 2_000_000 // n))
-    done = 0
-    while done < resamples:
-        size = min(chunk, resamples - done)
-        idx = rng.integers(0, n, size=(size, n))
-        a_wer = a_err[idx].sum(axis=1) / a_ref[idx].sum(axis=1)
-        b_wer = b_err[idx].sum(axis=1) / b_ref[idx].sum(axis=1)
-        deltas[done : done + size] = (a_wer - b_wer) * 100
-        done += size
+    if n == 1:
+        # One utterance resamples only to itself; scipy refuses a sample of one.
+        return point, point, point
 
-    return point, float(np.percentile(deltas, 2.5)), float(np.percentile(deltas, 97.5))
+    def delta(
+        a_e: npt.NDArray[np.float64],
+        a_r: npt.NDArray[np.float64],
+        b_e: npt.NDArray[np.float64],
+        b_r: npt.NDArray[np.float64],
+        axis: int = -1,
+    ) -> npt.NDArray[np.float64]:
+        return (a_e.sum(axis) / a_r.sum(axis) - b_e.sum(axis) / b_r.sum(axis)) * 100
+
+    res = stats.bootstrap(
+        (a_err, a_ref, b_err, b_ref),
+        delta,
+        paired=True,
+        vectorized=True,
+        method="percentile",
+        n_resamples=resamples,
+        # Batched: a single (resamples, n) index matrix is 10k x 6k x 8B = 480 MB.
+        batch=max(1, min(resamples, 2_000_000 // n)),
+        rng=np.random.default_rng(seed),
+    )
+    return point, float(res.confidence_interval.low), float(res.confidence_interval.high)

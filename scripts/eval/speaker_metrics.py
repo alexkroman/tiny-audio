@@ -12,6 +12,7 @@ from collections.abc import Callable, Hashable, Iterable, Mapping
 
 import numpy as np
 from rapidfuzz.distance import Levenshtein
+from rapidfuzz.process import cdist
 from scipy.optimize import linear_sum_assignment
 
 SPEAKER_TOKEN = "<SPK_{}>"
@@ -118,7 +119,10 @@ def cp_errors(ref: str, hyp: str, normalize: Callable[[str], str] = _identity) -
     empty: list[str] = []
     r += [empty] * (n - len(r))
     h += [empty] * (n - len(h))
-    cost = np.array([[word_errors(a, b) for b in h] for a in r])
+    # Same distance as `word_errors`, filled in one C++ call. int64 rather than
+    # cdist's default uint32 so the summed cost stays ordinary signed int math.
+    # The padding above keeps both sides non-empty, so the matrix is never 0 x k.
+    cost = cdist(r, h, scorer=Levenshtein.distance, dtype=np.int64)
     rows, cols = linear_sum_assignment(cost)
     return int(cost[rows, cols].sum()), sum(len(a) for a in r)
 

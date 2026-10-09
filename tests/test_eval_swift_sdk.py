@@ -356,14 +356,15 @@ def test_transcribe_array_writes_and_removes_temp_wav(
     evaluator, proc = _evaluator(fake_popen)
     _queue_replies(proc, '{"text": "ok"}')
     written: list[tuple[int, int]] = []
-    real_write = sf.write
+    real_prepare = swift_sdk.prepare_wav_bytes
 
-    def capture(name: str, data: np.ndarray[Any, Any], sr: int, **kwargs: Any) -> None:
+    def capture(audio: object) -> bytes:
+        wav = real_prepare(audio)
+        data, sr = sf.read(io.BytesIO(wav))
         written.append((sr, len(data)))
-        real_write(name, data, sr, **kwargs)
-        assert Path(name).exists()
+        return wav
 
-    monkeypatch.setattr(swift_sdk.sf, "write", capture)
+    monkeypatch.setattr(swift_sdk, "prepare_wav_bytes", capture)
     audio = {"array": np.zeros(800, dtype=np.float32), "sampling_rate": 8000}
     assert evaluator.transcribe(audio)[0] == "ok"
     assert written == [(8000, 800)]
@@ -412,6 +413,22 @@ def test_resolve_audio_path_downmixes_decoder(fake_popen: type[FakeProc]) -> Non
         data, sr = sf.read(name)
         assert is_temp
         assert sr == 16000
+        assert data.shape == (1600,)
+        assert np.allclose(data, 0.25, atol=1e-3)
+    finally:
+        Path(name).unlink()
+
+
+@pytest.mark.usefixtures("swift_dir", "build_calls")
+def test_resolve_audio_path_downmixes_stereo_array_dict(fake_popen: type[FakeProc]) -> None:
+    """Channels-first stereo must be averaged, not written as 2 frames x n channels."""
+    evaluator, _ = _evaluator(fake_popen)
+    stereo = np.stack([np.full(1600, 0.5), np.zeros(1600)]).astype(np.float32)
+    name, is_temp = evaluator._resolve_audio_path({"array": stereo, "sampling_rate": 8000})
+    try:
+        data, sr = sf.read(name)
+        assert is_temp
+        assert sr == 8000
         assert data.shape == (1600,)
         assert np.allclose(data, 0.25, atol=1e-3)
     finally:

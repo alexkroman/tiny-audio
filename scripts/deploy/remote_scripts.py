@@ -2,9 +2,17 @@
 
 Pure string builders: they take the run parameters and return the bash text
 `ta runpod train` / `ta runpod eval` upload and execute.
+
+Every caller-supplied value is spliced in through shlex.quote / shlex.join.
+The script reaches the pod over SFTP and tmux runs it as a file, so bash
+parsing the script is the only shell layer: one level of quoting is exactly
+right, and it keeps a token or key containing `$`, a backtick or a quote, or
+a Hydra override containing `[`, `*` or spaces, from being expanded or split.
 """
 
 from __future__ import annotations
+
+import shlex
 
 # Repairs LD_LIBRARY_PATH so a --user torch can find the image's nvidia-* libs.
 # Shared by every remote script, including the dependency installer in runpod.py.
@@ -42,7 +50,7 @@ ulimit -n 65536
     + """export HF_HOME=/workspace/.cache/huggingface
 export HF_DATASETS_CACHE=/workspace/datasets
 export HF_XET_HIGH_PERFORMANCE=1
-export HF_TOKEN="{hf_token}"
+export HF_TOKEN={hf_token}
 # TileLang JIT-compiles fla's gated delta-rule kernels on first use (~8s each,
 # a handful of them -- sequence length is marked dynamic in the kernel, so this
 # is bounded warmup rather than per-step recompilation). Its cache defaults to
@@ -58,7 +66,7 @@ def script_preamble(hf_token: str, *, pip_packages: str = "", extras: str = "") 
     """Shared shell header for the remote train/eval scripts.
 
     Args:
-        hf_token: Value exported as HF_TOKEN.
+        hf_token: Value exported as HF_TOKEN (shell-quoted here).
         pip_packages: Extra packages to install before the run; the pip line is
             omitted entirely when empty. Only the eval script needs one
             (modelscope) now that Xet has replaced hf_transfer.
@@ -67,7 +75,7 @@ def script_preamble(hf_token: str, *, pip_packages: str = "", extras: str = "") 
     pip_install = (
         f"pip install {pip_packages} --quiet --root-user-action=ignore\n" if pip_packages else ""
     )
-    preamble = _SCRIPT_PREAMBLE.format(pip_install=pip_install, hf_token=hf_token)
+    preamble = _SCRIPT_PREAMBLE.format(pip_install=pip_install, hf_token=shlex.quote(hf_token))
     return preamble + extras
 
 
@@ -96,9 +104,9 @@ def training_exports(wandb_run_id: str | None, wandb_resume: str | None) -> str:
     """The `export` block every remote training script runs under."""
     wandb_exports = ""
     if wandb_run_id:
-        wandb_exports += f'export WANDB_RUN_ID="{wandb_run_id}"\n'
+        wandb_exports += f"export WANDB_RUN_ID={shlex.quote(wandb_run_id)}\n"
     if wandb_resume:
-        wandb_exports += f'export WANDB_RESUME="{wandb_resume}"\n'
+        wandb_exports += f"export WANDB_RESUME={shlex.quote(wandb_resume)}\n"
 
     return (
         "export TOKENIZERS_PARALLELISM=false\n"
@@ -130,11 +138,11 @@ def build_training_script(
     extra_args: list[str],
 ) -> str:
     """Generate the training script content."""
-    extra_args_str = " ".join(extra_args) if extra_args else ""
+    extra_args_str = shlex.join(extra_args)
     extra_exports = training_exports(wandb_run_id, wandb_resume)
     body = f"""
 cd /workspace
-python -m scripts.train +experiments={experiment} {extra_args_str}"""
+python -m scripts.train {shlex.quote(f"+experiments={experiment}")} {extra_args_str}"""
     return (
         script_preamble(hf_token, extras=extra_exports)
         + body
@@ -155,15 +163,15 @@ def build_eval_script(
 ) -> str:
     """Generate the eval script content."""
     max_samples_arg = f"--max-samples {max_samples}" if max_samples else ""
-    datasets_arg = f"--datasets {' '.join(datasets)}" if datasets else ""
+    datasets_arg = f"--datasets {shlex.join(datasets)}" if datasets else ""
     streaming_arg = "--streaming" if streaming else ""
     workers_arg = f"--num-workers {num_workers}" if num_workers > 1 else ""
-    assemblyai_model_arg = f"--assemblyai-model {assemblyai_model}"
-    extra_args_str = " ".join(extra_args) if extra_args else ""
+    assemblyai_model_arg = f"--assemblyai-model {shlex.quote(assemblyai_model)}"
+    extra_args_str = shlex.join(extra_args or [])
 
     assemblyai_export = ""
     if assemblyai_api_key:
-        assemblyai_export = f'export ASSEMBLYAI_API_KEY="{assemblyai_api_key}"'
+        assemblyai_export = f"export ASSEMBLYAI_API_KEY={shlex.quote(assemblyai_api_key)}"
 
     extra_exports = (
         f"{assemblyai_export}\n"
@@ -175,7 +183,7 @@ def build_eval_script(
 cd /workspace
 
 python -m scripts.eval.cli \\
-    --model {model} \\
+    --model {shlex.quote(model)} \\
     {datasets_arg} \\
     {max_samples_arg} \\
     {assemblyai_model_arg} \\

@@ -10,10 +10,12 @@ import tempfile
 from pathlib import Path
 from typing import IO, Any, Unpack
 
-import numpy as np
-import soundfile as sf
-
-from scripts.eval.audio import LazyAudioDecoder, is_str_dict
+from scripts.eval.audio import (
+    DecodedAudioSamples,
+    LazyAudioDecoder,
+    is_str_dict,
+    prepare_wav_bytes,
+)
 
 from .base import Evaluator, EvaluatorOptions, Transcription, console
 
@@ -272,36 +274,21 @@ class SwiftSDKEvaluator(Evaluator):
             path: str | None = audio.get("path")
             if path and Path(path).is_absolute() and Path(path).exists():
                 return path, False
-            # 'bytes' field: raw file bytes (wav, mp3, etc.) — write to temp file.
-            if audio.get("bytes"):
-                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                    tmp.write(audio["bytes"])
-                    tmp_name = tmp.name
-                return tmp_name, True
-            # 'array' + 'sampling_rate': decoded numpy array — encode to wav.
-            array_val = audio.get("array")
-            if array_val is None:
+            # 'bytes' field: raw file bytes (wav, mp3, etc.) — written verbatim.
+            # 'array' + 'sampling_rate': decoded numpy array — encoded to wav.
+            if not audio.get("bytes") and audio.get("array") is None:
                 msg = "audio dict has no usable 'path', 'bytes', or 'array' field"
                 raise ValueError(msg)
-            arr = np.asarray(array_val, dtype=np.float32)
-            sr = int(audio.get("sampling_rate", 16000))
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                tmp_name = tmp.name
-            sf.write(tmp_name, arr, sr, subtype="PCM_16")
-            return tmp_name, True
-        # AudioDecoder / AudioSamples fallback for torchcodec / SDK-style inputs.
-        if isinstance(audio, LazyAudioDecoder):
-            samples = audio.get_all_samples()
-            data: np.ndarray[Any, np.dtype[np.floating[Any]]] = samples.data.detach().cpu().numpy()
-            sr = int(samples.sample_rate)
-            if data.ndim > 1:
-                data = data.mean(axis=0)
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                tmp_name = tmp.name
-            sf.write(tmp_name, data, sr, subtype="PCM_16")
-            return tmp_name, True
-        msg = f"unsupported audio input type for Swift eval: {type(audio)}"
-        raise ValueError(msg)
+            audio = {"sampling_rate": 16000, **audio}
+        elif not isinstance(audio, LazyAudioDecoder | DecodedAudioSamples):
+            msg = f"unsupported audio input type for Swift eval: {type(audio)}"
+            raise ValueError(msg)
+        # The shared encoder, so the Swift SDK hears the same mono PCM_16 the
+        # other evaluators send (multichannel averaged, not squeezed).
+        wav = prepare_wav_bytes(audio)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp.write(wav)
+            return tmp.name, True
 
     def __del__(self) -> None:
         if hasattr(self, "proc") and self.proc.poll() is None:

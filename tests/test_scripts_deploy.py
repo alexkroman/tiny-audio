@@ -234,8 +234,8 @@ class TestBuildTrainingScript:
             extra_args=[],
         )
 
-        assert 'WANDB_RUN_ID="abc123"' in script
-        assert 'WANDB_RESUME="must"' in script
+        assert "export WANDB_RUN_ID=abc123" in script
+        assert "export WANDB_RESUME=must" in script
 
     def test_script_with_extra_hydra_args(self, build_script: Callable[..., str]) -> None:
         """Test training script includes extra Hydra arguments."""
@@ -249,6 +249,39 @@ class TestBuildTrainingScript:
 
         assert "training.learning_rate=1e-4" in script
         assert "training.batch_size=8" in script
+
+    def test_values_survive_bash_verbatim(self, build_script: Callable[..., str]) -> None:
+        """Token, W&B id and Hydra overrides reach the process exactly as given.
+
+        Bash runs the uploaded script directly, so this is the one shell layer
+        the values cross: `$`, backticks, quotes, brackets and spaces must not
+        be expanded, globbed or split.
+        """
+        token = "hf_a$HOME`id`\"'b"
+        overrides = ["data.datasets=[a,b]", "training.hub_model_id='x y'", "*"]
+        script = build_script(
+            experiment="granite_qwen",
+            hf_token=token,
+            wandb_run_id="r$1",
+            wandb_resume=None,
+            extra_args=overrides,
+        )
+        lines = script.splitlines()
+        exports = [
+            ln for ln in lines if ln.startswith(("export HF_TOKEN=", "export WANDB_RUN_ID="))
+        ]
+        (cmd,) = [ln for ln in lines if ln.startswith("python -m scripts.train ")]
+        probe = "\n".join(
+            [
+                *exports,
+                "set -- " + cmd.removeprefix("python -m scripts.train "),
+                'printf "%s\\0" "$HF_TOKEN" "$WANDB_RUN_ID" "$@"',
+            ]
+        )
+        out = subprocess.run(
+            ["bash", "-c", probe], capture_output=True, text=True, check=True, cwd="/"
+        ).stdout
+        assert out.split("\0")[:-1] == [token, "r$1", "+experiments=granite_qwen", *overrides]
 
 
 class TestPackageImports:
@@ -345,7 +378,7 @@ class TestBuildEvalScript:
         assert "--num-workers 4" in script
         assert "--streaming" in script
         assert "--foo bar" in script
-        assert 'export ASSEMBLYAI_API_KEY="aai_key"' in script
+        assert "export ASSEMBLYAI_API_KEY=aai_key" in script
         assert "pip install modelscope" in script
         assert "Evaluation Completed Successfully" in script
 
