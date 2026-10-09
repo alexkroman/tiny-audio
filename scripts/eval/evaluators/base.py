@@ -1,8 +1,9 @@
 """Base evaluator classes and shared utilities."""
 
+import itertools
 import os
 from collections.abc import Iterable, Iterator, Mapping
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from typing import Any, TypedDict
 
 import assemblyai as aai
@@ -193,9 +194,7 @@ class Evaluator:
             self.text_field = text_field
 
         if self.num_workers > 1:
-            # Parallel processing requires pre-collecting samples
-            samples_to_process = self._collect_samples(dataset, max_samples)
-            self._evaluate_parallel(samples_to_process)
+            self._evaluate_parallel(dataset, max_samples)
         else:
             # Sequential: process lazily to avoid slow collection for streaming datasets
             self._evaluate_sequential_lazy(dataset, max_samples)
@@ -230,26 +229,6 @@ class Evaluator:
         refs, preds = zip(*pairs, strict=True)
         return jiwer.wer(list(refs), list(preds)) * 100
 
-    def _collect_samples(
-        self, dataset: Iterable[DatasetRow], max_samples: int | None
-    ) -> list[Sample]:
-        """Collect samples for parallel processing."""
-        samples_to_process: list[Sample] = []
-        target = max_samples or "all"
-        console.print(f"[dim]Collecting samples (target: {target})...[/dim]")
-        for s in self._iter_dataset_samples(dataset):
-            samples_to_process.append(s)
-            count = len(samples_to_process)
-            if count % 50 == 0 or count == max_samples:
-                console.print(f"[dim]  Collected {count} samples...[/dim]")
-            if max_samples and count >= max_samples:
-                break
-
-        console.print(
-            f"[dim]Collected {len(samples_to_process)} samples, starting evaluation...[/dim]"
-        )
-        return samples_to_process
-
     def _evaluate_sequential_lazy(
         self, dataset: Iterable[DatasetRow], max_samples: int | None
     ) -> None:
@@ -269,33 +248,47 @@ class Evaluator:
             if max_samples and idx >= max_samples:
                 break
 
-    def _evaluate_parallel(self, samples: list[Sample]) -> None:
-        """Run parallel evaluation using thread pool."""
+    def _evaluate_parallel(self, dataset: Iterable[DatasetRow], max_samples: int | None) -> None:
+        """Run parallel evaluation over a bounded window of in-flight samples.
+
+        Samples are pulled from the dataset only as workers free up, so at most
+        `num_workers * 4` decoded clips are held at once. Collecting the whole
+        split first ran a 36 GB Mac out of memory 25,200 rows into SPGISpeech's
+        39k-row test set.
+        """
         console.print(f"[bold]Running parallel evaluation with {self.num_workers} workers[/bold]")
 
         results_map: dict[int, EvalResult] = {}
-        completed = 0
-        total = len(samples)
+        max_in_flight = self.num_workers * 4
+        rows = enumerate(self._iter_dataset_samples(dataset), 1)
+        if max_samples:
+            rows = itertools.islice(rows, max_samples)
+        total = max_samples or "?"
 
         with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
-            futures = {
-                executor.submit(self._process_sample, idx, sample): idx
-                for idx, sample in enumerate(samples, 1)
-            }
+            pending: dict[Future[EvalResult], int] = {}
 
-            for future in as_completed(futures):
-                idx = futures[future]
-                result = future.result()
-                results_map[idx] = result
-                completed += 1
+            def submit_up_to_window() -> None:
+                for idx, sample in itertools.islice(rows, max_in_flight - len(pending)):
+                    pending[executor.submit(self._process_sample, idx, sample)] = idx
 
-                self._print_sample_log(f"[{completed}/{total}] ", idx, result)
+            submit_up_to_window()
+            while pending:
+                done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    idx = pending.pop(future)
+                    result = future.result()
+                    results_map[idx] = result
+                    completed = len(results_map)
 
-                if completed % 100 == 0:
-                    corpus_wer = self._corpus_wer(list(results_map.values()))
-                    console.print(
-                        f"\n[bold]CHECKPOINT @ {completed}[/bold]: WER={corpus_wer:.2f}%\n"
-                    )
+                    self._print_sample_log(f"[{completed}/{total}] ", idx, result)
+
+                    if completed % 100 == 0:
+                        corpus_wer = self._corpus_wer(list(results_map.values()))
+                        console.print(
+                            f"\n[bold]CHECKPOINT @ {completed}[/bold]: WER={corpus_wer:.2f}%\n"
+                        )
+                submit_up_to_window()
 
         self.results = [results_map[i] for i in sorted(results_map.keys())]
 
