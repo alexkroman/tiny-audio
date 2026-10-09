@@ -21,6 +21,14 @@ AudioInput = Waveform | Sequence[Waveform]
 # A `state_dict(destination=...)` mapping, returned as the caller's own type.
 StateDictT = TypeVar("StateDictT", bound=dict[str, Any])
 
+
+class PreparedChunk(TypedDict):
+    """One chunk's encoder inputs, as `ASRPipeline.prepare_chunk` builds them (batch of 1)."""
+
+    input_features: torch.Tensor
+    attention_mask: torch.Tensor
+
+
 if TYPE_CHECKING:
 
     class GenerativeDecoder(PreTrainedModel, GenerationMixin):

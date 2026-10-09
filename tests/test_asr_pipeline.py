@@ -13,7 +13,13 @@ import transformers
 
 from tiny_audio.alignment import AlignedWord
 from tiny_audio.asr_modeling import ASRModel
-from tiny_audio.asr_pipeline import ASRPipeline, NemotronDiarizer, QwenForcedAligner
+from tiny_audio.asr_pipeline import (
+    ASRPipeline,
+    NemotronDiarizer,
+    PreparedChunk,
+    QwenForcedAligner,
+    collate_chunks,
+)
 
 
 class TestExtractAudio:
@@ -195,14 +201,30 @@ class TestPipelineCall:
 
     @pytest.fixture
     def chunked(self, monkeypatch: pytest.MonkeyPatch) -> list[int]:
-        """Stub per-chunk transcription: chunk k transcribes as "w{k}a w{k}b"."""
+        """Stub chunk transcription: the k-th chunk (by sample count) reads "w{k}a w{k}b".
+
+        Stubs both routes to the model: the batched one (`prepare_chunk` +
+        `generate_prepared`) and the one-call-per-chunk fallback that generate
+        kwargs take (the parent pipeline's `__call__`).
+        """
         calls: list[int] = []
 
-        def fake_call(self: object, inputs: dict[str, Any], **kwargs: Any) -> dict[str, str]:
-            calls.append(len(inputs["raw"] if "raw" in inputs else inputs["array"]))
+        def transcribe(samples: int) -> str:
+            calls.append(samples)
             k = len(calls) - 1
-            return {"text": f"w{k}a w{k}b"}
+            return f"w{k}a w{k}b"
 
+        def fake_prepare(self: object, chunk: npt.NDArray[np.float32], sample_rate: int) -> Any:
+            return {"input_features": torch.zeros(len(chunk)), "attention_mask": torch.zeros(1)}
+
+        def fake_generate(self: object, prepared: Sequence[Any]) -> list[str]:
+            return [transcribe(int(p["input_features"].shape[0])) for p in prepared]
+
+        def fake_call(self: object, inputs: dict[str, Any], **kwargs: Any) -> dict[str, str]:
+            return {"text": transcribe(len(inputs["raw"] if "raw" in inputs else inputs["array"]))}
+
+        monkeypatch.setattr(ASRPipeline, "prepare_chunk", fake_prepare)
+        monkeypatch.setattr(ASRPipeline, "generate_prepared", fake_generate)
         monkeypatch.setattr(transformers.AutomaticSpeechRecognitionPipeline, "__call__", fake_call)
         return calls
 
@@ -279,7 +301,9 @@ class TestPipelineCall:
             return {"text": "x", "top1_logprob": [-0.1], "top2_logprob": [-2.0]}
 
         monkeypatch.setattr(transformers.AutomaticSpeechRecognitionPipeline, "__call__", fake_call)
-        result = pipeline({"array": self._speech(30.0, 12.0), "sampling_rate": 16000})
+        result = pipeline(
+            {"array": self._speech(30.0, 12.0), "sampling_rate": 16000}, output_scores=True
+        )
         assert result == {"text": "x x", "top1_logprob": [-0.1, -0.1], "top2_logprob": [-2.0, -2.0]}
 
     def test_alignment_failure_recorded(
@@ -355,3 +379,91 @@ class TestPipelineCall:
 
         # Should restore original prompt after the call
         assert original_prompt == pipeline.model.TRANSCRIBE_PROMPT
+
+
+class TestBatchedChunks:
+    """Chunks are padded into one batch and run through the model together."""
+
+    @staticmethod
+    def _prepared(frames: int, dim: int = 4, time_major: bool = True) -> PreparedChunk:
+        shape = (1, frames, dim) if time_major else (1, dim, frames)
+        return {
+            "input_features": torch.ones(shape),
+            "attention_mask": torch.ones(1, frames, dtype=torch.long),
+        }
+
+    @pytest.mark.parametrize("time_major", [True, False])
+    def test_collate_pads_time_axis_and_mask(self, time_major: bool) -> None:
+        batch = collate_chunks(
+            [self._prepared(3, time_major=time_major), self._prepared(5, time_major=time_major)]
+        )
+        expected = (2, 5, 4) if time_major else (2, 4, 5)
+        assert tuple(batch["input_features"].shape) == expected
+        assert batch["attention_mask"].tolist() == [[1, 1, 1, 0, 0], [1, 1, 1, 1, 1]]
+        short = batch["input_features"][0]
+        padded = short[3:] if time_major else short[:, 3:]
+        assert float(padded.abs().sum()) == 0.0  # padding is zeros, not copies
+
+    def test_batches_split_at_max_batch_size(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        sizes: list[int] = []
+
+        def fake_generate(self: object, prepared: Sequence[PreparedChunk]) -> list[str]:
+            sizes.append(len(prepared))
+            return [str(int(p["attention_mask"].shape[-1])) for p in prepared]
+
+        monkeypatch.setattr(ASRPipeline, "generate_prepared", fake_generate)
+        pipeline = object.__new__(ASRPipeline)
+        pipeline.max_batch_size = 2
+        texts = pipeline._generate_in_batches([self._prepared(n) for n in (1, 2, 3, 4, 5)])
+        assert sizes == [2, 2, 1]
+        assert texts == ["1", "2", "3", "4", "5"]
+
+    def test_chunk_runner_replaces_local_batching(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A server's runner sees every non-silent chunk of the request at once."""
+
+        def fake_prepare(
+            _self: object, chunk: npt.NDArray[np.float32], sample_rate: int
+        ) -> PreparedChunk:
+            return TestBatchedChunks._prepared(len(chunk))
+
+        monkeypatch.setattr(ASRPipeline, "prepare_chunk", fake_prepare)
+        seen: list[int] = []
+
+        def runner(prepared: list[PreparedChunk]) -> list[str]:
+            seen.extend(int(p["attention_mask"].shape[-1]) for p in prepared)
+            return [f"t{i}" for i in range(len(prepared))]
+
+        pipeline = object.__new__(ASRPipeline)
+        pipeline.chunk_runner = runner
+        noise = np.full(100, 0.1, dtype=np.float32)
+        silence = np.zeros(50, dtype=np.float32)
+        texts = pipeline._transcribe_chunks([noise, silence, noise[:70]], 16000)
+        assert seen == [100, 70]  # silence never reaches the runner
+        assert texts == ["t0", "", "t1"]
+
+
+class TestBatchedGenerateParity:
+    """A batch decodes like its rows one at a time (real model, CPU)."""
+
+    def test_batched_matches_one_at_a_time(
+        self, base_asr_model: ASRModel, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Rows don't leak into each other: a ragged batch gives each row its own text.
+
+        Short on purpose. The test model is untrained, so its logits are near
+        ties, and padding's different float rounding flips one eventually (seen
+        ~120 tokens in). Batching is not bit-exact; it only agrees wherever the
+        model is decisive, which 16 tokens of a real mixing bug would not be.
+        """
+        monkeypatch.setattr(base_asr_model.generation_config, "max_new_tokens", 16)
+        pipeline = ASRPipeline(
+            model=base_asr_model,
+            feature_extractor=base_asr_model.feature_extractor,
+            tokenizer=base_asr_model.tokenizer,
+            device="cpu",
+        )
+        rng = np.random.default_rng(0)
+        chunks = [rng.normal(0, 0.1, n).astype(np.float32) for n in (16000, 24000, 8000)]
+        prepared = [pipeline.prepare_chunk(c, 16000) for c in chunks]
+        solo = [pipeline.generate_prepared([p])[0] for p in prepared]
+        assert pipeline.generate_prepared(prepared) == solo

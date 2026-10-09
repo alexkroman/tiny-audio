@@ -24,6 +24,12 @@ from scripts.deploy.plan import (
     plan_command,
     provision_command,
 )
+from scripts.deploy.pods import (
+    POD_PORTS,
+    SERVE_DISK_GB,
+    SERVE_GPUS,
+    provision_serve_command,
+)
 from tiny_audio.asr_config import ASRConfig
 from tiny_audio.projectors import PROJECTOR_CLASSES
 
@@ -288,6 +294,7 @@ class TestProvisionCommand:
         assert json.loads(last[last.index("--env") + 1]) == {
             "SSH_PUBLIC_KEY": "ssh-ed25519 AAAA me"
         }
+        assert last[last.index("--ports") + 1] == POD_PORTS == "22/tcp,8000/http"
         out = capsys.readouterr().out
         assert "no capacity" in out
         assert "unexpected response" in out
@@ -301,6 +308,52 @@ class TestProvisionCommand:
         with pytest.raises(typer.Exit):
             self._run()
         assert len(calls) == 2
+
+
+class TestProvisionServeCommand:
+    @pytest.fixture
+    def home(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        (tmp_path / ".ssh").mkdir()
+        (tmp_path / ".ssh" / "id_ed25519.pub").write_text("ssh-ed25519 AAAA me\n")
+        return tmp_path
+
+    def test_listed_preferred_gpus_go_first(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        stub_catalog: dict[str, Any],
+        home: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Catalog-listed SERVE_GPUS first, in preference order; unlisted ones still tried."""
+        stub_catalog["gpus"] = [(48, "NVIDIA L40S"), (80, "H100")]
+        calls: list[list[str]] = []
+        responses = ["There are no longer any instances available", '{"id": "pod9"}']
+
+        def fake_run(args: list[str], **_: Any) -> SimpleNamespace:
+            calls.append(args)
+            return SimpleNamespace(stdout=responses[len(calls) - 1], stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        pod = provision_serve_command(name=None, image=IMAGE, max_attempts=6, dry_run=False)
+
+        assert pod == "pod9"
+        tried = [c[c.index("--gpu-id") + 1] for c in calls]
+        assert tried == ["NVIDIA L40S", SERVE_GPUS[0]]  # H100 is never a serve candidate
+        last = calls[-1]
+        assert last[last.index("--name") + 1] == "tiny-audio-serve"
+        assert last[last.index("--container-disk-in-gb") + 1] == str(SERVE_DISK_GB)
+        assert last[last.index("--ports") + 1] == POD_PORTS
+        assert "https://pod9-8000.proxy.runpod.net" in capsys.readouterr().out
+
+    def test_dry_run_creates_nothing(
+        self, monkeypatch: pytest.MonkeyPatch, stub_catalog: dict[str, Any], home: Path
+    ) -> None:
+        def no_run(*args: Any, **kwargs: Any) -> Any:
+            pytest.fail("pod created on a dry run")
+
+        monkeypatch.setattr(subprocess, "run", no_run)
+        assert provision_serve_command(name=None, image=IMAGE, max_attempts=2, dry_run=True) is None
 
 
 # Repos vendored in tests/fixtures/hf_hub, so ASRConfig resolves them offline.

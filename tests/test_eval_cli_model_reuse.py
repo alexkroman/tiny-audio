@@ -69,7 +69,7 @@ def test_model_is_built_once_for_a_multi_dataset_sweep(
         return [{"wav": "a", "audio": "a", "text": "hi", "sentence": "hi"}]
 
     monkeypatch.setattr(eval_cli, "_build_evaluator", fake_build)
-    monkeypatch.setattr(eval_cli, "load_eval_dataset", fake_load)
+    monkeypatch.setattr(eval_cli, "load_eval_samples", fake_load)
 
     result = runner.invoke(
         eval_cli.app,

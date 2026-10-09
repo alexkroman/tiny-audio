@@ -33,6 +33,8 @@ SUBCOMMANDS: dict[str, str] = {
     "runpod": "scripts.deploy.runpod",
     "debug": "scripts.debug.cli",
     "demo": "demo.app",
+    "serve": "scripts.serve",
+    "bench": "scripts.bench_serve",
     "dev": "scripts.dev",
 }
 

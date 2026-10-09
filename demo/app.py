@@ -5,6 +5,9 @@ Gradio app for ASR model with support for:
 - File upload
 - Word-level timestamps
 - Speaker diarization
+
+With ENDPOINT_URL set, requests go to a tiny-audio server (`ta serve`) and this
+app needs no GPU, torch or transformers; without it the model runs in-process.
 """
 
 import os
@@ -29,6 +32,7 @@ os.environ["MPLCONFIGDIR"] = "/tmp/matplotlib"
 # Disable tokenizer parallelism warning
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+import base64
 import html
 import sys
 from collections.abc import Callable, Mapping, Sequence
@@ -38,11 +42,10 @@ from pathlib import Path
 from typing import Annotated, Any, NotRequired, TypedDict, cast
 
 import gradio as gr
+import httpx
 import soundfile
-import torch
 import typer
 from gradio import themes
-from transformers import pipeline
 
 
 class Word(TypedDict):
@@ -209,6 +212,8 @@ Model: <a href="https://huggingface.co/{model}" target="_blank">{model}</a></p>
 
 def pick_device() -> int | str:
     """The pipeline device: CUDA index 0, Apple "mps", or -1 for CPU."""
+    import torch  # noqa: PLC0415 -- server mode runs without torch
+
     if torch.cuda.is_available():
         return 0
     if torch.backends.mps.is_available():
@@ -310,8 +315,9 @@ def build_output_tabs() -> tuple[gr.Tabs, gr.Textbox, gr.HTML, gr.Dataframe, gr.
     return tabs, output_text, conversation_output, timestamps_output, diarization_output
 
 
-def create_demo(model_path: str = "mazesmazes/tiny-audio") -> gr.Blocks:
-    """Create Gradio demo interface using transformers pipeline."""
+def local_runner(model_path: str) -> Callable[[str, dict[str, Any]], dict[str, Any]]:
+    """Run the pipeline in this process (on the GPU, on ZeroGPU)."""
+    from transformers import pipeline  # noqa: PLC0415 -- server mode runs without it
 
     # Load pipeline - uses custom ASRPipeline from the model repo
     pipe = pipeline(
@@ -333,6 +339,55 @@ def create_demo(model_path: str = "mazesmazes/tiny-audio") -> gr.Blocks:
         # pipeline's __call__ with the batched (list) return type.
         return cast(dict[str, Any], pipe(audio, **kwargs))
 
+    return run_pipeline
+
+
+# The RunPod proxy answers 502-504 while the pod's server is down or still
+# loading its models; anything else is a real failure.
+WAKING_UP = "The model server is starting up or offline. Please try again in a few minutes."
+
+
+def remote_runner(
+    endpoint_url: str, api_key: str | None
+) -> Callable[[str, dict[str, Any]], dict[str, Any]]:
+    """POST each request to a `ta serve` server (scripts/serve.py)."""
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
+    def run_pipeline(audio: str, kwargs: dict[str, Any]) -> dict[str, Any]:
+        # A JSON body is the only way to send `parameters` with the audio,
+        # so the audio travels base64-encoded.
+        payload = {
+            "inputs": base64.b64encode(Path(audio).read_bytes()).decode(),
+            "parameters": kwargs,
+        }
+        try:
+            response = httpx.post(endpoint_url, json=payload, headers=headers, timeout=600)
+        except httpx.TimeoutException as e:
+            msg = "The model server took too long to respond."
+            raise gr.Error(msg) from e
+        except httpx.HTTPError as e:
+            msg = f"Could not reach the model server: {e}"
+            raise gr.Error(msg) from e
+        if response.status_code in (502, 503, 504):
+            raise gr.Error(WAKING_UP)
+        if response.is_error:
+            msg = f"Model server error {response.status_code}: {response.text[:300]}"
+            raise gr.Error(msg)
+        return cast(dict[str, Any], response.json())
+
+    return run_pipeline
+
+
+def create_demo(
+    model_path: str = "mazesmazes/tiny-audio",
+    endpoint_url: str | None = None,
+    api_key: str | None = None,
+) -> gr.Blocks:
+    """Create the Gradio demo, backed by a `ta serve` server or a local pipeline."""
+    run_pipeline = (
+        remote_runner(endpoint_url, api_key) if endpoint_url else local_runner(model_path)
+    )
+
     def process_audio(
         audio: str | None,
         show_timestamps: bool,
@@ -347,7 +402,6 @@ def create_demo(model_path: str = "mazesmazes/tiny-audio") -> gr.Blocks:
 
         kwargs = pipeline_kwargs(show_timestamps, show_diarization, num_speakers, max_speakers)
 
-        # Transcribe the audio (on the GPU, on ZeroGPU)
         result = run_pipeline(audio, kwargs)
         warn_partial_failures(result)
 
@@ -411,11 +465,19 @@ def main(
         str,
         typer.Option("--model", "-m", envvar="MODEL_ID", help="HuggingFace Hub model ID"),
     ] = "mazesmazes/tiny-audio",
+    endpoint_url: Annotated[
+        str | None,
+        typer.Option(
+            "--endpoint-url",
+            envvar="ENDPOINT_URL",
+            help="`ta serve` URL to send requests to instead of loading the model",
+        ),
+    ] = None,
     port: Annotated[int, typer.Option("--port", "-p", help="Server port")] = 7860,
     share: Annotated[bool, typer.Option("--share", help="Create public share link")] = False,
 ) -> None:
     """Launch ASR Gradio demo."""
-    demo = create_demo(model)
+    demo = create_demo(model, endpoint_url, os.environ.get("TINY_AUDIO_API_KEY"))
     demo.launch(server_port=port, share=share, server_name="0.0.0.0", theme=THEME, css=CSS)
 
 

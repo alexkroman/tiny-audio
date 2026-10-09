@@ -185,13 +185,11 @@ class TestCallPromptHandling:
     ) -> None:
         seen: dict[str, Any] = {}
 
-        def failing_call(self: object, inputs: object, **kwargs: Any) -> NoReturn:
+        def failing_transcribe(self: object, *args: object, **kwargs: Any) -> NoReturn:
             seen["prompt_during_call"] = pipeline.model.TRANSCRIBE_PROMPT
             raise RuntimeError("boom")
 
-        monkeypatch.setattr(
-            transformers.AutomaticSpeechRecognitionPipeline, "__call__", failing_call
-        )
+        monkeypatch.setattr(ASRPipeline, "_transcribe_chunks", failing_transcribe)
         with pytest.raises(RuntimeError, match="boom"):
             pipeline({"array": np.full(16, 0.1)}, user_prompt="custom")
 

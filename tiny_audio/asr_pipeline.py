@@ -1,7 +1,7 @@
 """ASR pipeline for audio-to-text transcription with optional timestamps and diarization."""
 
 import re
-from collections.abc import Iterator, MutableMapping
+from collections.abc import Callable, Iterator, MutableMapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
@@ -16,25 +16,30 @@ if TYPE_CHECKING:
 
     from .alignment import QwenForcedAligner
     from .asr_modeling import ASRModel
-    from .asr_processing import prepend_lead_in
+    from .asr_processing import collate_chunks, prepend_lead_in
+    from .asr_types import PreparedChunk
     from .diarization import NemotronDiarizer, StreamChunk, masked_audio, pack_spans
 else:
     try:
         from .alignment import QwenForcedAligner
         from .asr_modeling import ASRModel
-        from .asr_processing import prepend_lead_in
+        from .asr_processing import collate_chunks, prepend_lead_in
+        from .asr_types import PreparedChunk
         from .diarization import NemotronDiarizer, StreamChunk, masked_audio, pack_spans
     except ImportError:  # flat layout on the Hub: sibling modules, no package
         from alignment import QwenForcedAligner
         from asr_modeling import ASRModel
-        from asr_processing import prepend_lead_in
+        from asr_processing import collate_chunks, prepend_lead_in
+        from asr_types import PreparedChunk
         from diarization import NemotronDiarizer, StreamChunk, masked_audio, pack_spans
 
 # Re-export for backwards compatibility
 __all__ = [
     "ASRPipeline",
     "NemotronDiarizer",
+    "PreparedChunk",
     "QwenForcedAligner",
+    "collate_chunks",
 ]
 
 # Audio is transcribed in chunks cut at the quietest point between
@@ -127,6 +132,13 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
     """ASR Pipeline for audio-to-text transcription."""
 
     model: ASRModel
+
+    #: Chunks per batched `generate` call when this pipeline runs them itself.
+    max_batch_size: int = 16
+    #: Runs prepared chunks through the model, returning one text each. None
+    #: means `generate_prepared` in batches of `max_batch_size`; a server
+    #: swaps in a queue that batches chunks across concurrent requests.
+    chunk_runner: "Callable[[list[PreparedChunk]], list[str]] | None" = None
 
     def __init__(self, model: ASRModel, **kwargs: Any) -> None:
         """Initialize ASR pipeline.
@@ -269,6 +281,11 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         array, sr = audio["array"], audio["sampling_rate"]
 
         bounds = chunk_bounds(array, sr)
+        if not kwargs:
+            texts = self._transcribe_chunks([array[s:e] for s, e in bounds], sr)
+            return {"text": " ".join(t for t in texts if t)}
+        # Generate kwargs (e.g. output_scores for eval confidence) need a
+        # one-chunk batch: `_forward` refuses per-item scores for more.
         if len(bounds) == 1:
             return self._transcribe_chunk(array, sr, **kwargs)
         result: dict[str, Any] = {}
@@ -282,6 +299,61 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                     result.setdefault(key, []).extend(out[key])
         result["text"] = " ".join(t for t in texts if t)
         return result
+
+    def _transcribe_chunks(
+        self, chunks: Sequence[npt.NDArray[np.float32]], sample_rate: int, **kwargs: Any
+    ) -> list[str]:
+        """One text per chunk, batched; digital silence is "" without the model.
+
+        All of a request's chunks go to the model together (`chunk_runner`)
+        rather than one call each, so a long recording, or diarization's
+        per-speaker streams, costs a few batched `generate` calls instead of
+        one per 18 s. Generate kwargs fall back to one call per chunk.
+        """
+        texts = [""] * len(chunks)
+        todo = [i for i, chunk in enumerate(chunks) if not is_silent(chunk)]
+        if kwargs:
+            for i in todo:
+                texts[i] = self._transcribe_chunk(chunks[i], sample_rate, **kwargs)["text"]
+            return texts
+        prepared = [self.prepare_chunk(chunks[i], sample_rate) for i in todo]
+        run = self.chunk_runner or self._generate_in_batches
+        for i, text in zip(todo, run(prepared) if prepared else [], strict=True):
+            texts[i] = text
+        return texts
+
+    def prepare_chunk(self, chunk: npt.NDArray[np.float32], sample_rate: int) -> PreparedChunk:
+        """A chunk's encoder inputs on CPU: lead-in, then the feature extractor.
+
+        The same `preprocess` a one-chunk call runs, so batched and one-at-a-time
+        decoding see identical features.
+        """
+        item = next(self.preprocess({"raw": chunk, "sampling_rate": sample_rate}))
+        return {"input_features": item["input_features"], "attention_mask": item["attention_mask"]}
+
+    def _generate_in_batches(self, prepared: list[PreparedChunk]) -> list[str]:
+        """`generate_prepared` over `prepared` in batches of `max_batch_size`."""
+        size = max(1, self.max_batch_size)
+        batches = (prepared[start : start + size] for start in range(0, len(prepared), size))
+        return [text for batch in batches for text in self.generate_prepared(batch)]
+
+    @torch.inference_mode()
+    def generate_prepared(
+        self, prepared: Sequence[PreparedChunk], **generate_kwargs: Any
+    ) -> list[str]:
+        """One batched `generate` (kwargs passed on) over prepared chunks; one text each.
+
+        Rows are left-padded prompts sized to each chunk's own audio tokens, so a
+        ragged batch decodes like its rows alone, up to padding numerics.
+        """
+        batch = collate_chunks(prepared)
+        tokens = self.model.generate(
+            input_features=batch["input_features"].to(self.model.device),
+            audio_attention_mask=batch["attention_mask"].to(self.model.device),
+            **generate_kwargs,
+        )
+        assert torch.is_tensor(tokens)  # no output_scores: plain token ids
+        return [self.postprocess({"tokens": row})["text"] for row in tokens.cpu()]
 
     def _transcribe_chunk(
         self, chunk: npt.NDArray[np.float32], sample_rate: int, **kwargs: Any
@@ -305,7 +377,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
     ) -> dict[str, Any]:
         """Transcribe in chunks and time every word; per-speaker streams if requested.
 
-        Chunks of 8-18 s cut at quiet points are transcribed one by one and each
+        Chunks of 8-18 s cut at quiet points are transcribed in batches and each
         is aligned against its own transcript (batched), then offset onto the
         recording's timeline -- so audio of any length gets every word timed,
         and the model never sees a clip longer than it trained on. Speakers
@@ -325,9 +397,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
     ) -> dict[str, Any]:
         """`{"text", "words"}` for the whole recording: chunk, transcribe, align, offset."""
         bounds = chunk_bounds(array, sr)
-        texts: list[str] = [
-            self._transcribe_chunk(array[s:e], sr, **kwargs)["text"] for s, e in bounds
-        ]
+        texts = self._transcribe_chunks([array[s:e] for s, e in bounds], sr, **kwargs)
         result: dict[str, Any] = {"text": " ".join(t for t in texts if t)}
 
         try:
@@ -386,7 +456,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                     {"col": c, "start": s, "audio": masked_audio(array, spans, s, e)}
                     for s, e in stream_chunks(array, spans, sr)
                 )
-            texts = [self._transcribe_chunk(ch["audio"], sr, **kwargs)["text"] for ch in chunks]
+            texts = self._transcribe_chunks([ch["audio"] for ch in chunks], sr, **kwargs)
             result = self._align_streams(chunks, texts, sr, masks, keep)
             if result["words"]:
                 result["words"] = NemotronDiarizer.dedupe_words(result["words"], activity, keep)

@@ -6,7 +6,6 @@ Focuses on behavior testing rather than existence checks.
 import importlib
 import subprocess
 from collections.abc import Callable
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -15,9 +14,12 @@ import typer
 
 from scripts.deploy import plan as plan_module
 from scripts.deploy import runpod
-from scripts.deploy.handler_local import find_latest_model
 from scripts.deploy.plan import DATASET_DISK_FACTOR, build_plan, wait_command
-from scripts.deploy.remote_scripts import build_eval_script, build_training_script
+from scripts.deploy.remote_scripts import (
+    build_eval_script,
+    build_serve_script,
+    build_training_script,
+)
 from scripts.deploy.runpod import (
     SSH_CONNECT_ATTEMPTS,
     SSH_KEY_PATH,
@@ -282,23 +284,6 @@ class TestBuildTrainingScript:
         assert out.split("\0")[:-1] == [token, "r$1", "+experiments=granite_qwen", *overrides]
 
 
-class TestHandlerLocal:
-    """Tests for local handler testing utilities."""
-
-    def test_find_latest_model_returns_none_for_nonexistent_dir(self, tmp_path: Path) -> None:
-        """Test find_latest_model returns None when outputs dir doesn't exist."""
-        result = find_latest_model(str(tmp_path / "nonexistent"))
-        assert result is None
-
-    def test_find_latest_model_returns_none_for_empty_dir(self, tmp_path: Path) -> None:
-        """Test find_latest_model returns None when outputs dir is empty."""
-        outputs_dir = tmp_path / "outputs"
-        outputs_dir.mkdir()
-
-        result = find_latest_model(str(outputs_dir))
-        assert result is None
-
-
 class TestPackageImports:
     """Tests that all deploy-related packages are properly importable."""
 
@@ -308,7 +293,6 @@ class TestPackageImports:
             "scripts.deploy",
             "scripts.deploy.runpod",
             "scripts.deploy.hf_space",
-            "scripts.deploy.handler_local",
             "scripts.hub",
             "scripts.hub.push",
             "scripts.debug",
@@ -411,3 +395,64 @@ class TestBuildEvalScript:
             assert flag not in script
         assert "ASSEMBLYAI_API_KEY" not in script
         assert "--assemblyai-model best" in script
+
+
+class TestServeScript:
+    def test_binds_all_interfaces_and_prints_url(self) -> None:
+        script = build_serve_script("hf_x", "me/model", 8000, 48, "")
+        assert "python -m scripts.serve" in script
+        assert "--model me/model" in script
+        assert "--host 0.0.0.0" in script
+        assert "--port 8000" in script
+        assert "--max-batch-size 48" in script
+        assert "/proc/1/environ" in script  # pod id from PID 1; SSH sessions lack it
+        assert "-8000.proxy.runpod.net" in script
+        assert "TINY_AUDIO_API_KEY" not in script  # open by default
+
+    def test_api_key_is_exported_when_given(self) -> None:
+        script = build_serve_script("hf_x", "me/model", 8000, None, "s3cret")
+        assert 'export TINY_AUDIO_API_KEY="s3cret"' in script
+        assert "--max-batch-size" not in script
+
+
+def test_runpod_serve_starts_server_session(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`ta runpod serve` runs the server script in tmux and prints the proxy URL."""
+    conn = MagicMock()
+    conn.run.return_value = MagicMock(ok=True, stdout="abc123\n")
+
+    def fake_connect(host: str, port: int) -> MagicMock:
+        return conn
+
+    monkeypatch.setattr(runpod, "connect", fake_connect)
+    started: list[tuple[str, str, bool]] = []
+
+    def fake_start(
+        _conn: object,
+        _host: str,
+        _port: int,
+        session: str,
+        script: str,
+        _path: str,
+        no_attach: bool,
+    ) -> None:
+        started.append((session, script, no_attach))
+
+    monkeypatch.setattr(runpod, "_start_remote_tmux_script", fake_start)
+    runpod.serve(
+        "1.2.3.4",
+        22,
+        model="me/model",
+        max_batch_size=None,
+        api_key="",
+        session_name=None,
+        no_attach=True,
+        force=False,
+        hf_token="hf_x",
+    )
+    [(session, script, no_attach)] = started
+    assert session == "serve"
+    assert no_attach
+    assert "--model me/model" in script
+    assert "https://abc123-8000.proxy.runpod.net" in capsys.readouterr().out

@@ -11,7 +11,6 @@ from typing import Any, NoReturn
 import numpy as np
 import numpy.typing as npt
 import pytest
-import transformers
 
 from tiny_audio.alignment import AlignedWord
 from tiny_audio.asr_modeling import ASRModel
@@ -147,11 +146,18 @@ class TestStreamsPipeline:
         """Record every ASR input; call k returns `self.script[k]`."""
         calls: list[npt.NDArray[np.float32]] = []
 
-        def fake_call(_self: object, inputs: dict[str, Any], **kwargs: Any) -> dict[str, str]:
-            calls.append(np.asarray(inputs["raw"]))
-            return {"text": self.script[len(calls) - 1]}
+        def fake_prepare(_self: object, chunk: npt.NDArray[np.float32], sample_rate: int) -> Any:
+            return {"audio": np.asarray(chunk)}
 
-        monkeypatch.setattr(transformers.AutomaticSpeechRecognitionPipeline, "__call__", fake_call)
+        def fake_generate(_self: object, prepared: Sequence[Any]) -> list[str]:
+            texts: list[str] = []
+            for item in prepared:
+                calls.append(item["audio"])
+                texts.append(self.script[len(calls) - 1])
+            return texts
+
+        monkeypatch.setattr(ASRPipeline, "prepare_chunk", fake_prepare)
+        monkeypatch.setattr(ASRPipeline, "generate_prepared", fake_generate)
         return calls
 
     script: list[str]

@@ -273,10 +273,19 @@ def _add_avg_latency(metrics: ModelMetrics) -> None:
 
 
 def collect_model_metrics(
-    model_pattern: str, outputs_dir: Path, exclude: list[str] | None = None
+    model_pattern: str,
+    outputs_dir: Path,
+    exclude: list[str] | None = None,
+    exclude_datasets: list[str] | None = None,
 ) -> ModelMetrics:
-    """Collect all metrics for a model's newest sweep, across datasets."""
+    """Collect all metrics for a model's newest sweep, across datasets.
+
+    `exclude_datasets` drops runs before the newest sweep is chosen, so a
+    later one-dataset run (say ami-speakers-long) doesn't shadow a full sweep.
+    """
     model_dirs = find_model_dirs(outputs_dir, model_pattern, exclude, latest=True)
+    skip = set(exclude_datasets or ())
+    model_dirs = [d for d in model_dirs if extract_dataset_name(d.name) not in skip]
     # One sweep only -- see latest_sweep. Mixing them is how the corpus WER
     # ended up comparing different data between models.
     model_dirs, sweep_label = latest_sweep(model_dirs)

@@ -79,7 +79,7 @@ An aggregate WER tells you *how much* the model fails. To improve it you need to
 | ------------------------------- | ------------- | ---------------------------------------------------- |
 | **Hub repo**                    | Free          | Already done: training pushed your checkpoints there |
 | **Hugging Face Space** (Gradio) | Free on CPU   | A public demo anyone can try in a browser            |
-| **Inference Endpoints**         | Paid GPU      | A production HTTP API; the repo ships the handler    |
+| **`ta serve` on RunPod**        | Paid GPU      | A production HTTP API with batched GPU inference     |
 | **Local server**                | Your hardware | Privacy, or wiring into your own app                 |
 
 ______________________________________________________________________
@@ -213,20 +213,36 @@ To test locally before deploying:
 poetry run ta demo --model $MODEL --port 7860
 ```
 
-### Exercise 5: Production Endpoints (5 min)
+### Exercise 5: Production Server (5 min)
 
-For an HTTP API on a GPU, use Inference Endpoints. The repo's `handler.py` is uploaded with the
-custom code, so the endpoint knows how to load and warm up the model:
+For an HTTP API on a GPU, run `ta serve` on a RunPod pod. It loads the model once, merges the LoRA
+adapters, and batches audio chunks from concurrent requests on the GPU:
 
-1. On your model page, choose **Deploy → Inference Endpoints**
-
-1. Pick a GPU and a scaling policy (scale-to-zero keeps idle cost near nothing)
-
-1. Create it, then call it with any HTTP client, or evaluate through it by passing the endpoint URL
-   as the model:
+1. Try it locally first (CUDA, Apple MPS or CPU):
 
    ```bash
-   poetry run ta eval -m https://<your-endpoint>.endpoints.huggingface.cloud --endpoint -n 50
+   poetry run ta serve --model $MODEL --port 8000
+   ```
+
+1. Create an inference pod (an RTX 4090 by default), install, and start the server:
+
+   ```bash
+   poetry run ta runpod up --serve
+   poetry run ta runpod wait <pod-id>          # prints <ip> <port>
+   poetry run ta runpod deploy <ip> <port>
+   poetry run ta runpod serve <ip> <port> --model $MODEL --no-attach
+   ```
+
+1. Load-test it (latency and throughput at 1, 8 and 32 requests in flight):
+
+   ```bash
+   poetry run ta bench --url https://<pod-id>-8000.proxy.runpod.net
+   ```
+
+1. Call it with any HTTP client, or evaluate through it by passing its URL as the model:
+
+   ```bash
+   poetry run ta eval -m https://<pod-id>-8000.proxy.runpod.net --endpoint -n 50 -w 8
    ```
 
 ______________________________________________________________________

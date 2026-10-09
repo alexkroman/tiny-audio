@@ -197,3 +197,192 @@ python -m scripts.eval.cli \\
         + body
         + script_epilogue("Evaluation", "Eval script")
     )
+
+
+# Prints the pod's id. RunPod sets RUNPOD_POD_ID only in the container's main
+# process (PID 1), not in SSH or tmux sessions started later.
+POD_ID_COMMAND = "tr '\\0' '\\n' < /proc/1/environ | sed -n 's/^RUNPOD_POD_ID=//p'"
+
+
+def build_serve_script(
+    hf_token: str, model: str, port: int, max_batch_size: int | None, api_key: str
+) -> str:
+    """Generate the `ta serve` script: the batched HTTP server on 0.0.0.0:<port>."""
+    batch_arg = f"--max-batch-size {max_batch_size}" if max_batch_size else ""
+    key_export = f'export TINY_AUDIO_API_KEY="{api_key}"\n' if api_key else ""
+    extra_exports = (
+        f"{key_export}"
+        "export CUDA_VISIBLE_DEVICES=0\n"
+        "export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True\n"
+    )
+    body = f"""
+cd /workspace
+echo "Public URL: https://$({POD_ID_COMMAND})-{port}.proxy.runpod.net"
+
+python -m scripts.serve \\
+    --model {model} \\
+    --host 0.0.0.0 \\
+    --port {port} \\
+    {batch_arg}
+"""
+    return (
+        script_preamble(hf_token, extras=extra_exports) + body + script_epilogue("Server", "Server")
+    )
+
+
+# `ta runpod deploy`'s dependency install, run once per pod by
+# `runpod.install_dependencies` (which uploads it and captures its log).
+INSTALL_DEPS_SCRIPT = (
+    """\
+#!/bin/bash
+# `pipefail` ensures `pip ... | grep ...` fails when pip fails — without it,
+# pip errors are masked by grep's exit code.
+set -eo pipefail
+
+export PATH="/root/.local/bin:$PATH"
+
+"""
+    + NVIDIA_LD_PATH_FIX
+    + """export PIP_ROOT_USER_ACTION=ignore
+export POETRY_VIRTUALENVS_CREATE=false
+export PIP_BREAK_SYSTEM_PACKAGES=1
+
+# Configure pip
+mkdir -p /root/.config/pip
+echo -e "[global]\\nbreak-system-packages = true" > /root/.config/pip/pip.conf
+
+# Verify the base image actually ships a CUDA-enabled PyTorch — fail loudly
+# rather than silently reinstalling a different version on top.
+python -c "import torch; assert torch.cuda.is_available()" || {
+    echo "ERROR: base image is missing a CUDA-enabled PyTorch. Pick a runpod/pytorch:* image." >&2
+    exit 1
+}
+
+# Poetry tooling — only install what's missing
+command -v poetry >/dev/null 2>&1 || pip install --user poetry
+python -c "import poetry_plugin_export" 2>/dev/null || pip install --user poetry-plugin-export
+poetry config virtualenvs.create false
+poetry config installer.max-workers 10
+
+# Project deps — pip skips packages already satisfied by the base image.
+# `poetry export` fails fast when poetry.lock is out of sync with pyproject.toml;
+# its stderr is the actionable error in that case ("Run `poetry lock` to fix").
+cd /workspace
+poetry export --only main --without-hashes | grep -v "^torch==" > /tmp/requirements.txt
+pip install --user -r /tmp/requirements.txt
+
+# Install project in editable mode
+pip install --user -e . --no-deps
+
+# flash-attn imports torch during its setup.py, so PEP 517 build isolation
+# (the default) would pull a *different* torch into the build venv and
+# compile against ABI it doesn't actually have. --no-build-isolation makes
+# it build against the runpod image's torch + CUDA, which is what training
+# loads. Required by configs/training/production.yaml's
+# attn_implementation=flash_attention_2 — without flash-attn the model load
+# falls back to sdpa with a warning.
+pip install --user flash-attn --no-build-isolation --quiet
+
+# causal-conv1d is the CUDA kernel for the depthwise causal conv inside
+# Qwen3.5's linear-attention layers (three of every four layers). Without it
+# transformers logs `causal_conv1d_fn` / `causal_conv1d_update` falling back to
+# a reference implementation it calls "correct but much slower".
+#
+# This package IS the fast path: Hub kernels are not requested (see
+# _load_language_model in tiny_audio/asr_modeling.py), so transformers'
+# resolution order Hub -> package -> torch starts at the package. A failed
+# build here means the reference path for the whole run.
+#
+# Installed here rather than as a project dependency for two reasons. It only
+# publishes an sdist, so it compiles against nvcc and torch at install time and
+# needs --no-build-isolation for the same reason flash-attn above does. And the
+# `poetry export --only main` line further up would skip an optional group
+# anyway — the pyproject `hybrid-kernels` group exists for local pods, but the
+# bootstrap path is this script.
+#
+# Non-fatal: the fallback is numerically correct, so an image without nvcc
+# should train slower rather than fail to deploy.
+#
+# ninja/packaging are declared build deps of the sdist, and --no-build-isolation
+# means pip will not fetch them itself — without ninja the compile silently
+# drops to a single-threaded path that takes far longer.
+pip install --user ninja packaging --quiet
+pip install --user causal-conv1d --no-build-isolation --quiet \
+  || echo "WARN: causal-conv1d build failed; Qwen3.5 conv falls back to the slower reference path"
+
+# flash-linear-attention is the fast path for the gated delta rule in those
+# same layers (Hub kernels are not requested, so this package is what
+# transformers picks first). It is only safe when paired with tilelang.
+# On Hopper with
+# Triton >=3.4.0 and <3.7.1 fla's Triton kernel for gated chunk_bwd_dqkwg is
+# known-wrong (fla-org#640), so fla raises instead of producing bad gradients.
+# Its TileLang backend is auto-enabled on exactly that combination but needs
+# both the tilelang package and a usable nvcc; without them dispatch falls
+# through to the Triton path and training dies at the first backward.
+#
+# So: install tilelang first (prebuilt manylinux wheel, no compile), then fla,
+# then ask fla's own predicates whether the gated path would raise. If it
+# would, remove fla so transformers uses its reference kernels -- slower, but
+# correct and it actually runs. Verifying here means a bad combination fails at
+# deploy time instead of twenty minutes into training.
+pip install --user tilelang --quiet || echo "WARN: tilelang install failed"
+pip install --user flash-linear-attention --quiet \
+|| echo "WARN: flash-linear-attention install failed"
+python - <<'FLA_CHECK' || pip uninstall -y flash-linear-attention fla-core >/dev/null 2>&1
+import sys
+try:
+    from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0, TRITON_ABOVE_3_7_1
+    from fla.ops.common.backends.tilelang import TileLangBackend
+except Exception as e:
+    print(f"fla not importable ({type(e).__name__}); nothing to verify")
+    sys.exit(0)
+broken_triton = IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0 and not TRITON_ABOVE_3_7_1
+if not broken_triton:
+    print("fla: Triton gated path OK on this GPU/Triton combination")
+    sys.exit(0)
+if TileLangBackend.is_available() and TileLangBackend.is_enabled():
+    print("fla: Hopper + broken Triton, but TileLang backend is active")
+    sys.exit(0)
+print(
+    "fla: Hopper with Triton in the broken range and no usable TileLang backend "
+    "-- removing flash-linear-attention so training uses the reference kernels"
+)
+sys.exit(1)
+FLA_CHECK
+
+# liger-kernel provides the fused linear cross-entropy used by
+# apply_liger_kernel_to_qwen3() in scripts/train.py. poetry export already
+# pulls it on linux, but reinstall defensively in case the editable
+# project install ordering above left it behind.
+pip install --user --upgrade liger-kernel --quiet
+
+# Pre-fetch the NLTK punkt tokenizer used by truecase in scripts/labels.py's
+# label normalizer. NLTK 3.9+ uses `punkt_tab` (new data package format);
+# older NLTKs use `punkt`. Download both so the code works regardless of
+# which NLTK version the base image ships. Doing the download here (during
+# install) avoids multi-worker race on the cache path at first training step.
+python -c "import nltk; nltk.download('punkt_tab', quiet=True); nltk.download('punkt', quiet=True)"
+
+# Verify torch is available (from base image) — we never pin or replace torch.
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+
+# Verify the user-site install actually landed where `ta` will look.
+# `/root/.local/bin/ta` is a generated console script with a shebang pinned
+# to the python pip used; if its interpreter can't import typer, then
+# pip --user installed to a different python's user-site than the one ta
+# runs under (e.g., python3.10 vs python3.11 in the base image), and
+# every subsequent `ta dev <cmd>` will fail with `ModuleNotFoundError`.
+TA_PYTHON=$(head -1 /root/.local/bin/ta | sed 's|^#!||')
+if ! "$TA_PYTHON" -c "import typer, hydra, omegaconf, datasets, transformers, truecase, ftfy" \
+2>/tmp/tiny_audio_import_check.err; then
+    echo "ERROR: deps did not install into the python that /root/.local/bin/ta uses." >&2
+    echo "  ta interpreter: $TA_PYTHON" >&2
+    echo "  pip used:        $(which pip) ($(pip --version))" >&2
+    echo "  python --user site: $(python -m site --user-site)" >&2
+    echo "  ta-python --user site: $("$TA_PYTHON" -m site --user-site 2>&1)" >&2
+    cat /tmp/tiny_audio_import_check.err >&2
+    exit 1
+fi
+echo "Dependencies verified for $TA_PYTHON"
+"""
+)

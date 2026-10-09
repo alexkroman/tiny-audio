@@ -88,6 +88,8 @@ def test_every_subcommand_is_reachable() -> None:
         "runpod",
         "debug",
         "demo",
+        "serve",
+        "bench",
         "dev",
     }
 
@@ -133,7 +135,7 @@ def test_long_flags_keep_the_same_short_alias_everywhere() -> None:
 
 
 def test_runpod_pod_commands_take_host_and_port_first() -> None:
-    pod_commands = {"deploy", "train", "attach", "eval", "checkpoint"}
+    pod_commands = {"deploy", "train", "attach", "eval", "serve", "checkpoint"}
     for path, command in _LEAVES:
         if path[0] == "runpod" and path[1] in pod_commands:
             names = [a.name for a in _arguments(command)][:2]

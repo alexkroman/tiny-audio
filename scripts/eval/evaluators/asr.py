@@ -12,6 +12,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Unpack, cast
 
 import assemblyai as aai
+import httpx
 import numpy as np
 import torch
 from assemblyai.streaming.v3 import (
@@ -25,15 +26,13 @@ from assemblyai.streaming.v3 import (
     TurnEvent,
 )
 from deepgram import DeepgramClient, ListenV1Response
-from huggingface_hub import InferenceClient
-from peft import PeftModel
-from peft.tuners.tuners_utils import BaseTuner
 from rich.table import Table
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential_jitter
 from transformers import TextIteratorStreamer, pipeline
 
 from scripts.eval.audio import as_16k_array, is_str_dict, prepare_wav_bytes
 from scripts.eval.speaker_metrics import serialize_turns
+from scripts.inference import merge_lora_adapters
 from tiny_audio.asr_attention import resolve_attn_implementation
 from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
@@ -52,8 +51,6 @@ from .base import (
 if TYPE_CHECKING:
     from elevenlabs import SpeechToTextChunkResponseModel
     from elevenlabs.client import ElevenLabs
-
-    from tiny_audio.asr_types import GenerativeDecoder
 
     _ELEVENLABS_AVAILABLE: bool
 else:
@@ -192,48 +189,6 @@ def _module_eval(module: torch.nn.Module) -> None:
     module.eval()
 
 
-def _merge_lora_adapters(model: ASRModel) -> bool:
-    """Fold LoRA adapters into the base weights for inference. Returns whether it ran.
-
-    `ASRModel.from_pretrained` wraps the decoder in a live `PeftModel` and
-    nothing ever unwrapped it, so eval decoded through the adapters as separate
-    modules: two extra matmuls per adapted linear per token, and peft builds
-    adapter weights in fp32 regardless of the base dtype, so those matmuls ran
-    fp32 against a bf16 base. granite_qwen_frozen adapts six projections per
-    layer -- mlp gate/up/down and linear_attn in_proj_qkv/in_proj_z/out_proj --
-    which is 67.3M fp32 params and tens of thousands of extra Metal dispatches
-    over a 64-token decode.
-
-    Merging is a pure win on a decode loop that is launch- and
-    bandwidth-bound, and it is not MPS-specific. Measured on an M-series Mac
-    (granite-qwen-frozen, bf16, 10s audio, 64 tokens, batch 1, sdpa):
-    20.6 -> 36.7 tok/s, a 78% gain.
-
-    NOT bit-exact: the fp32 `B @ A` product is rounded into bf16 base weights,
-    where holding the adapters separate kept the correction in fp32 until the
-    residual add. Bounded rather than assumed -- paired against the unmerged
-    path on 30 librispeech samples (with `_use_sdpa_where_safe`, which has the
-    same exposure), all 30 predictions came back byte-identical, WER matched at
-    1.5986, and the only metric that moved at all was mean top1/top2 margin,
-    5.8474 -> 5.8466. Nothing came close to flipping a token. A larger paired
-    run is still the right check before a sub-noise WER delta is reported as
-    real.
-
-    Inference only. Training must keep the adapters live -- they are the only
-    thing with gradients -- so this belongs in the eval loader and nowhere in
-    `asr_modeling`. `config.use_lora` is read only during load, so unwrapping
-    afterwards is invisible to the rest of the stack.
-    """
-    language_model = model.language_model
-    if not isinstance(language_model, PeftModel):
-        return False
-    # A LoRA PeftModel's base_model is its tuner; PeftModel's __getattr__
-    # forwards merge_and_unload there, so call it on the tuner directly.
-    merged = cast(BaseTuner, language_model.base_model).merge_and_unload()
-    model.language_model = cast("GenerativeDecoder", merged)
-    return True
-
-
 def _use_sdpa_where_safe(model: ASRModel) -> None:
     """Re-apply the MPS attention policy after load, overriding the checkpoint's copy.
 
@@ -251,7 +206,7 @@ def _use_sdpa_where_safe(model: ASRModel) -> None:
     So the fix shipped and was unreachable. `ta eval` on a Mac printed
     `decoder attn: eager` against Qwen3.5-2B, which declares
     `sliding_window: None` and cannot hit the Metal correctness bug that
-    coercion exists for. Cost, same setup as `_merge_lora_adapters`:
+    coercion exists for. Cost, same setup as `merge_lora_adapters`:
     15.8 tok/s eager vs 20.6 tok/s sdpa. Together the two take `ta eval`
     on librispeech from 1.63 to 1.05 s/sample at identical WER.
 
@@ -298,7 +253,7 @@ def _build_local_pipeline(model_path: str, *, local_code: bool = False) -> ASRPi
                 model_kwargs=dict.fromkeys(DTYPE_CONFIG_FIELDS, model_dtype),
             ),
         )
-    merged = _merge_lora_adapters(pipe.model)
+    merged = merge_lora_adapters(pipe.model)
     _use_sdpa_where_safe(pipe.model)
     # Which code ran, and which attention kernel, are both part of what the WER
     # means -- so they are logged next to the device rather than left to infer.
@@ -504,22 +459,33 @@ class LocalStreamingEvaluator(Evaluator):
 
 
 class EndpointEvaluator(Evaluator):
-    """Evaluator for HuggingFace Inference Endpoints."""
+    """Evaluator for a running `ta serve` server (scripts/serve.py), e.g. on RunPod.
+
+    Sends each clip as raw WAV bytes; `TINY_AUDIO_API_KEY`, if set, is sent as
+    the bearer key. `-w N` keeps N requests in flight, which the server
+    batches together on the GPU.
+    """
 
     def __init__(self, endpoint_url: str, **kwargs: Unpack[EvaluatorOptions]) -> None:
         super().__init__(**kwargs)
-        self.client = InferenceClient(base_url=endpoint_url)
+        self.url = endpoint_url
+        api_key = os.environ.get("TINY_AUDIO_API_KEY")
+        self.headers = {"content-type": "audio/wav"}
+        if api_key:
+            self.headers["authorization"] = f"Bearer {api_key}"
 
     def transcribe(self, audio: object) -> Transcription:
         wav_bytes = prepare_wav_bytes(audio)
 
         start = time.time()
-        result = self.client.automatic_speech_recognition(wav_bytes)
+        # trust_env=False: straight to the server, past any local HTTPS_PROXY
+        # (e.g. Aikido safe-chain), which drops tunnels under `-w` concurrency.
+        response = httpx.post(
+            self.url, content=wav_bytes, headers=self.headers, timeout=600, trust_env=False
+        )
         elapsed = time.time() - start
-
-        # The output is a dict subclass holding the endpoint's raw JSON fields;
-        # an endpoint that answers with `transcription` leaves `.text` unset.
-        text: str = result.text if "text" in result else result.get("transcription", "")
+        response.raise_for_status()
+        text: str = response.json().get("text", "")
         return text, elapsed, None
 
 

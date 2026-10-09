@@ -7,21 +7,25 @@ are in test_eval_audio.py to avoid duplication.
 import types
 from collections.abc import Callable
 from pathlib import Path
-from typing import TypedDict, cast
+from typing import Any, TypedDict, cast
 
+import httpx
+import numpy as np
 import pytest
 import torch
 import torch.nn as nn
 from peft import LoraConfig, PeftModel, get_peft_model
 from transformers import PretrainedConfig, PreTrainedModel
 
+from scripts.eval.cli import _build_tiny_audio_evaluator
 from scripts.eval.evaluators.asr import (
     DTYPE_CONFIG_FIELDS,
     AssemblyAIStreamingEvaluator,
-    _merge_lora_adapters,
+    EndpointEvaluator,
     _resolve_local_runtime,
     _use_sdpa_where_safe,
 )
+from scripts.inference import merge_lora_adapters
 from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
 
@@ -168,14 +172,14 @@ class TestMergeLoraAdapters:
 
     def test_merges_and_unwraps_a_peft_decoder(self) -> None:
         holder = self._peft_holder()
-        assert _merge_lora_adapters(cast(ASRModel, holder)) is True
+        assert merge_lora_adapters(cast(ASRModel, holder)) is True
         assert not isinstance(holder.language_model, PeftModel)
 
     def test_is_a_noop_without_lora(self) -> None:
         holder = types.SimpleNamespace(language_model=nn.Linear(4, 4))
         original = holder.language_model
 
-        assert _merge_lora_adapters(cast(ASRModel, holder)) is False
+        assert merge_lora_adapters(cast(ASRModel, holder)) is False
         assert holder.language_model is original
 
 
@@ -320,3 +324,35 @@ class TestStreamingRetry:
         with pytest.raises(RuntimeError, match="closed with 4029"):
             evaluator.transcribe(object())
         assert len(calls) == AssemblyAIStreamingEvaluator._MAX_RETRIES + 1
+
+
+def test_endpoint_evaluator_gets_num_workers() -> None:
+    """`ta eval --endpoint -w N` keeps N requests in flight for the server to batch."""
+    _, evaluator = _build_tiny_audio_evaluator(
+        model="https://pod-8000.proxy.runpod.net",
+        endpoint=True,
+        streaming=False,
+        num_workers=48,
+        user_prompt=None,
+        local_code=False,
+    )
+    assert evaluator.num_workers == 48
+
+
+def test_endpoint_evaluator_bypasses_local_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Requests go straight to the server, never through a local HTTPS_PROXY."""
+    seen: dict[str, Any] = {}
+
+    def fake_post(url: str, **kwargs: Any) -> httpx.Response:
+        seen.update(url=url, **kwargs)
+        return httpx.Response(200, json={"text": "hello"}, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setenv("TINY_AUDIO_API_KEY", "k")
+    evaluator = EndpointEvaluator(endpoint_url="https://pod-8000.proxy.runpod.net")
+    text, _, _ = evaluator.transcribe(
+        {"array": np.zeros(1600, dtype=np.float32), "sampling_rate": 16000}
+    )
+    assert text == "hello"
+    assert seen["trust_env"] is False
+    assert seen["headers"]["authorization"] == "Bearer k"

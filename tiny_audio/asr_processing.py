@@ -22,7 +22,7 @@ if TYPE_CHECKING:
         ConvLayerSpec,
         compute_encoder_output_length,
     )
-    from .asr_types import AudioFeatureExtractor, AudioInput, Waveform
+    from .asr_types import AudioFeatureExtractor, AudioInput, PreparedChunk, Waveform
     from .projectors import MLPAudioProjector
 else:
     try:
@@ -32,7 +32,7 @@ else:
             ConvLayerSpec,
             compute_encoder_output_length,
         )
-        from .asr_types import AudioInput
+        from .asr_types import AudioInput, PreparedChunk
     except ImportError:  # flat layout on the Hub: sibling modules, no package
         from asr_config import (
             DEFAULT_ENCODER_CONV_LAYERS,
@@ -40,7 +40,29 @@ else:
             ConvLayerSpec,
             compute_encoder_output_length,
         )
-        from asr_types import AudioInput
+        from asr_types import AudioInput, PreparedChunk
+
+
+def collate_chunks(prepared: Sequence[PreparedChunk]) -> PreparedChunk:
+    """Pad prepared chunks to the longest and stack them into one batch.
+
+    The time axis is whichever feature axis matches the mask's length (Granite's
+    features are `(1, T, D)`, Whisper's `(1, D, T)`); padded frames are zeros
+    with a 0 in the mask, which the encoder honours (`encoder_attention_mask`).
+    """
+    longest = max(int(p["attention_mask"].shape[-1]) for p in prepared)
+    features: list[torch.Tensor] = []
+    masks: list[torch.Tensor] = []
+    for p in prepared:
+        feats, mask = p["input_features"], p["attention_mask"]
+        length = int(mask.shape[-1])
+        time_axis = 1 if feats.shape[1] == length else feats.dim() - 1
+        pad = longest - length
+        # F.pad lists (left, right) pairs from the LAST axis backwards.
+        spec = [0, 0] * (feats.dim() - 1 - time_axis) + [0, pad]
+        features.append(torch.nn.functional.pad(feats, spec))
+        masks.append(torch.nn.functional.pad(mask, (0, pad)))
+    return {"input_features": torch.cat(features), "attention_mask": torch.cat(masks)}
 
 
 # The instruction the model trained on (scripts/train_collator.py); the model

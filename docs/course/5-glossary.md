@@ -168,8 +168,8 @@ overridable from the command line with `key=value`.
 
 **Hugging Face Space** A hosted web app. `ta deploy` uploads the `demo/` directory to one.
 
-**Inference Endpoints** Hugging Face's paid, dedicated model hosting. The repo's `handler.py` makes
-Tiny Audio models deployable there.
+**`ta serve`** The repo's batched HTTP inference server. It batches audio chunks from concurrent
+requests on the GPU; `ta runpod serve` runs it on a RunPod pod.
 
 **Gradio** The Python library behind the demo UI.
 

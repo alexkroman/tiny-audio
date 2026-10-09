@@ -101,12 +101,17 @@ def print_corpus_cis(
     )
 
 
-def _collect(models: list[str], output_dir: Path, exclude: list[str] | None):
+def _collect(
+    models: list[str],
+    output_dir: Path,
+    exclude: list[str] | None,
+    exclude_datasets: list[str] | None = None,
+):
     """Each model's newest sweep, exiting when a model has none."""
     model_metrics: dict[str, ModelMetrics] = {}
     for model in models:
         console.print(f"Collecting metrics for '{model}'...")
-        model_metrics[model] = collect_model_metrics(model, output_dir, exclude)
+        model_metrics[model] = collect_model_metrics(model, output_dir, exclude, exclude_datasets)
 
     # Every model must have contributed a sweep, or the table has nothing
     # coherent to show. Runs predating Run IDs are excluded by latest_sweep.
@@ -167,9 +172,16 @@ def compare(
     models: Annotated[list[str], typer.Argument(help=f"{MODEL_ARG_HELP}s to compare")],
     output_dir: OutputDirOption = Path("outputs"),
     exclude: ExcludeOption = None,
+    exclude_datasets: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--exclude-dataset",
+            help="Dataset to leave out, before each model's newest sweep is picked (repeatable)",
+        ),
+    ] = None,
 ) -> None:
     """Generate comprehensive comparison tables for multiple models."""
-    model_metrics = _collect(models, output_dir, exclude)
+    model_metrics = _collect(models, output_dir, exclude, exclude_datasets)
     _pair_rows(model_metrics)
     datasets = tables.ordered_datasets(model_metrics)
     coverage = _coverage(next(iter(model_metrics.values())), len(datasets))

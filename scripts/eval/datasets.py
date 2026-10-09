@@ -1,12 +1,18 @@
 """Dataset configuration and loading for ASR evaluation."""
 
+import shutil
+import tempfile
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import cast
+from pathlib import Path
+from typing import Any, cast
 
 from datasets import (
     Audio,
+    Dataset,
     IterableDataset,
     load_dataset,
+    load_from_disk,
 )
 
 
@@ -153,6 +159,7 @@ def load_eval_dataset(
     split: str,
     config_override: str | None = None,
     shuffle: bool = True,
+    decode_audio: bool = True,
 ) -> IterableDataset:
     """Load any dataset by name with unified interface.
 
@@ -160,6 +167,8 @@ def load_eval_dataset(
         shuffle: Draw from a fixed-seed shuffle buffer instead of taking rows in
             corpus order. On by default — see SHUFFLE_BUFFER_SIZE for why. Pass
             False only to reproduce a pre-2026-09-18 first-N number.
+        decode_audio: False leaves audio as its encoded `{"bytes", "path"}`
+            (what `CachedSamples` stores); row selection is the same either way.
     """
     if name not in DATASET_REGISTRY:
         msg = f"Unknown dataset: {name}. Available: {list(DATASET_REGISTRY.keys())}"
@@ -179,7 +188,81 @@ def load_eval_dataset(
             else load_dataset(cfg.path, split=split, streaming=True)
         ),
     )
-    ds = ds.cast_column(cfg.audio_field, Audio(sampling_rate=16000))
+    ds = ds.cast_column(cfg.audio_field, Audio(sampling_rate=16000, decode=decode_audio))
     if shuffle:
         ds = ds.shuffle(seed=SHUFFLE_SEED, buffer_size=SHUFFLE_BUFFER_SIZE)
     return ds
+
+
+# Where `CachedSamples` keeps the rows each eval stream has yielded (gitignored).
+SAMPLE_CACHE_DIR = Path(__file__).resolve().parents[2] / "datasets_cache" / "eval_samples"
+
+
+class CachedSamples:
+    """An eval stream that saves the rows it yields, so the next run reads them from disk.
+
+    The shuffle seed fixes which rows a run draws, but every run still streamed
+    them from the Hub, and the shuffle buffer reads SHUFFLE_BUFFER_SIZE rows of
+    audio before yielding the first -- 12 datasets of that per `-d all` run,
+    identical each time. This records each row as it is read, in its original
+    encoded form, and on the next run replays those rows first, decoded by the
+    same `Audio(sampling_rate=16000)` feature the stream uses, so the samples
+    and their audio are identical. Rows past the cached prefix stream as
+    before (`skip` past the prefix) and extend the cache.
+
+    The cache is keyed by dataset, config, split and shuffle settings; delete
+    SAMPLE_CACHE_DIR to pick up an upstream dataset change.
+    """
+
+    def __init__(self, raw: IterableDataset, audio_field: str, cache_dir: Path) -> None:
+        self.raw = raw
+        self.audio_field = audio_field
+        self.cache_dir = cache_dir
+        self.decoder = Audio(sampling_rate=16000)
+
+    def _cached_rows(self) -> list[dict[str, Any]]:
+        if not self.cache_dir.exists():
+            return []
+        rows = cast(
+            "list[dict[str, Any]]", list(cast(Dataset, load_from_disk(str(self.cache_dir))))
+        )
+        print(f"  {len(rows)} samples cached at {self.cache_dir}")
+        return rows
+
+    def _save(self, rows: list[dict[str, Any]]) -> None:
+        self.cache_dir.parent.mkdir(parents=True, exist_ok=True)
+        # Write beside the target, then swap in, so a concurrent reader never
+        # sees a half-written cache.
+        staging = Path(tempfile.mkdtemp(dir=self.cache_dir.parent))
+        Dataset.from_list(rows, features=self.raw.features).save_to_disk(str(staging / "rows"))
+        shutil.rmtree(self.cache_dir, ignore_errors=True)
+        (staging / "rows").rename(self.cache_dir)
+        shutil.rmtree(staging, ignore_errors=True)
+
+    def _decoded(self, row: dict[str, Any]) -> dict[str, Any]:
+        return {**row, self.audio_field: self.decoder.decode_example(row[self.audio_field])}
+
+    def __iter__(self) -> Iterator[dict[str, Any]]:
+        cached = self._cached_rows()
+        new: list[dict[str, Any]] = []
+        try:
+            for row in cached:
+                yield self._decoded(row)
+            for row in self.raw.skip(len(cached)):
+                new.append(row)
+                yield self._decoded(row)
+        finally:
+            # Runs when the evaluator stops reading (it breaks at max_samples).
+            if new:
+                self._save(cached + new)
+
+
+def load_eval_samples(name: str, split: str, config_override: str | None = None) -> CachedSamples:
+    """`load_eval_dataset`, shuffled, with its drawn rows cached on disk (`CachedSamples`)."""
+    cfg = DATASET_REGISTRY[name]
+    config = config_override or cfg.config
+    key = "--".join(
+        [name, config or "default", split, f"seed{SHUFFLE_SEED}", f"buf{SHUFFLE_BUFFER_SIZE}"]
+    )
+    raw = load_eval_dataset(name, split, config_override, decode_audio=False)
+    return CachedSamples(raw, cfg.audio_field, SAMPLE_CACHE_DIR / key)
