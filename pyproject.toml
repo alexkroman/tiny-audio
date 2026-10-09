@@ -348,7 +348,8 @@ flash-linear-attention = ["fla"]
 [tool.deptry.per_rule_ignores]
 # Flat-layout fallbacks: on the Hub, tiny_audio's files load as sibling modules.
 # `spaces` is provided by the Hugging Face Spaces runtime (demo/requirements.txt).
-# `triton` ships inside torch's Linux CUDA wheels (scripts/inference.py imports it).
+# `triton` ships inside torch's Linux CUDA wheels (scripts/inference.py imports it):
+# missing (DEP001) where torch has no CUDA build, transitive (DEP003) where it does.
 DEP001 = [
   "alignment",
   "asr_config",
@@ -360,6 +361,7 @@ DEP001 = [
   "spaces",
   "triton",
 ]
+DEP003 = ["triton"]
 # Optional vendor SDK for `ta eval -m elevenlabs`, imported lazily; dev-only on purpose.
 # `fla` is the optional Linux fast path that `ta runpod deploy` installs for `ta serve`.
 DEP004 = ["elevenlabs", "fla"]
