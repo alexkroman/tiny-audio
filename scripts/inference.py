@@ -18,7 +18,8 @@ from transformers.masking_utils import sdpa_mask
 
 from tiny_audio.alignment import QwenForcedAligner
 from tiny_audio.asr_modeling import ASRModel
-from tiny_audio.asr_pipeline import CHUNK_MAX_S, ASRPipeline, PreparedChunk, collate_chunks
+from tiny_audio.asr_pipeline import ASRPipeline, PreparedChunk, collate_chunks
+from tiny_audio.asr_processing import CHUNK_MAX_S
 from tiny_audio.diarization import NemotronDiarizer
 
 if TYPE_CHECKING:

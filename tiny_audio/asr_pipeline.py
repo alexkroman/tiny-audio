@@ -16,22 +16,40 @@ if TYPE_CHECKING:
 
     from .alignment import QwenForcedAligner
     from .asr_modeling import ASRModel
-    from .asr_processing import collate_chunks, prepend_lead_in
+    from .asr_processing import (
+        audible_chunks,
+        chunk_bounds,
+        collate_chunks,
+        is_silent,
+        prepend_lead_in,
+    )
     from .asr_types import PreparedChunk
-    from .diarization import NemotronDiarizer, StreamChunk, masked_audio, pack_spans
+    from .diarization import NemotronDiarizer, StreamChunk, masked_audio, stream_chunks
 else:
     try:
         from .alignment import QwenForcedAligner
         from .asr_modeling import ASRModel
-        from .asr_processing import collate_chunks, prepend_lead_in
+        from .asr_processing import (
+            audible_chunks,
+            chunk_bounds,
+            collate_chunks,
+            is_silent,
+            prepend_lead_in,
+        )
         from .asr_types import PreparedChunk
-        from .diarization import NemotronDiarizer, StreamChunk, masked_audio, pack_spans
+        from .diarization import NemotronDiarizer, StreamChunk, masked_audio, stream_chunks
     except ImportError:  # flat layout on the Hub: sibling modules, no package
         from alignment import QwenForcedAligner
         from asr_modeling import ASRModel
-        from asr_processing import collate_chunks, prepend_lead_in
+        from asr_processing import (
+            audible_chunks,
+            chunk_bounds,
+            collate_chunks,
+            is_silent,
+            prepend_lead_in,
+        )
         from asr_types import PreparedChunk
-        from diarization import NemotronDiarizer, StreamChunk, masked_audio, pack_spans
+        from diarization import NemotronDiarizer, StreamChunk, masked_audio, stream_chunks
 
 # Re-export for backwards compatibility
 __all__ = [
@@ -42,65 +60,13 @@ __all__ = [
     "collate_chunks",
 ]
 
-# Audio is transcribed in chunks cut at the quietest point between
-# these lengths. The model trained on clips of at most 19 s; 18 leaves room for
-# the inference lead-in. Short clips are one chunk, so their text is unchanged.
-CHUNK_MAX_S = 18.0
-CHUNK_MIN_S = 8.0
-
-
-def chunk_bounds(
-    audio: npt.NDArray[np.float32],
-    sample_rate: int,
-    max_s: float = CHUNK_MAX_S,
-    min_s: float = CHUNK_MIN_S,
-) -> list[tuple[int, int]]:
-    """Sample ranges of at most `max_s`, each cut at the quietest 100 ms frame after `min_s`."""
-    frame = int(0.1 * sample_rate)
-    bounds: list[tuple[int, int]] = []
-    start, n = 0, len(audio)
-    while n - start > max_s * sample_rate:
-        lo = start + int(min_s * sample_rate)
-        hi = start + int(max_s * sample_rate)
-        k = (hi - lo) // frame
-        rms = np.sqrt(np.mean(np.square(audio[lo : lo + k * frame].reshape(k, frame)), axis=1))
-        cut = lo + int(np.argmin(rms)) * frame + frame // 2
-        bounds.append((start, cut))
-        start = cut
-    bounds.append((start, n))
-    return bounds
-
-
-def stream_chunks(
-    audio: npt.NDArray[np.float32],
-    spans: list[tuple[int, int]],
-    sample_rate: int,
-    max_s: float = CHUNK_MAX_S,
-) -> list[tuple[int, int]]:
-    """Ranges of at most `max_s` over one speaker's `spans`; long turns cut by `chunk_bounds`."""
-    pieces: list[tuple[int, int]] = []
-    for s, e in spans:
-        pieces.extend((s + a, s + b) for a, b in chunk_bounds(audio[s:e], sample_rate, max_s))
-    return pack_spans(pieces, int(max_s * sample_rate))
-
-
-# Below this RMS (-100 dBFS) a chunk is digital silence: exact zeros, as in
-# edited or remixed recordings. Given one, the model answers with a memorized
-# training sentence ("The film was directed by the same director who directed
-# 'The Man with the Moustache'") -- ten such chunks cost 2.3 WER on one AMI
-# meeting -- so it is skipped. Quiet real speech sits near -60 dBFS.
-SILENCE_RMS = 1e-5
-
-
-def is_silent(audio: npt.NDArray[np.float32]) -> bool:
-    """True for digital silence (or an empty array): nothing for the model to hear."""
-    return audio.size == 0 or float(np.sqrt(np.mean(np.square(audio)))) < SILENCE_RMS
-
 
 _THINK_TAG_RE = re.compile(r"<think>.*?</think>\s*", flags=re.DOTALL)
 _MIN_REPEATS = 3
+_LOOSE_MIN_REPEATS = 6
 _TRAILING_CHAR_RE = re.compile(rf"(.)\1{{{_MIN_REPEATS - 1},}}$")
 _TRAILING_WORD_RE = re.compile(rf"\b(\w+)(?:\s+\1){{{_MIN_REPEATS - 1},}}\s*$", re.IGNORECASE)
+_NON_WORD_RE = re.compile(r"\W+")
 
 
 class _RawAudio(TypedDict):
@@ -282,7 +248,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
 
         bounds = chunk_bounds(array, sr)
         if not kwargs:
-            texts = self._transcribe_chunks([array[s:e] for s, e in bounds], sr)
+            texts = self._transcribe_chunks(audible_chunks(array, bounds, sr), sr)
             return {"text": " ".join(t for t in texts if t)}
         # Generate kwargs (e.g. output_scores for eval confidence) need a
         # one-chunk batch: `_forward` refuses per-item scores for more.
@@ -290,8 +256,8 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             return self._transcribe_chunk(array, sr, **kwargs)
         result: dict[str, Any] = {}
         texts: list[str] = []
-        for s, e in bounds:
-            out = self._transcribe_chunk(array[s:e], sr, **kwargs)
+        for chunk in audible_chunks(array, bounds, sr):
+            out = self._transcribe_chunk(chunk, sr, **kwargs)
             texts.append(out["text"])
             # Per-step logprobs (output_scores=True) run on across chunks.
             for key in ("top1_logprob", "top2_logprob"):
@@ -397,7 +363,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
     ) -> dict[str, Any]:
         """`{"text", "words"}` for the whole recording: chunk, transcribe, align, offset."""
         bounds = chunk_bounds(array, sr)
-        texts = self._transcribe_chunks([array[s:e] for s, e in bounds], sr, **kwargs)
+        texts = self._transcribe_chunks(audible_chunks(array, bounds, sr), sr, **kwargs)
         result: dict[str, Any] = {"text": " ".join(t for t in texts if t)}
 
         try:
@@ -725,6 +691,11 @@ def _truncate_repetitions(text: str) -> str:
     - Repeated phrases: "i am sorry i am sorry i am sorry" -> "i am sorry"
     - Repeated characters: "444444" -> "4"
 
+    Words match ignoring case. A run of `_LOOSE_MIN_REPEATS` also matches
+    ignoring punctuation, since the model punctuates inside a loop ("Yeah Yeah
+    Yeah. Yeah. Yeah,"); shorter punctuated runs are real speech ("No, no,
+    no,"), and collapsing those cost 40 errors over 47 rows of the served eval.
+
     Args:
         text: Input text to process
 
@@ -748,7 +719,7 @@ def _truncate_repetitions(text: str) -> str:
     # to be possible. set(window) == window means all unique → no repetition.
     window = words[-_MIN_REPEATS * 2 :]
     if len(set(window)) == len(window):
-        return text
+        return _truncate_punctuated_loop(text)
 
     for phrase_len in range(2, min(21, len(words) // _MIN_REPEATS + 1)):
         phrase_escaped = re.escape(" ".join(words[-phrase_len:]))
@@ -761,4 +732,20 @@ def _truncate_repetitions(text: str) -> str:
             text = (match.group(1) + match.group(2)).strip()
             break
 
+    return _truncate_punctuated_loop(text)
+
+
+def _truncate_punctuated_loop(text: str) -> str:
+    """Collapse a trailing 1-20 word phrase run `_LOOSE_MIN_REPEATS`+ times, punctuation ignored."""
+    words = text.split()
+    keys = [_NON_WORD_RE.sub("", w).lower() for w in words]
+    end = len(words)
+    # Shortest phrase first, so "Yeah Yeah. Yeah," stops at "Yeah".
+    for n in range(1, min(21, end // _LOOSE_MIN_REPEATS + 1)):
+        phrase = keys[end - n : end]
+        reps = 1
+        while end - (reps + 1) * n >= 0 and keys[end - (reps + 1) * n : end - reps * n] == phrase:
+            reps += 1
+        if reps >= _LOOSE_MIN_REPEATS:
+            return " ".join(words[: end - (reps - 1) * n])
     return text

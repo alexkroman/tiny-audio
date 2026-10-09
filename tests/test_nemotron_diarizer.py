@@ -6,7 +6,7 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 
-from tiny_audio.asr_pipeline import chunk_bounds
+from tiny_audio.asr_processing import audible_chunks, chunk_bounds, is_silent
 from tiny_audio.diarization import NemotronDiarizer
 
 
@@ -55,3 +55,31 @@ class TestChunkBounds:
         assert all(a[1] == b[0] for a, b in pairwise(bounds))
         assert all((e - s) / 16000 <= 18.0 for s, e in bounds)
         assert all((e - s) / 16000 >= 8.0 for s, e in bounds[:-1])
+
+
+class TestAudibleChunks:
+    """Room-tone tails after the talker stops are emptied rather than decoded."""
+
+    sr = 16000
+
+    def speech_then_tail(self, tail_level: float) -> npt.NDArray[np.float32]:
+        rng = np.random.default_rng(0)
+        speech = rng.normal(0, 0.1, 15 * self.sr)
+        tail = rng.normal(0, tail_level, 6 * self.sr)
+        return np.concatenate([speech, tail]).astype(np.float32)
+
+    def test_room_tone_tail_is_emptied(self) -> None:
+        audio = self.speech_then_tail(0.002)  # -34 dB under the speech
+        chunks = audible_chunks(audio, [(0, 15 * self.sr), (15 * self.sr, len(audio))], self.sr)
+        assert len(chunks[0]) == 15 * self.sr
+        assert is_silent(chunks[1])
+
+    def test_quiet_word_in_tail_is_kept(self) -> None:
+        audio = self.speech_then_tail(0.002)
+        audio[17 * self.sr : int(17.3 * self.sr)] *= 15  # a word 10 dB under the speech
+        chunks = audible_chunks(audio, [(0, 15 * self.sr), (15 * self.sr, len(audio))], self.sr)
+        assert len(chunks[1]) == 6 * self.sr
+
+    def test_single_chunk_is_never_emptied(self) -> None:
+        audio = np.full(5 * self.sr, 1e-4, np.float32)
+        assert len(audible_chunks(audio, [(0, len(audio))], self.sr)[0]) == len(audio)

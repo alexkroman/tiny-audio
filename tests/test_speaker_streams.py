@@ -18,9 +18,8 @@ from tiny_audio.asr_pipeline import (
     ASRPipeline,
     NemotronDiarizer,
     QwenForcedAligner,
-    stream_chunks,
 )
-from tiny_audio.diarization import masked_audio
+from tiny_audio.diarization import masked_audio, stream_chunks
 
 SR = 16000
 
