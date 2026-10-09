@@ -58,25 +58,26 @@ the model writes punctuation, capitalization, and numbers itself.
 
 ## Benchmarks
 
-Word error rate (%, lower is better) on 1,000 samples per dataset, scored with the
+Word error rate (%, lower is better) on 11,822 samples (up to 1,000 per dataset), scored with the
 [Tiny Audio eval harness](https://github.com/alexkroman/tiny-audio/tree/main/scripts/eval)
 (`ta eval`) after text normalization.
 
-| Dataset                |      WER |
-| ---------------------- | -------: |
-| LibriSpeech test-clean |     1.80 |
-| SPGISpeech             |     2.24 |
-| LibriSpeech test-other |     3.09 |
-| TED-LIUM               |     3.74 |
-| LoquaciousSet †        |     6.10 |
-| Common Voice           |     6.62 |
-| VoxPopuli              |     6.96 |
-| AMI (IHM)              |     8.88 |
-| GigaSpeech             |     9.07 |
-| Earnings22 †           |    10.54 |
-| People's Speech        |    17.69 |
-| AMI (SDM)              |    23.59 |
-| **Mean (12 sets)**     | **8.36** |
+| Dataset                     |      WER |
+| --------------------------- | -------: |
+| LibriSpeech test-clean      |     1.84 |
+| SPGISpeech                  |     2.29 |
+| TED-LIUM                    |     3.71 |
+| LoquaciousSet †             |     6.20 |
+| LibriSpeech test-other      |     6.38 |
+| VoxPopuli                   |     7.11 |
+| Common Voice                |     7.18 |
+| AMI (IHM)                   |     8.99 |
+| GigaSpeech                  |     9.06 |
+| Earnings22 †                |    10.58 |
+| People's Speech             |    17.59 |
+| AMI (SDM)                   |    23.53 |
+| **Mean (12 sets)**          | **8.71** |
+| **Pooled (11,822 samples)** | **7.42** |
 
 † Held out: no data from this source was used in training.
 

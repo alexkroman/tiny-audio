@@ -342,10 +342,13 @@ extend_exclude = ["docs"]
 [tool.deptry.package_module_name_map]
 # PyObjC's import names; Foundation/CoreFoundation arrive with it (pyobjc-framework-Cocoa).
 pyobjc-framework-Speech = ["Speech", "Foundation", "CoreFoundation"]
+# The Qwen3.5 fast-path kernels (Linux only) import as `fla`.
+flash-linear-attention = ["fla"]
 
 [tool.deptry.per_rule_ignores]
 # Flat-layout fallbacks: on the Hub, tiny_audio's files load as sibling modules.
 # `spaces` is provided by the Hugging Face Spaces runtime (demo/requirements.txt).
+# `triton` ships inside torch's Linux CUDA wheels (scripts/inference.py imports it).
 DEP001 = [
   "alignment",
   "asr_config",
@@ -355,9 +358,11 @@ DEP001 = [
   "diarization",
   "projectors",
   "spaces",
+  "triton",
 ]
 # Optional vendor SDK for `ta eval -m elevenlabs`, imported lazily; dev-only on purpose.
-DEP004 = ["elevenlabs"]
+# `fla` is the optional Linux fast path that `ta runpod deploy` installs for `ta serve`.
+DEP004 = ["elevenlabs", "fla"]
 
 [tool.coverage.run]
 branch = true

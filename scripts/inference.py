@@ -1,7 +1,11 @@
 """Load a tiny_audio checkpoint for fast inference: the setup `ta serve` and evals share."""
 
+import functools
 import importlib.util
+import inspect
 import logging
+import sys
+from types import ModuleType
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -68,6 +72,260 @@ def _mps_safe_sdpa(
 AttentionInterface.register(MPS_SAFE_SDPA, _mps_safe_sdpa)
 AttentionMaskInterface.register(MPS_SAFE_SDPA, sdpa_mask)
 
+# Registered attention implementation: sdpa that reads the KV cache once per decode step.
+GQA_DECODE_SDPA = "sdpa_gqa_decode"
+
+
+def _gqa_decode_sdpa(
+    module: torch.nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: torch.Tensor | None,
+    scaling: float | None = None,
+    **kwargs: Any,
+) -> tuple[torch.Tensor, None]:
+    """sdpa for grouped-query attention that skips `repeat_kv` on one-token queries.
+
+    With a mask, transformers' sdpa path copies every KV head out to its query
+    heads (`repeat_kv`) before attending, so a decode step reads and rewrites
+    the whole cache G-fold. With one query token, the G query heads that share
+    a KV head can instead be G query rows against that head -- query head h
+    belongs to KV head h // G, as `repeat_kv` maps them -- which is the same
+    attention over an un-copied cache. Qwen3.5-2B (8 query heads, 2 KV heads)
+    on an RTX 4090, batch 32: attention 1.45 -> 0.24 ms of a 8.1 ms decode
+    step. Prefill (more than one query token) takes the stock path.
+    """
+    batch, heads, q_len, dim = query.shape
+    kv_heads = key.shape[1]
+    if q_len != 1 or heads == kv_heads:
+        return sdpa_attention_forward(
+            module, query, key, value, attention_mask, scaling=scaling, **kwargs
+        )
+    if attention_mask is not None:
+        attention_mask = attention_mask[:, :, :, : key.shape[-2]]
+    out = torch.nn.functional.scaled_dot_product_attention(
+        query.reshape(batch, kv_heads, heads // kv_heads, dim),
+        key,
+        value,
+        attn_mask=attention_mask,
+        scale=scaling,
+    )
+    return out.reshape(batch, heads, 1, dim).transpose(1, 2).contiguous(), None
+
+
+AttentionInterface.register(GQA_DECODE_SDPA, _gqa_decode_sdpa)
+AttentionMaskInterface.register(GQA_DECODE_SDPA, sdpa_mask)
+
+
+def use_fast_kernels_under_compile(module: ModuleType) -> list[str]:
+    """Point `module`'s kernel-or-reference wrappers straight at the kernel they found.
+
+    transformers wraps each fast kernel (fla's gated delta rule, causal-conv1d)
+    in a function that runs the torch reference instead while exporting, and
+    asks `torch.compiler.is_exporting()` -- which dynamo answers True inside any
+    `torch.compile` on torch 2.8. So the CUDA-graphed decode step silently ran
+    the reference delta rule and depthwise conv, while eager prefill used the
+    kernels. Rebinding the module-level names to the resolved implementation
+    (keeping the wrapper's kwargs filtering) puts the kernels in the graph.
+    Returns the names rebound; none if transformers changes how it wraps them.
+    """
+    rebound = []
+    for name, fn in list(vars(module).items()):
+        if not inspect.isfunction(fn) or fn.__closure__ is None:
+            continue
+        cells = dict(zip(fn.__code__.co_freevars, fn.__closure__, strict=True))
+        if "is_new_implementation" not in cells or not cells["is_new_implementation"].cell_contents:
+            continue
+        implementation = cells["implementation"].cell_contents
+        params = frozenset(cells["applicable_params"].cell_contents)
+
+        @functools.wraps(fn)
+        def direct(
+            *args: Any, _impl: Any = implementation, _params: frozenset[str] = params, **kwargs: Any
+        ) -> Any:
+            return _impl(*args, **{k: v for k, v in kwargs.items() if k in _params})
+
+        setattr(module, name, direct)
+        rebound.append(name)
+    return rebound
+
+
+@torch.library.custom_op("tiny_audio::gated_delta_step_", mutates_args={"state"})
+def gated_delta_step_(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    state: torch.Tensor,
+    scale: float,
+    use_qk_l2norm: bool,
+) -> torch.Tensor:
+    """fla's fused recurrent gated delta rule, writing the new state over `state`.
+
+    Each kernel program loads its tile of the initial state before storing the
+    same tile of the final one, so passing one tensor as both is race-free. A
+    custom op with `mutates_args` so inductor sees the mutation: handing the
+    triton kernel aliased pointers directly made the compiled graph drop it.
+    """
+    # CUDA-only dependencies, installed on the pod by `ta runpod deploy`.
+    import triton  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
+    from fla.ops.gated_delta_rule.fused_recurrent import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
+        fused_recurrent_gated_delta_rule_fwd_kernel,
+    )
+
+    _, steps, heads, k_dim = k.shape
+    v_heads, v_dim = v.shape[2], v.shape[-1]
+    block_v = min(8, triton.next_power_of_2(v_dim))
+    out = torch.empty_like(v)
+    fused_recurrent_gated_delta_rule_fwd_kernel[
+        (triton.cdiv(v_dim, block_v), k.shape[0] * v_heads)
+    ](
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        gk=None,
+        gv=None,
+        beta=beta,
+        A_log=None,
+        dt_bias=None,
+        o=out,
+        h0=state,
+        ht=state,
+        cu_seqlens=None,
+        scale=scale,
+        T=steps,
+        H=heads,
+        HV=v_heads,
+        K=k_dim,
+        V=v_dim,
+        BK=triton.next_power_of_2(k_dim),
+        BV=block_v,
+        IS_BETA_HEADWISE=beta.ndim != v.ndim,
+        USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm,
+        APPLY_BETA_SIGMOID=False,
+        ALLOW_NEG_EIGVAL=False,
+        STATE_V_FIRST=False,
+        num_warps=1,
+        num_stages=3,
+    )
+    return out
+
+
+@gated_delta_step_.register_fake
+def _(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    state: torch.Tensor,
+    scale: float,
+    use_qk_l2norm: bool,
+) -> torch.Tensor:
+    return torch.empty_like(v)
+
+
+def _in_place_recurrent_step(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    *,
+    g: torch.Tensor | None = None,
+    beta: torch.Tensor | None = None,
+    scale: float | None = None,
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool = False,
+    use_qk_l2norm_in_kernel: bool = False,
+    cu_seqlens: torch.Tensor | None = None,
+    fallback: Any = None,
+    **kwargs: Any,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """The decode-step delta rule, updating the cached state in place when it can.
+
+    The cache's `update_recurrent_state` copies whatever state comes back into
+    its static buffer; fla returns a fresh one, so every step copied 18 layers
+    of fp32 state (33.5 MB a layer at batch 32: 1.27 ms of a 9.4 ms step).
+    Returning the buffer itself makes that copy a no-op. Bit-identical to
+    fla's own call.
+    """
+    if (
+        g is None
+        or beta is None
+        or initial_state is None
+        or not output_final_state
+        or cu_seqlens is not None
+        or initial_state.dtype != torch.float32
+        or not initial_state.is_contiguous()
+    ):
+        return fallback(
+            q,
+            k,
+            v,
+            g=g,
+            beta=beta,
+            scale=scale,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+            cu_seqlens=cu_seqlens,
+            **kwargs,
+        )
+    # The kernel walks raw pointers; q/k/v arrive as views of one fused projection.
+    q, k, v, g, beta = (t.contiguous() for t in (q, k, v, g, beta))
+    scale = k.shape[-1] ** -0.5 if scale is None else scale
+    out = gated_delta_step_(q, k, v, g, beta, initial_state, scale, use_qk_l2norm_in_kernel)
+    return out, initial_state
+
+
+def speed_up_cuda_decode(model: ASRModel) -> list[str]:
+    """Install the CUDA decode-step fixes on `model`'s decoder; what was changed.
+
+    Kernels into the compiled graph (`use_fast_kernels_under_compile`), the
+    gated delta rule's state updated in place, and grouped-query attention
+    without `repeat_kv` (`_gqa_decode_sdpa`). Measured together on an RTX 4090
+    (Qwen3.5-2B decoder, batch 32): decode step 9.7 -> 6.8 ms; on 1,200 eval
+    clips (12 datasets) 1.31x the throughput at batch 32, with WER inside the
+    noise a batch-size change alone makes.
+    """
+    language_model = model.language_model
+    modeling = sys.modules[type(language_model).__module__]
+    changed = use_fast_kernels_under_compile(modeling)
+    step_name = "torch_recurrent_gated_delta_rule"
+    reference = getattr(modeling, step_name, None)
+    if step_name in changed and reference is not None:
+        setattr(
+            modeling, step_name, functools.partial(_in_place_recurrent_step, fallback=reference)
+        )
+        changed.append("in-place recurrent state")
+    language_model.set_attn_implementation(GQA_DECODE_SDPA)
+    changed.append(GQA_DECODE_SDPA)
+    return changed
+
+
+def contiguous_lm_head_input(model: ASRModel) -> None:
+    """Give the output projection a contiguous input, so prefill runs it as one GEMM.
+
+    generate's prefill keeps only the last position's hidden state, a strided
+    `[batch, 1, hidden]` slice, and `matmul` can't fold a strided 3-D input
+    into one GEMM: it ran `bmm` against the weight expanded per row -- one
+    GEMV per row, each reading Qwen3.5's whole 1 GB embedding matrix. 34 ms
+    of a 532 ms batch-32 call on an RTX 4090. Decode inputs are already
+    contiguous, so this costs nothing there.
+    """
+    lm_head = cast("torch.nn.Module | None", model.language_model.get_output_embeddings())
+    if lm_head is None:
+        return
+
+    def make_contiguous(
+        _module: torch.nn.Module, args: tuple[torch.Tensor, ...]
+    ) -> tuple[torch.Tensor, ...]:
+        return (args[0].contiguous(), *args[1:])
+
+    lm_head.register_forward_pre_hook(make_contiguous)
+
 
 def missing_fast_kernels() -> list[str]:
     """The fast-path kernel packages that are not installed (pip names)."""
@@ -132,12 +390,13 @@ def load_serving_pipeline(
     (`trust_remote_code` would run that), merges LoRA, and preloads the forced
     aligner and diarizer so no request pays their load. On CUDA the fast
     linear-attention kernels are required unless `require_fast_kernels` is
-    off: a missing one silently costs several times the latency. On MPS the
-    decoder runs `_mps_safe_sdpa`, because stock sdpa returns NaN for
-    left-padded rows there (`ASRModel._assert_sdpa_safe_on_mps`).
+    off: a missing one silently costs several times the latency; with them,
+    the decoder gets `speed_up_cuda_decode`. On MPS the decoder runs
+    `_mps_safe_sdpa`, because stock sdpa returns NaN for left-padded rows there
+    (`ASRModel._assert_sdpa_safe_on_mps`).
     """
+    missing = missing_fast_kernels() if device.type == "cuda" else []
     if device.type == "cuda":
-        missing = missing_fast_kernels()
         if missing and require_fast_kernels:
             msg = (
                 f"Fast linear-attention kernels missing: {', '.join(missing)}. "
@@ -156,8 +415,11 @@ def load_serving_pipeline(
     # PreTrainedModel.to is functools.wraps'd, which pyright cannot bind as a method.
     model.to(device)  # pyright: ignore[reportArgumentType]
     model.eval()
+    contiguous_lm_head_input(model)
     if device.type == "mps":
         model.language_model.set_attn_implementation(MPS_SAFE_SDPA)
+    elif device.type == "cuda" and not missing:
+        logger.info("Decode speedups: %s", ", ".join(speed_up_cuda_decode(model)))
 
     pipe = ASRPipeline(
         model=model,

@@ -32,9 +32,10 @@ os.environ["MPLCONFIGDIR"] = "/tmp/matplotlib"
 # Disable tokenizer parallelism warning
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-import base64
 import html
+import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from itertools import groupby
 from operator import itemgetter
@@ -347,27 +348,84 @@ def local_runner(model_path: str) -> Callable[[str, dict[str, Any]], dict[str, A
 WAKING_UP = "The model server is starting up or offline. Please try again in a few minutes."
 
 
+# Uploads come from anyone, and ffmpeg follows references: an HLS playlist or
+# concat list can make it read files on the Space (its environment holds the
+# endpoint and API key) or fetch URLs. So only the local-file protocol and
+# plain media containers -- what browsers record and people upload.
+UNTRUSTED_INPUT_OPTIONS = (
+    "-protocol_whitelist", "file",
+    "-format_whitelist",
+    "wav,w64,mp3,flac,ogg,mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,aac,aiff,caf,amr,au",
+)  # fmt: skip
+# Longest audio converted; RunPod's 100 s request limit ends far shorter files.
+MAX_UPLOAD_SECONDS = 6 * 3600
+
+
+def compact_audio(audio: str) -> tuple[bytes, str]:
+    """`(body, content type)` for an upload: 16 kHz mono FLAC, or the file as-is.
+
+    The server decodes everything to 16 kHz mono, so sending that -- losslessly
+    -- changes nothing but the size: a 44.1 kHz stereo WAV shrinks ~10x, from
+    ~10.6 to ~1 MB a minute. RunPod's proxy refuses large bodies (413 Payload
+    Too Large), so this is what lets hour-long recordings through. Without
+    ffmpeg, or for a file it can't read, the original bytes go and the server
+    reports any decode error itself.
+    """
+    # To a file, not a pipe: ffmpeg seeks back to write the stream's length
+    # into the FLAC header, which a piped stream leaves bogus (libsndfile then
+    # refuses it).
+    with tempfile.TemporaryDirectory() as tmp:
+        flac = Path(tmp) / "upload.flac"
+        command = [
+            "ffmpeg", "-nostdin", "-v", "error",
+            *UNTRUSTED_INPUT_OPTIONS, "-i", f"file:{audio}",
+            "-t", str(MAX_UPLOAD_SECONDS),
+            "-ac", "1", "-ar", "16000", "-sample_fmt", "s16", str(flac),
+        ]  # fmt: skip
+        try:
+            subprocess.run(command, check=True, capture_output=True, timeout=600)
+        except (OSError, subprocess.SubprocessError):
+            return Path(audio).read_bytes(), "application/octet-stream"
+        return flac.read_bytes(), "audio/flac"
+
+
+def query_parameters(kwargs: Mapping[str, Any]) -> dict[str, str]:
+    """Pipeline options as the query string `ta serve` parses ("true", "3")."""
+    return {k: str(v).lower() if isinstance(v, bool) else str(v) for k, v in kwargs.items()}
+
+
+TOO_LARGE = (
+    "This file is too large for the model server, even compressed to 16 kHz mono. "
+    "Try a shorter recording."
+)
+
+
 def remote_runner(
     endpoint_url: str, api_key: str | None
 ) -> Callable[[str, dict[str, Any]], dict[str, Any]]:
     """POST each request to a `ta serve` server (scripts/serve.py)."""
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    auth = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
     def run_pipeline(audio: str, kwargs: dict[str, Any]) -> dict[str, Any]:
-        # A JSON body is the only way to send `parameters` with the audio,
-        # so the audio travels base64-encoded.
-        payload = {
-            "inputs": base64.b64encode(Path(audio).read_bytes()).decode(),
-            "parameters": kwargs,
-        }
+        # Raw audio as the body, options in the query string: base64 in JSON
+        # would add a third to an upload the proxy already caps.
+        body, content_type = compact_audio(audio)
         try:
-            response = httpx.post(endpoint_url, json=payload, headers=headers, timeout=600)
+            response = httpx.post(
+                endpoint_url,
+                content=body,
+                params=query_parameters(kwargs),
+                headers={**auth, "Content-Type": content_type},
+                timeout=600,
+            )
         except httpx.TimeoutException as e:
             msg = "The model server took too long to respond."
             raise gr.Error(msg) from e
         except httpx.HTTPError as e:
             msg = f"Could not reach the model server: {e}"
             raise gr.Error(msg) from e
+        if response.status_code == 413:
+            raise gr.Error(TOO_LARGE)
         if response.status_code in (502, 503, 504):
             raise gr.Error(WAKING_UP)
         if response.is_error:
