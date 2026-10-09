@@ -1,13 +1,22 @@
-"""Tests for scripts/inference.py: CUDA-graph batching and NaN-safe MPS attention, on CPU."""
+"""Tests for scripts/inference.py: CUDA-graph batching, decode-step kernels and attention."""
 
-from types import SimpleNamespace
+import importlib.util
+from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 
 import pytest
 import torch
 
 from scripts import inference
-from scripts.inference import GraphedDecoder, _mps_safe_sdpa, missing_fast_kernels
+from scripts.inference import (
+    GraphedDecoder,
+    _gqa_decode_sdpa,
+    _mps_safe_sdpa,
+    contiguous_lm_head_input,
+    missing_fast_kernels,
+    use_fast_kernels_under_compile,
+)
+from tiny_audio.asr_modeling import ASRModel
 from tiny_audio.asr_pipeline import ASRPipeline, PreparedChunk
 
 
@@ -177,3 +186,108 @@ def test_missing_fast_kernels_reports_pip_names(monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setattr(inference.importlib.util, "find_spec", no_spec)
     assert missing_fast_kernels() == ["causal-conv1d", "flash-linear-attention"]
+
+
+class TestGqaDecodeSdpa:
+    """One-token grouped-query attention without repeat_kv matches the stock sdpa path."""
+
+    @staticmethod
+    def _module() -> torch.nn.Module:
+        # 8 query heads over 2 KV heads, as in Qwen3.5-2B.
+        module = SimpleNamespace(training=False, num_key_value_groups=4, is_causal=True)
+        return cast(torch.nn.Module, module)
+
+    @pytest.mark.parametrize("mask_kind", ["none", "bool", "float"])
+    @pytest.mark.parametrize("q_len", [1, 3])
+    def test_matches_stock_sdpa(self, mask_kind: str, q_len: int) -> None:
+        gen = torch.Generator().manual_seed(0)
+        q = torch.randn(3, 8, q_len, 16, generator=gen)
+        k, v = (torch.randn(3, 2, 6, 16, generator=gen) for _ in range(2))
+        allowed = torch.ones(3, 1, q_len, 6, dtype=torch.bool)
+        allowed[0, ..., :2] = False  # a left-padded row's pad keys
+        mask = {
+            "none": None,
+            "bool": allowed,
+            "float": torch.zeros(allowed.shape).masked_fill(~allowed, float("-inf")),
+        }[mask_kind]
+        module = self._module()
+        out, _ = _gqa_decode_sdpa(module, q, k, v, mask, scaling=0.25)
+        expected, _ = inference.sdpa_attention_forward(module, q, k, v, mask, scaling=0.25)
+        assert out.shape == (3, q_len, 8, 16)
+        torch.testing.assert_close(out, expected)
+
+
+def _fake_modeling(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
+    """A modeling module holding one transformers kernel-or-reference wrapper.
+
+    `operator.neg` stands in for the kernel; dynamo's `is_exporting` answer
+    inside torch.compile is simulated by patching it True.
+    """
+    from transformers.integrations.hub_kernels import (  # noqa: PLC0415
+        use_kernel_func_from_hub_with_fallback,
+    )
+
+    @use_kernel_func_from_hub_with_fallback("neg", "operator")
+    def neg(a: int) -> str:
+        return "reference"
+
+    module = ModuleType("fake_modeling")
+    module.neg = neg  # pyright: ignore[reportAttributeAccessIssue]
+    module.helper = lambda: "untouched"  # pyright: ignore[reportAttributeAccessIssue]
+    monkeypatch.setattr(torch.compiler, "is_exporting", lambda: True)
+    return module
+
+
+def test_fast_kernels_rebound_past_the_export_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _fake_modeling(monkeypatch)
+    assert module.neg(3) == "reference"  # the bug: the wrapper falls back under compile
+    assert use_fast_kernels_under_compile(module) == ["neg"]
+    assert module.neg(3) == -3
+    assert module.neg(3, unknown_kwarg=1) == -3  # still filtered like the wrapper does
+    assert module.helper() == "untouched"
+
+
+def test_lm_head_gets_a_contiguous_input() -> None:
+    lm_head = torch.nn.Linear(4, 5, bias=False)
+    seen: list[bool] = []
+    lm_head.register_forward_hook(lambda _m, args, _out: seen.append(args[0].is_contiguous()))
+    language_model = SimpleNamespace(get_output_embeddings=lambda: lm_head)
+    contiguous_lm_head_input(cast(ASRModel, SimpleNamespace(language_model=language_model)))
+    hidden = torch.randn(3, 7, 4)
+    last = hidden[:, -1:, :]  # what generate's prefill keeps
+    assert not last.is_contiguous()
+    torch.testing.assert_close(lm_head(last), last @ lm_head.weight.T)
+    assert seen == [True]
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or importlib.util.find_spec("fla") is None,
+    reason="needs CUDA and flash-linear-attention",
+)
+def test_in_place_delta_step_matches_fla() -> None:
+    from fla.ops.gated_delta_rule import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
+        fused_recurrent_gated_delta_rule,
+    )
+
+    gen = torch.Generator(device="cuda").manual_seed(0)
+    batch, heads, dim = 4, 16, 128
+
+    def randn(*shape: int, dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
+        return torch.randn(*shape, generator=gen, device="cuda", dtype=dtype)
+
+    # q/k/v as strided views of one fused projection, like Qwen3.5's split.
+    fused = randn(batch, 1, 3 * heads * dim)
+    q, k, v = (t.view(batch, 1, heads, dim) for t in fused.split(heads * dim, dim=-1))
+    g = -torch.rand(batch, 1, heads, generator=gen, device="cuda")
+    beta = torch.rand(batch, 1, heads, generator=gen, device="cuda").to(torch.bfloat16)
+    state = randn(batch, heads, dim, dim, dtype=torch.float32)
+    kwargs: dict[str, Any] = {"g": g, "beta": beta, "output_final_state": True}
+    expected_out, expected_state = fused_recurrent_gated_delta_rule(
+        q, k, v, initial_state=state.clone(), use_qk_l2norm_in_kernel=True, **kwargs
+    )
+    out, new_state = inference._in_place_recurrent_step(  # pyright: ignore[reportPrivateUsage]
+        q, k, v, initial_state=state, use_qk_l2norm_in_kernel=True, fallback=None, **kwargs
+    )
+    assert new_state is state  # updated in place: the cache's copy becomes a no-op
+    assert torch.equal(out, expected_out)
+    assert torch.equal(state, expected_state)
