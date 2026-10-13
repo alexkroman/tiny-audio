@@ -1,7 +1,7 @@
 # @package _global_
 # FROZEN ENCODER + PROJECTOR + LoRA, one epoch.
 #
-#   ibm-granite/granite-speech-5.0-470m-turboctc   FULLY FROZEN (0 trainable)
+#   ibm-granite/granite-speech-5.0-470m-turboctc-nc   FULLY FROZEN (0 trainable)
 #   -> MLP projector (fresh init, 14.7M, lr 1e-3)
 #   -> Qwen/Qwen3.5-4B, base FROZEN + LoRA all-linear r=64 (129.9M, lr 1e-4)
 #
@@ -96,7 +96,13 @@ data:
   epoch_expansion: 1
 
 model:
-  audio_model_id: ibm-granite/granite-speech-5.0-470m-turboctc
+  # The NON-COMMERCIAL release (CC-BY-NC-SA-4.0), so weights trained on it
+  # inherit that license. config.json is byte-identical to the Apache-2.0
+  # `granite-speech-5.0-470m-turboctc`; the only difference is +10k h
+  # GigaSpeech and +4.9k h SPGISpeech in its pretraining data. Both are Open
+  # ASR leaderboard test domains, so part of its leaderboard gain is in-domain
+  # data. Swap back to the Apache ID for anything commercial.
+  audio_model_id: ibm-granite/granite-speech-5.0-470m-turboctc-nc
 
   # Everything from here to `encoder_dtype` was previously UNSET and silently
   # inherited from configs/config.yaml -- which is the GLM-ASR + Qwen3-0.6B
@@ -286,7 +292,7 @@ model:
   apply_spec_augment: false
 
 training:
-  hub_model_id: "mazesmazes/tiny-audio-granite-qwen-frozen-3"
+  hub_model_id: "mazesmazes/tiny-audio-granite-qwen-frozen-nc"
 
   attn_implementation: sdpa
 
@@ -433,9 +439,9 @@ training:
   # ONE pass. `data.epoch_expansion` stays 1; the loader raises if both it
   # and this are >1, because they compound.
   #
-  # ~3.68M loader rows (multiasr, all sources uncapped + Peoples) at
-  # effective batch 56 is ~66k optimizer steps without showing any row
-  # twice. Warmup 1,000 is ~1.5%
+  # ~3.52M loader rows (multiasr, all sources uncapped + Peoples, VoxPopuli
+  # removed 2026-10-09) at effective batch 56 is ~63k optimizer steps
+  # without showing any row twice. Warmup 1,000 is ~1.5%
   # of the schedule and the modal published value for this architecture
   # class (Granite Speech 1000, Canary-Qwen 1000, SLAM-ASR 1000; Ultravox's
   # default is 0, not the 1000 this file used to cite); 700 was not measured
