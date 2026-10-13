@@ -463,7 +463,9 @@ class EndpointEvaluator(Evaluator):
 
     Sends each clip as raw WAV bytes; `TINY_AUDIO_API_KEY`, if set, is sent as
     the bearer key. `-w N` keeps N requests in flight, which the server
-    batches together on the GPU.
+    batches together on the GPU. On a speaker-attributed dataset it asks the
+    server for `return_speakers` and scores its words as `<SPK_n>` turns, as
+    `LocalEvaluator` does with the pipeline.
     """
 
     def __init__(self, endpoint_url: str, **kwargs: Unpack[EvaluatorOptions]) -> None:
@@ -492,20 +494,35 @@ class EndpointEvaluator(Evaluator):
         wait=wait_exponential_jitter(initial=1.0, max=30.0),
         reraise=True,
     )
-    def _post(self, wav_bytes: bytes) -> tuple[str, float]:
+    def _post(self, wav_bytes: bytes) -> tuple[dict[str, Any], float]:
         start = time.time()
         # trust_env=False: straight to the server, past any local HTTPS_PROXY
         # (e.g. Aikido safe-chain), which drops tunnels under `-w` concurrency.
         response = httpx.post(
-            self.url, content=wav_bytes, headers=self.headers, timeout=600, trust_env=False
+            self.url,
+            content=wav_bytes,
+            headers=self.headers,
+            params={"return_speakers": "true"} if self.speakers else None,
+            # A whole meeting with speaker streams can run for minutes.
+            timeout=3600 if self.speakers else 600,
+            trust_env=False,
         )
         elapsed = time.time() - start
         response.raise_for_status()
-        text: str = response.json().get("text", "")
-        return text, elapsed
+        result: dict[str, Any] = response.json()
+        return result, elapsed
 
     def transcribe(self, audio: object) -> Transcription:
-        text, elapsed = self._post(prepare_wav_bytes(audio))
+        result, elapsed = self._post(prepare_wav_bytes(audio))
+        if not self.speakers:
+            return result.get("text", ""), elapsed, None
+        # Same as LocalEvaluator: a failed alignment or diarization is raised,
+        # not scored as an unlabelled transcript.
+        for key in ("timestamp_error", "diarization_error"):
+            if result.get(key):
+                msg = f"{key}: {result[key]}"
+                raise RuntimeError(msg)
+        text = serialize_turns((w["speaker"], w["word"]) for w in result["words"])
         return text, elapsed, None
 
 

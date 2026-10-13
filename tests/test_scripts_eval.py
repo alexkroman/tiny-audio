@@ -402,3 +402,44 @@ def test_endpoint_evaluator_does_not_retry_client_errors(
     with pytest.raises(httpx.HTTPStatusError):
         evaluator.transcribe({"array": np.zeros(1600, dtype=np.float32), "sampling_rate": 16000})
     assert calls == 1
+
+
+def test_endpoint_evaluator_asks_for_speakers_on_speaker_datasets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A speaker dataset requests `return_speakers` and scores the words as `<SPK_n>` turns."""
+    seen: dict[str, Any] = {}
+    words = [
+        {"word": "hi", "speaker": "SPEAKER_1"},
+        {"word": "there", "speaker": "SPEAKER_1"},
+        {"word": "hello", "speaker": "SPEAKER_0"},
+    ]
+
+    def fake_post(url: str, **kwargs: Any) -> httpx.Response:
+        seen.update(kwargs)
+        return httpx.Response(
+            200, json={"text": "hi there hello", "words": words}, request=httpx.Request("POST", url)
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    evaluator = EndpointEvaluator(endpoint_url="https://pod-8000.proxy.runpod.net")
+    evaluator.speakers = True
+    text, _, _ = evaluator.transcribe(
+        {"array": np.zeros(1600, dtype=np.float32), "sampling_rate": 16000}
+    )
+    assert text == "<SPK_1>hi there<SPK_2>hello"
+    assert seen["params"] == {"return_speakers": "true"}
+
+
+def test_endpoint_evaluator_raises_on_a_diarization_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed diarization is raised, not scored as an unlabelled transcript."""
+
+    def fake_post(url: str, **_kwargs: Any) -> httpx.Response:
+        body = {"text": "hi", "words": [], "diarization_error": "boom"}
+        return httpx.Response(200, json=body, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    evaluator = EndpointEvaluator(endpoint_url="https://pod-8000.proxy.runpod.net")
+    evaluator.speakers = True
+    with pytest.raises(RuntimeError, match="diarization_error"):
+        evaluator.transcribe({"array": np.zeros(1600, dtype=np.float32), "sampling_rate": 16000})
