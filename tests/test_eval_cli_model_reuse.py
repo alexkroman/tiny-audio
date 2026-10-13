@@ -37,7 +37,7 @@ class RecordingEvaluator(Evaluator):
         audio_field: str | None = None,
         text_field: str | None = None,
         speakers: bool = False,
-        ma_scoring: bool = False,
+        verbatim_scoring: bool = False,
     ) -> list[EvalResult]:
         results = super().evaluate(
             dataset,
@@ -45,7 +45,7 @@ class RecordingEvaluator(Evaluator):
             audio_field=audio_field,
             text_field=text_field,
             speakers=speakers,
-            ma_scoring=ma_scoring,
+            verbatim_scoring=verbatim_scoring,
         )
         self.seen.append((self.audio_field, self.text_field))
         return results

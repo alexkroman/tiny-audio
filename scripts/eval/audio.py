@@ -211,16 +211,15 @@ class TextNormalizer:
         return " ".join(text.split())
 
 
-class MATextNormalizer:
-    """Whisper's English normalizer as AssemblyAI's MA tool scores cpWER.
+class VerbatimTextNormalizer:
+    """Whisper's English normalizer with its filler removal turned off.
 
-    DeepLearning's `CPWER_Metric` builds `WhisperNormalizer(filter_disfluencies=False)`:
-    Whisper's normalizer with its filler removal (`uh`, `um`, `hmm`, `mm`, `mhm`,
-    `mmm`) turned off, so fillers are scored, and none of `TextNormalizer`'s
-    project fixes (okay -> ok, all right -> alright, kinda, `ah`).
+    `uh`, `um`, `hmm`, `mm`, `mhm` and `mmm` are kept and scored, and none of
+    `TextNormalizer`'s project fixes apply (okay -> ok, all right -> alright,
+    kinda, `ah`): a verbatim reading of the reference.
     """
 
-    # Matches nothing: the DeepLearning normalizer's `_NEVER_MATCH_PATTERN`.
+    # A pattern that matches nothing, so Whisper's normalizer removes no fillers.
     _KEEP_FILLERS = r"(?!)"
 
     def __init__(self) -> None:
@@ -229,7 +228,7 @@ class MATextNormalizer:
         self._normalizer.ignore_patterns = self._KEEP_FILLERS
 
     def normalize(self, text: str) -> str:
-        """Normalize text for cpWER as the MA tool does."""
+        """Normalize text, keeping fillers."""
         return " ".join(self._normalizer(text).split())
 
 

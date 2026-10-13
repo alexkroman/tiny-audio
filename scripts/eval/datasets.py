@@ -28,9 +28,9 @@ class DatasetConfig:
     # References are speaker-attributed `<SPK_1>text<SPK_2>text`: evaluators
     # label speakers where they can, and metrics add cpWER.
     speakers: bool = False
-    # Also score cpWER the way AssemblyAI's MA tool does (`ma_speaker_metrics`):
-    # fillers kept, per-file mean. Reported beside the usual cpWER.
-    ma_scoring: bool = False
+    # Also score cpWER verbatim (`verbatim_speaker_metrics`): fillers kept,
+    # averaged per file. Reported beside the usual cpWER.
+    verbatim_scoring: bool = False
 
 
 DATASET_REGISTRY: dict[str, DatasetConfig] = {
@@ -78,16 +78,15 @@ DATASET_REGISTRY: dict[str, DatasetConfig] = {
         text_field="text",
         speakers=True,
     ),
-    # The 24 full AMI meetings of AssemblyAI's MA-tool diarization benchmark
-    # (`ami_diarization_der_cpwer_11_2025`): the real Mix-Headset recordings,
-    # with references from AMI's manual word annotations, parsed as the MA tool
-    # parses them. Built by `scripts/eval/build_ami_ma.py`.
-    "ami-ma": DatasetConfig(
-        path="mazesmazes/ami-ma-meetings",
+    # The 24 full meetings of the pyannote AMI test split: the real Mix-Headset
+    # recordings, with references from AMI's manual word annotations. Built by
+    # `scripts/eval/build_ami_meetings.py`.
+    "ami-meetings-24": DatasetConfig(
+        path="mazesmazes/ami-meetings-24",
         audio_field="audio",
         text_field="text",
         speakers=True,
-        ma_scoring=True,
+        verbatim_scoring=True,
     ),
     "gigaspeech": DatasetConfig(
         path="fixie-ai/gigaspeech",

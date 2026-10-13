@@ -553,7 +553,7 @@ def main(
             audio_field=cfg.audio_field,
             text_field=cfg.text_field,
             speakers=cfg.speakers,
-            ma_scoring=cfg.ma_scoring,
+            verbatim_scoring=cfg.verbatim_scoring,
         )
         metrics = evaluator.compute_metrics()
         save_results(
