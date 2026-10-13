@@ -15,12 +15,12 @@ corpus site and writes one row per meeting: the audio, the reference as
 import heapq
 import io
 import itertools
-import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 from typing import Annotated, TypedDict
 
+import httpx
 import typer
 from datasets import Audio, Dataset
 from rich.console import Console
@@ -65,7 +65,8 @@ def parse_words(annotations: zipfile.ZipFile, meeting: str) -> list[Word]:
         name = f"words/{meeting}.{letter}.words.xml"
         if name not in names:
             continue
-        for child in ET.fromstring(annotations.read(name)):
+        # AMI's own annotation release, fetched from the corpus site over HTTPS.
+        for child in ET.fromstring(annotations.read(name)):  # nosec B314
             if child.attrib.get("punc", "false") == "true":
                 continue
             if (
@@ -98,8 +99,9 @@ def reference_text(words: list[Word]) -> str:
 
 def _download(url: str) -> bytes:
     console.print(f"  {url}")
-    with urllib.request.urlopen(url) as response:
-        return response.read()
+    response = httpx.get(url, follow_redirects=True, timeout=60)
+    response.raise_for_status()
+    return response.content
 
 
 @app.command()
