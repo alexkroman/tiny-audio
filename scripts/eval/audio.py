@@ -1,5 +1,6 @@
 """Audio utilities and text normalization for ASR evaluation."""
 
+import copy
 import functools
 import io
 import json
@@ -208,6 +209,28 @@ class TextNormalizer:
         # does not leave a double space that shifts tokenisation.
         text = self._FILLER_RE.sub(" ", text)
         return " ".join(text.split())
+
+
+class MATextNormalizer:
+    """Whisper's English normalizer as AssemblyAI's MA tool scores cpWER.
+
+    DeepLearning's `CPWER_Metric` builds `WhisperNormalizer(filter_disfluencies=False)`:
+    Whisper's normalizer with its filler removal (`uh`, `um`, `hmm`, `mm`, `mhm`,
+    `mmm`) turned off, so fillers are scored, and none of `TextNormalizer`'s
+    project fixes (okay -> ok, all right -> alright, kinda, `ah`).
+    """
+
+    # Matches nothing: the DeepLearning normalizer's `_NEVER_MATCH_PATTERN`.
+    _KEEP_FILLERS = r"(?!)"
+
+    def __init__(self) -> None:
+        # A copy: the cached normalizer is shared with every `TextNormalizer`.
+        self._normalizer = copy.copy(_english_normalizer())
+        self._normalizer.ignore_patterns = self._KEEP_FILLERS
+
+    def normalize(self, text: str) -> str:
+        """Normalize text for cpWER as the MA tool does."""
+        return " ".join(self._normalizer(text).split())
 
 
 @functools.cache
