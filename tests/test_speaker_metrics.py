@@ -8,18 +8,20 @@ from typing import cast
 import assemblyai as aai
 import pytest
 
-from scripts.eval.audio import TextNormalizer
+from scripts.eval.audio import TextNormalizer, VerbatimTextNormalizer
 from scripts.eval.cli import ALL_DATASETS
 from scripts.eval.datasets import DATASET_REGISTRY
 from scripts.eval.evaluators.asr import speaker_text
 from scripts.eval.evaluators.base import Evaluator, Transcription
 from scripts.eval.speaker_metrics import (
+    cp_edit_counts,
     cp_errors,
     has_speakers,
     parse_turns,
     plain_text,
     serialize_turns,
     speaker_metrics,
+    verbatim_speaker_metrics,
     word_errors,
 )
 
@@ -127,3 +129,50 @@ def test_ami_speakers_is_registered_but_not_in_all() -> None:
     assert DATASET_REGISTRY["ami-speakers"].speakers
     assert "ami-speakers" not in ALL_DATASETS
     assert not DATASET_REGISTRY["ami"].speakers
+
+
+def test_cp_edit_counts_splits_errors_by_kind() -> None:
+    ref = "<SPK_1>a b c<SPK_2>d e"
+    # Speakers swapped: 'a b c' vs 'a x c f' is a substitution and an insertion,
+    # 'd e' vs 'd' a deletion.
+    assert cp_edit_counts(ref, "<SPK_2>a x c f<SPK_1>d") == (1, 1, 1, 5)
+    i, d, s, n = cp_edit_counts(ref, "a b c d")
+    assert (i + d + s, n) == cp_errors(ref, "a b c d")
+
+
+def test_verbatim_cpwer_averages_files_not_words() -> None:
+    refs = ["<SPK_1>a", "<SPK_1>b c d e f g h i j"]
+    hyps = ["<SPK_1>x", "<SPK_1>b c d e f g h i j"]
+    m = verbatim_speaker_metrics(refs, hyps)
+    assert m["cpwer_verbatim"] == pytest.approx(0.5)  # (1.0 + 0.0) / 2 files
+    assert m["cpwer_verbatim_micro"] == pytest.approx(0.1)  # 1 error / 10 words
+    assert (m["cp_sub_verbatim"], m["cp_ins_verbatim"], m["cp_del_verbatim"]) == (
+        pytest.approx(0.1),
+        0.0,
+        0.0,
+    )
+
+
+def test_verbatim_normalizer_scores_fillers_and_skips_project_fixes() -> None:
+    text = "Um, okay. Uh, all right, hmm."
+    assert VerbatimTextNormalizer().normalize(text) == "um okay uh all right hmm"
+    assert TextNormalizer().normalize(text) == "ok alright"
+
+
+def test_verbatim_scoring_adds_verbatim_keys_only_when_asked() -> None:
+    dataset = [{"audio": 0, "text": "<SPK_1>Um, hello.<SPK_2>Good morning."}]
+    evaluator = _FixedEvaluator.make(["<SPK_1>hello<SPK_2>good morning"])
+    evaluator.evaluate(dataset, speakers=True, verbatim_scoring=True)
+    m = evaluator.compute_metrics()
+    # Verbatim scoring keeps 'um', so dropping it is a deletion.
+    assert m["cpwer_verbatim"] == pytest.approx(100 / 4)
+    assert m["cp_del_verbatim"] == pytest.approx(100 / 4)
+    evaluator.evaluate(dataset, speakers=True)
+    assert "cpwer_verbatim" not in evaluator.compute_metrics()
+
+
+def test_ami_meetings_24_is_registered_for_verbatim_scoring() -> None:
+    cfg = DATASET_REGISTRY["ami-meetings-24"]
+    assert cfg.speakers
+    assert cfg.verbatim_scoring
+    assert "ami-meetings-24" not in ALL_DATASETS

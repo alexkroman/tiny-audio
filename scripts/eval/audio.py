@@ -1,5 +1,6 @@
 """Audio utilities and text normalization for ASR evaluation."""
 
+import copy
 import functools
 import io
 import json
@@ -208,6 +209,27 @@ class TextNormalizer:
         # does not leave a double space that shifts tokenisation.
         text = self._FILLER_RE.sub(" ", text)
         return " ".join(text.split())
+
+
+class VerbatimTextNormalizer:
+    """Whisper's English normalizer with its filler removal turned off.
+
+    `uh`, `um`, `hmm`, `mm`, `mhm` and `mmm` are kept and scored, and none of
+    `TextNormalizer`'s project fixes apply (okay -> ok, all right -> alright,
+    kinda, `ah`): a verbatim reading of the reference.
+    """
+
+    # A pattern that matches nothing, so Whisper's normalizer removes no fillers.
+    _KEEP_FILLERS = r"(?!)"
+
+    def __init__(self) -> None:
+        # A copy: the cached normalizer is shared with every `TextNormalizer`.
+        self._normalizer = copy.copy(_english_normalizer())
+        self._normalizer.ignore_patterns = self._KEEP_FILLERS
+
+    def normalize(self, text: str) -> str:
+        """Normalize text, keeping fillers."""
+        return " ".join(self._normalizer(text).split())
 
 
 @functools.cache

@@ -11,10 +11,15 @@ import attrs
 import jiwer
 from rich.console import Console
 
-from scripts.eval.audio import TextNormalizer
+from scripts.eval.audio import TextNormalizer, VerbatimTextNormalizer
 from scripts.eval.constants import ASSEMBLYAI_MODELS
 from scripts.eval.formatting import compute_formatting_metrics
-from scripts.eval.speaker_metrics import has_speakers, scoring_text, speaker_metrics
+from scripts.eval.speaker_metrics import (
+    has_speakers,
+    scoring_text,
+    speaker_metrics,
+    verbatim_speaker_metrics,
+)
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 console = Console()
@@ -112,6 +117,7 @@ class Evaluator:
         # Set per `evaluate` call: the dataset's references are `<SPK_n>`
         # speaker-attributed, so evaluators that can should emit speakers too.
         self.speakers = False
+        self.verbatim_scoring = False
         self.normalizer = TextNormalizer()
         self.results: list[EvalResult] = []
 
@@ -172,6 +178,7 @@ class Evaluator:
         audio_field: str | None = None,
         text_field: str | None = None,
         speakers: bool = False,
+        verbatim_scoring: bool = False,
     ) -> list[EvalResult]:
         """Run evaluation loop on dataset.
 
@@ -184,10 +191,12 @@ class Evaluator:
 
         `speakers` marks a dataset whose references are speaker-attributed
         (`<SPK_1>text<SPK_2>text`): evaluators that can label speakers do so,
-        and `compute_metrics` adds cpWER.
+        and `compute_metrics` adds cpWER. `verbatim_scoring` also scores that cpWER
+        with fillers kept, averaged per file (`verbatim_speaker_metrics`).
         """
         self._reset_run_state()
         self.speakers = speakers
+        self.verbatim_scoring = verbatim_scoring
         if audio_field is not None:
             self.audio_field = audio_field
         if text_field is not None:
@@ -357,4 +366,11 @@ class Evaluator:
             if key in ("n", "wer"):
                 continue
             out[key] = value if key.startswith("speaker_count") else value * 100
+        if self.verbatim_scoring:
+            verbatim_scores = verbatim_speaker_metrics(
+                [r.reference for r in self.results],
+                [r.prediction for r in self.results],
+                VerbatimTextNormalizer().normalize,
+            )
+            out.update({key: value * 100 for key, value in verbatim_scores.items()})
         return out

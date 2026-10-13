@@ -127,6 +127,72 @@ def cp_errors(ref: str, hyp: str, normalize: Callable[[str], str] = _identity) -
     return int(cost[rows, cols].sum()), sum(len(a) for a in r)
 
 
+def _joined_speaker_words(text: str, normalize: Callable[[str], str]) -> list[list[str]]:
+    """Each speaker's words, normalized as one string per speaker."""
+    chunks: dict[int, list[str]] = {}
+    for label, chunk in parse_turns(text):
+        chunks.setdefault(label, []).append(chunk)
+    return [normalize(" ".join(c)).split() for c in chunks.values()]
+
+
+def cp_edit_counts(
+    ref: str, hyp: str, normalize: Callable[[str], str] = _identity
+) -> tuple[int, int, int, int]:
+    """(insertions, deletions, substitutions, reference words) of cpWER.
+
+    Each speaker's words are joined into one string and normalized as a whole,
+    where `cp_errors` normalizes turn by turn; speakers are then matched
+    one-to-one as in `cp_errors`, and the edits of each matched pair are split
+    by kind.
+    """
+    r = _joined_speaker_words(ref, normalize)
+    h = _joined_speaker_words(hyp, normalize)
+    n = max(len(r), len(h), 1)
+    empty: list[str] = []
+    r += [empty] * (n - len(r))
+    h += [empty] * (n - len(h))
+    cost = cdist(r, h, scorer=Levenshtein.distance, dtype=np.int64)
+    rows, cols = linear_sum_assignment(cost)
+    ins = dels = subs = 0
+    for i, j in zip(rows, cols, strict=True):
+        for op in Levenshtein.editops(r[i], h[j]):
+            if op.tag == "insert":
+                ins += 1
+            elif op.tag == "delete":
+                dels += 1
+            else:
+                subs += 1
+    return ins, dels, subs, sum(len(a) for a in r)
+
+
+def verbatim_speaker_metrics(
+    refs: list[str], hyps: list[str], normalize: Callable[[str], str] = _identity
+) -> dict[str, float]:
+    """Per-file-averaged cpWER, plus its insertion/deletion/substitution split.
+
+    `cpwer_verbatim` is each file's cpWER averaged over files, so every meeting
+    counts the same whatever its length. `cpwer_verbatim_micro` pools
+    errors over all reference words, as `speaker_metrics` does. The split is
+    pooled too. A file whose reference normalizes to nothing has no rate and is
+    left out of the mean.
+    """
+    rates: list[float] = []
+    ins = dels = subs = n_words = 0
+    for ref, hyp in zip(refs, hyps, strict=True):
+        i, d, s, words = cp_edit_counts(ref, hyp, normalize)
+        ins, dels, subs, n_words = ins + i, dels + d, subs + s, n_words + words
+        if words:
+            rates.append((i + d + s) / words)
+    total = max(n_words, 1)
+    return {
+        "cpwer_verbatim": sum(rates) / max(len(rates), 1),
+        "cpwer_verbatim_micro": (ins + dels + subs) / total,
+        "cp_ins_verbatim": ins / total,
+        "cp_del_verbatim": dels / total,
+        "cp_sub_verbatim": subs / total,
+    }
+
+
 def speaker_metrics(
     refs: list[str], hyps: list[str], normalize: Callable[[str], str] = _identity
 ) -> dict[str, float]:

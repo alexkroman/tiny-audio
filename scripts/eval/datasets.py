@@ -28,6 +28,9 @@ class DatasetConfig:
     # References are speaker-attributed `<SPK_1>text<SPK_2>text`: evaluators
     # label speakers where they can, and metrics add cpWER.
     speakers: bool = False
+    # Also score cpWER verbatim (`verbatim_speaker_metrics`): fillers kept,
+    # averaged per file. Reported beside the usual cpWER.
+    verbatim_scoring: bool = False
 
 
 DATASET_REGISTRY: dict[str, DatasetConfig] = {
@@ -74,6 +77,16 @@ DATASET_REGISTRY: dict[str, DatasetConfig] = {
         audio_field="audio",
         text_field="text",
         speakers=True,
+    ),
+    # The 24 full meetings of the pyannote AMI test split: the real Mix-Headset
+    # recordings, with references from AMI's manual word annotations. Built by
+    # `scripts/eval/build_ami_meetings.py`.
+    "ami-meetings-24": DatasetConfig(
+        path="mazesmazes/ami-meetings-24",
+        audio_field="audio",
+        text_field="text",
+        speakers=True,
+        verbatim_scoring=True,
     ),
     "gigaspeech": DatasetConfig(
         path="fixie-ai/gigaspeech",
