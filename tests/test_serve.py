@@ -283,6 +283,47 @@ class TestApp:
         )
 
 
+class TestJobs:
+    """`POST /jobs` answers at once; `GET /jobs/<id>` returns the result when it is ready."""
+
+    @staticmethod
+    def _wait(client: Client, job_id: str) -> httpx.Response:
+        for _ in range(500):
+            response = client.get(f"/jobs/{job_id}")
+            if response.status_code != 202:
+                return response
+            time.sleep(0.01)
+        pytest.fail("job never finished")
+
+    def test_job_returns_what_a_request_would(self, make_client: MakeClient) -> None:
+        client, pipe = make_client()
+        submitted = client.post(
+            "/jobs?return_speakers=true", content=b"RIFF", headers={"content-type": "audio/wav"}
+        )
+        assert submitted.status_code == 202
+        result = self._wait(client, submitted.json()["id"])
+        assert result.status_code == 200
+        assert result.json() == {"text": "hello", "words": [{"word": "hello", "start": 0.5}]}
+        assert pipe.calls == [(b"RIFF", {"return_speakers": True})]
+
+    def test_failed_job_keeps_its_status(self, make_client: MakeClient) -> None:
+        client, _ = make_client(error=RuntimeError("CUDA out of memory"))
+        job_id = client.post("/jobs", content=b"RIFF").json()["id"]
+        result = self._wait(client, job_id)
+        assert result.status_code == 500
+        assert "out of memory" in result.json()["error"]
+
+    def test_unknown_job_is_404(self, make_client: MakeClient) -> None:
+        client, _ = make_client()
+        assert client.get("/jobs/nope").status_code == 404
+
+    def test_api_key_enforced_on_jobs(self, make_client: MakeClient) -> None:
+        client, pipe = make_client(api_key="s3cret")
+        assert client.post("/jobs", content=b"RIFF").status_code == 401
+        assert client.get("/jobs/anything").status_code == 401
+        assert pipe.calls == []
+
+
 def test_client_disconnect_mid_upload_is_quiet(make_client: MakeClient) -> None:
     """A client that hangs up while sending its body gets no traceback, just a 499."""
     client, pipe = make_client()
