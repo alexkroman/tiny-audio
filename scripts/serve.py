@@ -17,6 +17,11 @@ idles while there is work:
 Request format matches the HF Space client (demo/app.py):
 `POST /` with `{"inputs": <base64 audio>, "parameters": {...}}`, or the raw
 audio bytes as the body with parameters in the query string.
+
+A request that takes longer than a proxy allows (RunPod's drops anything over
+100 s) can go through `POST /jobs` instead: the same body and parameters, but
+it answers 202 with a job id at once, and `GET /jobs/<id>` answers 202 while
+the job runs, then the response `POST /` would have given.
 """
 
 import base64
@@ -28,8 +33,9 @@ import os
 import queue
 import threading
 import time
+import uuid
 from collections.abc import AsyncGenerator, Callable, Mapping
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Annotated, Any
@@ -69,6 +75,8 @@ PARAMETERS: dict[str, type] = {
 REQUEST_THREADS = 64
 # Optional bearer key. Unset means the server is open.
 API_KEY_ENV = "TINY_AUDIO_API_KEY"
+# How long a finished job's response stays readable from `GET /jobs/<id>`.
+JOB_TTL_SECONDS = 3600
 
 
 class RequestError(ValueError):
@@ -346,6 +354,79 @@ async def _read_body(request: Request) -> bytes | None:
         return None
 
 
+RequestRunner = Callable[[bytes, str, dict[str, str]], tuple[int, bytes]]
+
+
+class JobStore:
+    """Requests run past the HTTP request that submitted them (`POST /jobs`).
+
+    Jobs run on their own threads, not the event loop's, so a job outlives the
+    request that submitted it. Only the event loop calls these methods. A
+    finished job's response stays readable for JOB_TTL_SECONDS.
+    """
+
+    def __init__(self, run: RequestRunner) -> None:
+        self._run = run
+        self._pool = ThreadPoolExecutor(REQUEST_THREADS, thread_name_prefix="job")
+        self._jobs: dict[str, Future[tuple[int, bytes]]] = {}
+        self._done_at: dict[str, float] = {}
+
+    def submit(self, body: bytes, content_type: str, query: dict[str, str]) -> str:
+        """Start a request; its job id."""
+        self._drop_expired()
+        job_id = uuid.uuid4().hex
+        self._jobs[job_id] = self._pool.submit(self._run, body, content_type, query)
+        return job_id
+
+    def result(self, job_id: str) -> tuple[int, bytes] | None:
+        """A finished job's status and body, or None while it runs. KeyError if unknown."""
+        self._drop_expired()
+        future = self._jobs[job_id]
+        return future.result() if future.done() else None
+
+    def shutdown(self) -> None:
+        self._pool.shutdown(wait=False, cancel_futures=True)
+
+    def _drop_expired(self) -> None:
+        now = time.monotonic()
+        for job_id, future in list(self._jobs.items()):
+            if future.done() and now - self._done_at.setdefault(job_id, now) > JOB_TTL_SECONDS:
+                del self._jobs[job_id], self._done_at[job_id]
+
+
+def job_routes(jobs: JobStore, api_key: str | None) -> list[Route]:
+    """`POST /jobs` and `GET /jobs/<id>` over `jobs`."""
+
+    async def submit_job(request: Request) -> Response:
+        if not _authorized(request, api_key):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        body = await _read_body(request)
+        if body is None:
+            return Response(status_code=499)
+        job_id = jobs.submit(
+            body, request.headers.get("content-type", ""), dict(request.query_params)
+        )
+        return JSONResponse({"id": job_id, "status": "running"}, status_code=202)
+
+    async def job_result(request: Request) -> Response:
+        if not _authorized(request, api_key):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        job_id = request.path_params["job_id"]
+        try:
+            finished = jobs.result(job_id)
+        except KeyError:
+            return JSONResponse({"error": f"no job {job_id}"}, status_code=404)
+        if finished is None:
+            return JSONResponse({"id": job_id, "status": "running"}, status_code=202)
+        status, content = finished
+        return Response(content, status_code=status, media_type="application/json")
+
+    return [
+        Route("/jobs", submit_job, methods=["POST"]),
+        Route("/jobs/{job_id}", job_result, methods=["GET"]),
+    ]
+
+
 def create_app(pipe: ASRPipeline, batcher: ChunkBatcher, model_id: str) -> Starlette:
     """The HTTP app over a loaded pipeline whose chunks run through `batcher`."""
     limiter = anyio.CapacityLimiter(REQUEST_THREADS)
@@ -353,29 +434,32 @@ def create_app(pipe: ASRPipeline, batcher: ChunkBatcher, model_id: str) -> Starl
     started = time.perf_counter()
     api_key = os.environ.get(API_KEY_ENV)
 
+    def run_request(body: bytes, content_type: str, query: dict[str, str]) -> tuple[int, bytes]:
+        """One request's status and JSON body, errors included."""
+        try:
+            return 200, transcribe_request(pipe, body, content_type, query, batcher, request_stats)
+        except RequestError as e:
+            return 400, json.dumps({"error": str(e)}).encode()
+        except Exception as e:
+            logger.exception("request failed")
+            return 500, json.dumps({"error": f"{type(e).__name__}: {e}"}).encode()
+
     async def transcribe(request: Request) -> Response:
         if not _authorized(request, api_key):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         body = await _read_body(request)
         if body is None:
             return Response(status_code=499)  # client closed request; nobody to answer
-        try:
-            content = await anyio.to_thread.run_sync(
-                transcribe_request,
-                pipe,
-                body,
-                request.headers.get("content-type", ""),
-                dict(request.query_params),
-                batcher,
-                request_stats,
-                limiter=limiter,
-            )
-        except RequestError as e:
-            return JSONResponse({"error": str(e)}, status_code=400)
-        except Exception as e:
-            logger.exception("request failed")
-            return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=500)
-        return Response(content, media_type="application/json")
+        status, content = await anyio.to_thread.run_sync(
+            run_request,
+            body,
+            request.headers.get("content-type", ""),
+            dict(request.query_params),
+            limiter=limiter,
+        )
+        return Response(content, status_code=status, media_type="application/json")
+
+    jobs = JobStore(run_request)
 
     async def health(_request: Request) -> Response:
         return JSONResponse({"status": "ok", "model": model_id})
@@ -403,6 +487,7 @@ def create_app(pipe: ASRPipeline, batcher: ChunkBatcher, model_id: str) -> Starl
     @asynccontextmanager
     async def lifespan(_app: Starlette) -> AsyncGenerator[None]:
         yield
+        jobs.shutdown()
         # Off the event loop: close() joins the GPU thread after its last batch.
         await anyio.to_thread.run_sync(batcher.close)
 
@@ -410,6 +495,7 @@ def create_app(pipe: ASRPipeline, batcher: ChunkBatcher, model_id: str) -> Starl
         routes=[
             Route("/", transcribe, methods=["POST"]),
             Route("/transcribe", transcribe, methods=["POST"]),
+            *job_routes(jobs, api_key),
             Route("/health", health, methods=["GET"]),
             Route("/stats", stats, methods=["GET"]),
         ],

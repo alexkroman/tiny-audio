@@ -112,6 +112,11 @@ print(response.json()["text"])
 - **JSON body:** to send JSON instead, use `{"inputs": "<base64 audio>", "parameters": {...}}`.
 - **Audio formats:** anything FFmpeg can read.
 - **Errors:** `400` with `{"error": ...}` for bad audio or options, and `401` for a wrong key.
+- **Long requests:** `POST /jobs` takes the same body and options but answers `202` with
+  `{"id": ...}` at once; poll `GET /jobs/<id>`, which answers `202` while the job runs and then the
+  response `POST /` would have given. Use it for anything that may run past the proxy's 100 s limit,
+  such as a whole meeting with `return_speakers`; `ta eval --endpoint` does this for speaker
+  datasets.
 - **Other endpoints:** `GET /health` and `GET /stats` (batch sizes and GPU time).
 
 RunPod's HTTP proxy rejects request bodies over 500 MiB, and it drops any request that takes more

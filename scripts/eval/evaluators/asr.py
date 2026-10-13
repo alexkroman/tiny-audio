@@ -463,14 +463,24 @@ class EndpointEvaluator(Evaluator):
 
     Sends each clip as raw WAV bytes; `TINY_AUDIO_API_KEY`, if set, is sent as
     the bearer key. `-w N` keeps N requests in flight, which the server
-    batches together on the GPU. On a speaker-attributed dataset it asks the
-    server for `return_speakers` and scores its words as `<SPK_n>` turns, as
-    `LocalEvaluator` does with the pipeline.
+    batches together on the GPU.
+
+    On a speaker-attributed dataset it asks for `return_speakers` and scores
+    the returned words as `<SPK_n>` turns, as `LocalEvaluator` does with the
+    pipeline. Those requests go through the server's job endpoint (`POST /jobs`,
+    then `GET /jobs/<id>` until done): a whole meeting runs longer than RunPod's
+    proxy lets one request run (100 s), and each poll returns at once.
     """
+
+    # Seconds between polls of a running job, and the most a job may take.
+    POLL_SECONDS = 2.0
+    JOB_TIMEOUT_SECONDS = 2 * 60 * 60
 
     def __init__(self, endpoint_url: str, **kwargs: Unpack[EvaluatorOptions]) -> None:
         super().__init__(**kwargs)
         self.url = endpoint_url
+        base = endpoint_url.rstrip("/").removesuffix("/transcribe")
+        self.jobs_url = f"{base}/jobs"
         api_key = os.environ.get("TINY_AUDIO_API_KEY")
         self.headers = {"content-type": "audio/wav"}
         if api_key:
@@ -494,28 +504,38 @@ class EndpointEvaluator(Evaluator):
         wait=wait_exponential_jitter(initial=1.0, max=30.0),
         reraise=True,
     )
-    def _post(self, wav_bytes: bytes) -> tuple[dict[str, Any], float]:
-        start = time.time()
+    def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         # trust_env=False: straight to the server, past any local HTTPS_PROXY
         # (e.g. Aikido safe-chain), which drops tunnels under `-w` concurrency.
-        response = httpx.post(
-            self.url,
-            content=wav_bytes,
-            headers=self.headers,
-            params={"return_speakers": "true"} if self.speakers else None,
-            # A whole meeting with speaker streams can run for minutes.
-            timeout=3600 if self.speakers else 600,
-            trust_env=False,
+        response = httpx.request(
+            method, url, headers=self.headers, timeout=600, trust_env=False, **kwargs
         )
-        elapsed = time.time() - start
         response.raise_for_status()
-        result: dict[str, Any] = response.json()
-        return result, elapsed
+        return response
+
+    def _run_job(self, wav_bytes: bytes) -> dict[str, Any]:
+        """Submit `wav_bytes` as a speaker job and wait for its result."""
+        submitted = self._request(
+            "POST", self.jobs_url, content=wav_bytes, params={"return_speakers": "true"}
+        )
+        job_url = f"{self.jobs_url}/{submitted.json()['id']}"
+        deadline = time.monotonic() + self.JOB_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            response = self._request("GET", job_url)
+            if response.status_code != 202:
+                return response.json()
+            time.sleep(self.POLL_SECONDS)
+        msg = f"job {job_url} still running after {self.JOB_TIMEOUT_SECONDS} s"
+        raise TimeoutError(msg)
 
     def transcribe(self, audio: object) -> Transcription:
-        result, elapsed = self._post(prepare_wav_bytes(audio))
+        wav_bytes = prepare_wav_bytes(audio)
+        start = time.time()
         if not self.speakers:
-            return result.get("text", ""), elapsed, None
+            text: str = self._request("POST", self.url, content=wav_bytes).json().get("text", "")
+            return text, time.time() - start, None
+        result = self._run_job(wav_bytes)
+        elapsed = time.time() - start
         # Same as LocalEvaluator: a failed alignment or diarization is raised,
         # not scored as an unlabelled transcript.
         for key in ("timestamp_error", "diarization_error"):

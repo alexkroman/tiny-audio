@@ -343,11 +343,11 @@ def test_endpoint_evaluator_bypasses_local_proxy(monkeypatch: pytest.MonkeyPatch
     """Requests go straight to the server, never through a local HTTPS_PROXY."""
     seen: dict[str, Any] = {}
 
-    def fake_post(url: str, **kwargs: Any) -> httpx.Response:
+    def fake_request(method: str, url: str, **kwargs: Any) -> httpx.Response:
         seen.update(url=url, **kwargs)
-        return httpx.Response(200, json={"text": "hello"}, request=httpx.Request("POST", url))
+        return httpx.Response(200, json={"text": "hello"}, request=httpx.Request(method, url))
 
-    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr(httpx, "request", fake_request)
     monkeypatch.setenv("TINY_AUDIO_API_KEY", "k")
     evaluator = EndpointEvaluator(endpoint_url="https://pod-8000.proxy.runpod.net")
     text, _, _ = evaluator.transcribe(
@@ -368,13 +368,13 @@ def test_endpoint_evaluator_retries_proxy_errors(monkeypatch: pytest.MonkeyPatch
         200,
     ]
 
-    def fake_post(url: str, **_kwargs: Any) -> httpx.Response:
+    def fake_request(method: str, url: str, **_kwargs: Any) -> httpx.Response:
         outcome = outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
-        return httpx.Response(outcome, json={"text": "hello"}, request=httpx.Request("POST", url))
+        return httpx.Response(outcome, json={"text": "hello"}, request=httpx.Request(method, url))
 
-    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr(httpx, "request", fake_request)
     evaluator = EndpointEvaluator(endpoint_url="https://pod-8000.proxy.runpod.net")
     text, _, _ = evaluator.transcribe(
         {"array": np.zeros(1600, dtype=np.float32), "sampling_rate": 16000}
@@ -390,55 +390,69 @@ def test_endpoint_evaluator_does_not_retry_client_errors(
     """A 401 (bad API key) fails at once instead of burning the backoff budget."""
     calls = 0
 
-    def fake_post(url: str, **_kwargs: Any) -> httpx.Response:
+    def fake_request(method: str, url: str, **_kwargs: Any) -> httpx.Response:
         nonlocal calls
         calls += 1
         return httpx.Response(
-            401, json={"error": "unauthorized"}, request=httpx.Request("POST", url)
+            401, json={"error": "unauthorized"}, request=httpx.Request(method, url)
         )
 
-    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr(httpx, "request", fake_request)
     evaluator = EndpointEvaluator(endpoint_url="https://pod-8000.proxy.runpod.net")
     with pytest.raises(httpx.HTTPStatusError):
         evaluator.transcribe({"array": np.zeros(1600, dtype=np.float32), "sampling_rate": 16000})
     assert calls == 1
 
 
-def test_endpoint_evaluator_asks_for_speakers_on_speaker_datasets(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A speaker dataset requests `return_speakers` and scores the words as `<SPK_n>` turns."""
-    seen: dict[str, Any] = {}
+def _fake_job_server(
+    result: dict[str, Any], polls_running: int, seen: list[tuple[str, str, dict[str, Any]]]
+) -> Callable[..., httpx.Response]:
+    """A `ta serve` job endpoint: 202 with an id, `polls_running` 202 polls, then `result`."""
+    remaining = polls_running
+
+    def fake_request(method: str, url: str, **kwargs: Any) -> httpx.Response:
+        nonlocal remaining
+        seen.append((method, url, kwargs))
+        request = httpx.Request(method, url)
+        if method == "POST":
+            return httpx.Response(202, json={"id": "j1", "status": "running"}, request=request)
+        if remaining:
+            remaining -= 1
+            return httpx.Response(202, json={"status": "running"}, request=request)
+        return httpx.Response(200, json=result, request=request)
+
+    return fake_request
+
+
+def test_endpoint_evaluator_runs_speaker_datasets_as_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A speaker dataset goes to /jobs with `return_speakers`, is polled, and scores as turns."""
     words = [
         {"word": "hi", "speaker": "SPEAKER_1"},
         {"word": "there", "speaker": "SPEAKER_1"},
         {"word": "hello", "speaker": "SPEAKER_0"},
     ]
-
-    def fake_post(url: str, **kwargs: Any) -> httpx.Response:
-        seen.update(kwargs)
-        return httpx.Response(
-            200, json={"text": "hi there hello", "words": words}, request=httpx.Request("POST", url)
-        )
-
-    monkeypatch.setattr(httpx, "post", fake_post)
-    evaluator = EndpointEvaluator(endpoint_url="https://pod-8000.proxy.runpod.net")
+    seen: list[tuple[str, str, dict[str, Any]]] = []
+    fake = _fake_job_server({"text": "hi there hello", "words": words}, 2, seen)
+    monkeypatch.setattr(httpx, "request", fake)
+    monkeypatch.setattr(EndpointEvaluator, "POLL_SECONDS", 0.0)
+    evaluator = EndpointEvaluator(endpoint_url="https://pod-8000.proxy.runpod.net/transcribe")
     evaluator.speakers = True
     text, _, _ = evaluator.transcribe(
         {"array": np.zeros(1600, dtype=np.float32), "sampling_rate": 16000}
     )
     assert text == "<SPK_1>hi there<SPK_2>hello"
-    assert seen["params"] == {"return_speakers": "true"}
+    assert [(m, u) for m, u, _ in seen] == [
+        ("POST", "https://pod-8000.proxy.runpod.net/jobs"),
+        *[("GET", "https://pod-8000.proxy.runpod.net/jobs/j1")] * 3,
+    ]
+    assert seen[0][2]["params"] == {"return_speakers": "true"}
 
 
 def test_endpoint_evaluator_raises_on_a_diarization_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """A failed diarization is raised, not scored as an unlabelled transcript."""
-
-    def fake_post(url: str, **_kwargs: Any) -> httpx.Response:
-        body = {"text": "hi", "words": [], "diarization_error": "boom"}
-        return httpx.Response(200, json=body, request=httpx.Request("POST", url))
-
-    monkeypatch.setattr(httpx, "post", fake_post)
+    seen: list[tuple[str, str, dict[str, Any]]] = []
+    fake = _fake_job_server({"text": "hi", "words": [], "diarization_error": "boom"}, 0, seen)
+    monkeypatch.setattr(httpx, "request", fake)
     evaluator = EndpointEvaluator(endpoint_url="https://pod-8000.proxy.runpod.net")
     evaluator.speakers = True
     with pytest.raises(RuntimeError, match="diarization_error"):
