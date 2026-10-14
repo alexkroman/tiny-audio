@@ -28,9 +28,10 @@
 #     diversity. Step to `large` (50,794hr) only if LH-medium proves
 #     data-limited on LibriVox-domain eval; medium already gives 3.4×
 #     the prior LibriHeavy-small + LS clean+other clean-read budget.
-#   - VoxPopuli `en` (543hr / ~168K) — L2-European parliamentary speech.
-#     `raw_text` preserves case+punct; `normalized_text` is lowercase
-#     no-punct (LS-style) and is the wrong format for the Qwen3 decoder.
+#   - VoxPopuli `en` was restored here too and REMOVED 2026-10-09: its
+#     `raw_text` is the edited parliamentary record, which costs WER on
+#     the leaderboard's verbatim VoxPopuli test (see the note after
+#     Earnings22).
 # Raw YODAS (espnet/yodas) remains rejected: en000 is ~469 GB (500 ×
 # 938 MB tarballs) for ~5,000hr / ~2.5M samples; codebase loads via
 # load_dataset() in map mode (not streaming), so a target_samples cap
@@ -78,17 +79,18 @@
 # ┌──────────────────────────┬───────────┬───────────┬─────────┐
 # │ Dataset                  │ Raw       │ Effective │ Percent │
 # ├──────────────────────────┼───────────┼───────────┼─────────┤
-# │ LibriHeavy med (uncapped)│ 1,101,040 │  ~885,000 │   24.1% │
-# │ Gigaspeech M (uncapped)  │   910,140 │   656,893 │   17.9% │
-# │ CommonVoice 17 (uncapped)│ 1,101,170 │  ~938,000 │   25.5% │
-# │ SPGISpeech M             │   385,000 │   385,000 │   10.5% │
-# │ Peoples clean_sa         │  ~311,000 │  ~311,000 │    8.5% │
-# │ TEDLIUM-3                │   268,263 │  ~194,900 │    5.3% │
-# │ VoxPopuli en             │   182,482 │  ~157,000 │    4.3% │
-# │ AMI SDM                  │   107,319 │    74,265 │    2.0% │
-# │ AMI IHM                  │   108,502 │    73,239 │    2.0% │
+# │ LibriHeavy med (uncapped)│ 1,101,040 │  ~885,000 │   25.2% │
+# │ Gigaspeech M (uncapped)  │   910,140 │   656,893 │   18.7% │
+# │ CommonVoice 17 (uncapped)│ 1,101,170 │  ~938,000 │   26.7% │
+# │ SPGISpeech M             │   385,000 │   385,000 │   10.9% │
+# │ Peoples clean_sa         │  ~311,000 │  ~311,000 │    8.8% │
+# │ TEDLIUM-3                │   268,263 │  ~194,900 │    5.5% │
+# │ AMI SDM                  │   107,319 │    74,265 │    2.1% │
+# │ AMI IHM                  │   108,502 │    73,239 │    2.1% │
 # └──────────────────────────┴───────────┴───────────┴─────────┘
-# Total raw: ~4,474,916  →  Total effective: ~3,675,000
+# Total raw: ~4,292,434  →  Total effective: ~3,518,000
+# (2026-10-09: VoxPopuli removed, -182,482 raw / ~-157,000 effective; see
+# the note where its entry used to be, after Earnings22.)
 # (2026-09-24: LibriHeavy uncapped. ~885K is the pool left after the
 # >19.0s exclude_where pre-filter (1,101,040 less the measured 19.6%).)
 # (2026-09-24: Peoples clean_sa reinstated. Its rows are ~15s grid windows,
@@ -97,9 +99,10 @@
 # measured 14.81% down_votes drop, an estimate until the next run logs it.
 # The previous capped mix was ~2,684,344 with each Big-3 source at 22.3%.)
 #
-# 9 training sources. Big-3 combined 67.5%. AMI combined 4.0% and still the
+# 8 training sources (9 before VoxPopuli left on 2026-10-09). Big-3
+# combined 70.5% (67.5% with VoxPopuli). AMI combined 4.0% and still the
 # entire conversational share; the mix has zero 8 kHz telephony. Finance is
-# carried by SPGISpeech alone (10.5%), professionally transcribed, no overlap
+# carried by SPGISpeech alone (10.9%), professionally transcribed, no overlap
 # with any eval split.
 #
 # STATE PLAINLY, because it cuts against this file's own stated goal: the
@@ -646,25 +649,23 @@ datasets:
   # splits; Earnings22 was the only custom re-split and the only contaminated
   # one. Checked, not assumed.
 
-  # VoxPopuli `en` (facebook, natural ~168K / ~543hr). European Parliament
-  # L2-accented English read by parliamentarians — restores the VP
-  # coverage Loquacious bundled (550hr via Loquacious-large; 500hr via
-  # Loquacious-medium). `raw_text` preserves case + punctuation (matches
-  # parliamentary record formatting); `normalized_text` is lowercased
-  # with punctuation removed (LibriSpeech-style) and is the wrong format
-  # for the Qwen3 decoder, so use `raw_text` despite the noisier label
-  # surface. Natural cap — small enough to take whole, no replay risk.
-  # Validation split exists so include it in eval rotation.
-  - path: facebook/voxpopuli
-    name: en
-    audio_column: audio
-    text_column: raw_text
-    task: transcribe
-    # `raw_text` follows the parliamentary record (case + punct).
-    text_case: cased
-    text_punct: true
-    train_splits: [train]
-    eval_splits: [validation]
+  # VOXPOPULI REMOVED (2026-10-09). `facebook/voxpopuli` en (182,482 raw /
+  # ~157K effective / 4.3%) was trained on `raw_text`, which is the EDITED
+  # European Parliament record, not what was said: "Mr President" formulas,
+  # articles L2 speakers dropped put back in. The Open ASR leaderboard now
+  # scores VoxPopuli-Cleaned-AA, re-transcribed verbatim, and we placed
+  # 50/55 there (4.95). Function-word insertions/deletions alone were 1.25
+  # of that, plus "thank you chair" -> "mister president". Every model that
+  # trains on these edited labels (all Granite, Canary-Qwen, Cohere, Azure)
+  # falls 13-23 places from the old VoxPopuli refs to the AA ones, while
+  # Voxtral / distil-whisper / VibeVoice rise 18-25.
+  #
+  # No verbatim train split exists on the Hub: the Cleaned-AA sets are the
+  # 628-row TEST set, arda-argmax's Whisper pseudo-labels are ~23s windows
+  # the 19.0s filter would mostly drop, and distil-whisper/voxpopuli ships
+  # no label files. The way back in is relabelling this audio with a
+  # verbatim teacher (Universal-3.5-Pro 1.92 / Voxtral-Small 2.00 on
+  # VoxPopuli-AA) and filtering on agreement with `raw_text`.
 
   # AMI corpus IHM — close-talk meeting mic. Natural cap ~108,502, post-
   # <0.8s-filter effective ~79K (the filter drops backchannels like
