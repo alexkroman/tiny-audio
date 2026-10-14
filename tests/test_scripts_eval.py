@@ -4,14 +4,19 @@ Note: Audio utility tests (audio_to_wav_bytes, prepare_wav_bytes, TextNormalizer
 are in test_eval_audio.py to avoid duplication.
 """
 
+import base64
+import io
 import types
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypedDict, cast
 
+import assemblyai as aai
 import httpx
 import numpy as np
+import numpy.typing as npt
 import pytest
+import soundfile
 import torch
 import torch.nn as nn
 from peft import LoraConfig, PeftModel, get_peft_model
@@ -21,6 +26,7 @@ from scripts.eval.cli import _build_tiny_audio_evaluator
 from scripts.eval.evaluators.asr import (
     DTYPE_CONFIG_FIELDS,
     AssemblyAIStreamingEvaluator,
+    AssemblyAIStreamsEvaluator,
     EndpointEvaluator,
     _resolve_local_runtime,
     _use_sdpa_where_safe,
@@ -457,3 +463,94 @@ def test_endpoint_evaluator_raises_on_a_diarization_error(monkeypatch: pytest.Mo
     evaluator.speakers = True
     with pytest.raises(RuntimeError, match="diarization_error"):
         evaluator.transcribe({"array": np.zeros(1600, dtype=np.float32), "sampling_rate": 16000})
+
+
+def test_endpoint_evaluator_diarize_decodes_activity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`diarize` runs a `diarize_only` job and decodes the float16 activity it returns."""
+    activity = np.array([[0.9, 0.0], [0.25, 0.5]], dtype=np.float32)
+    result = {
+        "activity": base64.b64encode(activity.astype("<f2").tobytes()).decode(),
+        "shape": [2, 2],
+        "keep": [0, 1],
+    }
+    seen: list[tuple[str, str, dict[str, Any]]] = []
+    monkeypatch.setattr(httpx, "request", _fake_job_server(result, 0, seen))
+    evaluator = EndpointEvaluator(endpoint_url="https://pod-8000.proxy.runpod.net")
+    got, keep = evaluator.diarize(b"RIFF")
+    np.testing.assert_allclose(got, activity, atol=1e-3)
+    assert got.dtype == np.float32
+    assert keep == [0, 1]
+    assert seen[0][2]["params"] == {"diarize_only": "true"}
+
+
+def _word(text: str, start_s: float, end_s: float) -> types.SimpleNamespace:
+    return types.SimpleNamespace(text=text, start=int(start_s * 1000), end=int(end_s * 1000))
+
+
+class _StreamTranscriber:
+    """Stands in for `aai.Transcriber`: answers by which half of the stream is unmasked.
+
+    Speaker A talks over 0-1.1 s, speaker B over 0.9-2 s. A's stream hears a
+    word in B's region that is really on its own silence ("ghost"), and both
+    streams hear "shared" in the overlap.
+    """
+
+    def __init__(self) -> None:
+        self.streams: list[npt.NDArray[np.float32]] = []
+
+    def transcribe(self, data: io.BytesIO) -> types.SimpleNamespace:
+        audio = np.asarray(soundfile.read(data, dtype="float32")[0], dtype=np.float32)
+        self.streams.append(audio)
+        if audio[8000] != 0:  # 0.5 s: only A's stream keeps it
+            words = [_word("hello", 0.1, 0.5), _word("shared", 0.95, 1.05)]
+            words.append(_word("ghost", 1.5, 1.8))
+        else:
+            words = [_word("shared", 0.96, 1.04), _word("world", 1.3, 1.7)]
+        return types.SimpleNamespace(status=aai.TranscriptStatus.completed, words=words, error=None)
+
+
+def _streams_evaluator(
+    monkeypatch: pytest.MonkeyPatch, activity: npt.NDArray[np.float32], keep: list[int]
+) -> tuple[AssemblyAIStreamsEvaluator, _StreamTranscriber]:
+    evaluator = AssemblyAIStreamsEvaluator(
+        api_key="k", diarizer_url="https://pod-8000.proxy.runpod.net", model="universal-3-5-pro"
+    )
+    fake = _StreamTranscriber()
+    evaluator.transcriber = cast(aai.Transcriber, fake)
+
+    def diarize(_wav: bytes) -> tuple[npt.NDArray[np.float32], list[int]]:
+        return activity, keep
+
+    monkeypatch.setattr(evaluator.diarizer, "diarize", diarize)
+    evaluator.speakers = True
+    return evaluator, fake
+
+
+def test_assemblyai_streams_mask_filter_and_dedupe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One AssemblyAI call per speaker stream; silence words dropped, the overlap kept once."""
+    activity = np.zeros((200, 8), dtype=np.float32)
+    activity[:110, 0] = 0.9  # A: 0-1.1 s
+    activity[90:, 1] = 0.6  # B: 0.9-2 s
+    evaluator, fake = _streams_evaluator(monkeypatch, activity, [0, 1])
+    text, _, _ = evaluator.transcribe(
+        {"array": np.ones(32000, dtype=np.float32) * 0.5, "sampling_rate": 16000}
+    )
+    # "shared" goes to A, the more active speaker over it; "ghost" sat on A's silence.
+    assert text == "<SPK_1>hello shared<SPK_2>world"
+    assert len(fake.streams) == 2
+    a_stream = next(s for s in fake.streams if s[8000] != 0)
+    assert len(a_stream) == 32000  # full length: timestamps stay on the recording's timeline
+    assert not a_stream[int(1.2 * 16000) :].any()  # B's solo region is zeroed
+
+
+def test_assemblyai_streams_one_speaker_is_unmasked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With one speaker the stream is the whole recording and nothing is filtered."""
+    activity = np.zeros((200, 8), dtype=np.float32)
+    activity[:110, 0] = 0.9
+    evaluator, fake = _streams_evaluator(monkeypatch, activity, [0])
+    text, _, _ = evaluator.transcribe(
+        {"array": np.ones(32000, dtype=np.float32) * 0.5, "sampling_rate": 16000}
+    )
+    assert text == "<SPK_1>hello shared ghost"
+    assert len(fake.streams) == 1
+    assert fake.streams[0].all()

@@ -1,5 +1,6 @@
 """ASR evaluator implementations."""
 
+import base64
 import io
 import json
 import os
@@ -9,11 +10,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, Unpack, cast
 
 import assemblyai as aai
 import httpx
 import numpy as np
+import numpy.typing as npt
+import soundfile
 import torch
 from assemblyai.streaming.v3 import (
     SpeechModel,
@@ -30,13 +34,19 @@ from rich.table import Table
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential_jitter
 from transformers import TextIteratorStreamer, pipeline
 
-from scripts.eval.audio import as_16k_array, is_str_dict, prepare_wav_bytes
+from scripts.eval.audio import (
+    as_16k_array,
+    audio_to_wav_bytes,
+    is_str_dict,
+    prepare_wav_bytes,
+)
 from scripts.eval.speaker_metrics import serialize_turns
 from scripts.inference import merge_lora_adapters
 from tiny_audio.asr_attention import resolve_attn_implementation
 from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
 from tiny_audio.asr_pipeline import ASRPipeline
+from tiny_audio.diarization import NemotronDiarizer, masked_audio
 
 from .base import (
     Confidence,
@@ -513,11 +523,9 @@ class EndpointEvaluator(Evaluator):
         response.raise_for_status()
         return response
 
-    def _run_job(self, wav_bytes: bytes) -> dict[str, Any]:
-        """Submit `wav_bytes` as a speaker job and wait for its result."""
-        submitted = self._request(
-            "POST", self.jobs_url, content=wav_bytes, params={"return_speakers": "true"}
-        )
+    def _run_job(self, wav_bytes: bytes, params: dict[str, str]) -> dict[str, Any]:
+        """Submit `wav_bytes` as a job with `params` and wait for its result."""
+        submitted = self._request("POST", self.jobs_url, content=wav_bytes, params=params)
         job_url = f"{self.jobs_url}/{submitted.json()['id']}"
         deadline = time.monotonic() + self.JOB_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
@@ -534,7 +542,7 @@ class EndpointEvaluator(Evaluator):
         if not self.speakers:
             text: str = self._request("POST", self.url, content=wav_bytes).json().get("text", "")
             return text, time.time() - start, None
-        result = self._run_job(wav_bytes)
+        result = self._run_job(wav_bytes, {"return_speakers": "true"})
         elapsed = time.time() - start
         # Same as LocalEvaluator: a failed alignment or diarization is raised,
         # not scored as an unlabelled transcript.
@@ -544,6 +552,13 @@ class EndpointEvaluator(Evaluator):
                 raise RuntimeError(msg)
         text = serialize_turns((w["speaker"], w["word"]) for w in result["words"])
         return text, elapsed, None
+
+    def diarize(self, wav_bytes: bytes) -> tuple[npt.NDArray[np.float32], list[int]]:
+        """The server's Nemotron activity (frames, 8) for `wav_bytes`, and its kept columns."""
+        result = self._run_job(wav_bytes, {"diarize_only": "true"})
+        raw = base64.b64decode(result["activity"])
+        activity = np.frombuffer(raw, dtype="<f2").reshape(result["shape"]).astype(np.float32)
+        return activity, [int(c) for c in result["keep"]]
 
 
 class AssemblyAIEvaluator(Evaluator):
@@ -585,6 +600,80 @@ def speaker_text(transcript: aai.Transcript) -> str:
     if not utterances:
         return transcript.text or ""
     return serialize_turns((u.speaker, u.text) for u in utterances)
+
+
+class AssemblyAIStreamsEvaluator(AssemblyAIEvaluator):
+    """AssemblyAI's ASR inside the pipeline's per-speaker streams (`_transcribe_streams`).
+
+    A `ta serve` server (`diarizer_url`) runs Nemotron once per recording
+    (`diarize_only`). Each kept speaker's stream -- the whole recording with
+    every other speaker zeroed (`masked_audio`) -- goes to AssemblyAI as one
+    request, without its own speaker labels, so its word timestamps are
+    already on the recording's timeline and no forced alignment is needed.
+    Words wholly inside their speaker's silence are dropped, then a word two
+    streams both heard is kept once (`dedupe_words`), as in the pipeline.
+
+    That isolates what the streams buy a stronger ASR: overlapped speech the
+    single-stream transcript drops. Each stream is billed at full length, so a
+    run costs about (speakers x audio) hours. On a dataset without speakers
+    this is plain `AssemblyAIEvaluator`.
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        diarizer_url: str,
+        model: str = "universal-3-pro",
+        base_url: str | None = None,
+        **kwargs: Unpack[EvaluatorOptions],
+    ) -> None:
+        super().__init__(api_key, model=model, base_url=base_url, **kwargs)
+        self.diarizer = EndpointEvaluator(endpoint_url=diarizer_url)
+
+    def _stream_words(
+        self, audio: npt.NDArray[np.float32], frames: npt.NDArray[np.bool_], speaker: str
+    ) -> list[dict[str, Any]]:
+        """One speaker's stream through AssemblyAI: words in seconds, labelled `speaker`."""
+        spans = NemotronDiarizer.sample_spans(frames, 16000, len(audio))
+        stream = masked_audio(audio, spans, 0, len(audio))
+        # FLAC, not WAV: a stream is mostly zeros, which FLAC all but drops (a
+        # 40-minute meeting's stream is ~77 MB as 16-bit WAV).
+        flac = io.BytesIO()
+        soundfile.write(flac, stream, 16000, format="FLAC", subtype="PCM_16")
+        flac.seek(0)
+        transcript = self.transcriber.transcribe(flac)
+        if transcript.status == aai.TranscriptStatus.error:
+            msg = f"AssemblyAI stream for {speaker} failed: {transcript.error}"
+            raise RuntimeError(msg)
+        words = []
+        for w in transcript.words or []:
+            start, end = w.start / 1000, w.end / 1000
+            # A word wholly inside this speaker's silence is heard on zeros.
+            if NemotronDiarizer.span_is_active(frames, start, end):
+                words.append({"word": w.text, "start": start, "end": end, "speaker": speaker})
+        return words
+
+    def transcribe(self, audio: object) -> Transcription:
+        if not self.speakers:
+            return super().transcribe(audio)
+        array = np.asarray(as_16k_array(audio), dtype=np.float32)
+        start = time.time()
+        activity, keep = self.diarizer.diarize(audio_to_wav_bytes(array, 16000))
+        names = NemotronDiarizer.speaker_names(keep)
+        masks = {c: activity[:, c] > NemotronDiarizer.SEGMENT_THRESHOLD for c in keep}
+        if len(keep) <= 1:
+            # One speaker: nothing to mask, the stream is the whole recording.
+            masks = {c: np.ones(len(activity), dtype=np.bool_) for c in keep}
+
+        def stream(c: int) -> list[dict[str, Any]]:
+            return self._stream_words(array, masks[c], names[c])
+
+        with ThreadPoolExecutor(len(keep)) as pool:
+            words = [w for heard in pool.map(stream, keep) for w in heard]
+        words.sort(key=lambda w: (w["start"], w["end"]))
+        words = NemotronDiarizer.dedupe_words(words, activity, keep)
+        text = serialize_turns((w["speaker"], w["word"]) for w in words)
+        return text, time.time() - start, None
 
 
 class _StreamingError(RuntimeError):

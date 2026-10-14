@@ -18,6 +18,10 @@ Request format matches the HF Space client (demo/app.py):
 `POST /` with `{"inputs": <base64 audio>, "parameters": {...}}`, or the raw
 audio bytes as the body with parameters in the query string.
 
+`diarize_only=true` skips ASR and answers Nemotron's speaker activity instead
+(`diarize_response`), for an ASR that runs elsewhere -- `ta eval -m assemblyai
+--diarizer-url` transcribes each returned speaker's stream with Universal.
+
 A request that takes longer than a proxy allows (RunPod's drops anything over
 100 s) can go through `POST /jobs` instead: the same body and parameters, but
 it answers 202 with a job id at once, and `GET /jobs/<id>` answers 202 while
@@ -43,6 +47,7 @@ from typing import Annotated, Any
 import anyio
 import anyio.to_thread
 import numpy as np
+import numpy.typing as npt
 import torch
 import typer
 import uvicorn
@@ -55,6 +60,7 @@ from torchcodec.decoders import AudioDecoder
 from scripts.inference import GraphedDecoder, load_serving_pipeline
 from tiny_audio.alignment import get_device
 from tiny_audio.asr_pipeline import ASRPipeline, PreparedChunk
+from tiny_audio.diarization import NemotronDiarizer
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +74,7 @@ PARAMETERS: dict[str, type] = {
     "return_speakers": bool,
     "num_speakers": int,
     "max_speakers": int,
+    "diarize_only": bool,
 }
 # Threads for in-flight requests. Each holds one while it waits on the GPU, so
 # this is how many requests can feed the batcher at once; more than that wait
@@ -306,6 +313,31 @@ def decode_audio(audio: bytes) -> dict[str, Any]:
     return {"array": samples.data[0].numpy(), "sampling_rate": 16000}
 
 
+def diarize_response(
+    array: npt.NDArray[np.float32],
+    num_speakers: int | None = None,
+    max_speakers: int | None = None,
+) -> dict[str, Any]:
+    """Nemotron's speaker activity for 16 kHz `array`, with no ASR.
+
+    `activity` is the (frames, 8) probability matrix at `frame_s`, as base64
+    little-endian float16 of shape `shape`: a 40-minute meeting is ~4 MB that
+    way against ~20 MB as JSON floats. `keep` are the columns `top_speakers`
+    counts as speakers, in the order that names them `SPEAKER_i`.
+    """
+    activity = NemotronDiarizer.activity(array)
+    keep = NemotronDiarizer.top_speakers(
+        activity, num_speakers=num_speakers, max_speakers=max_speakers
+    )
+    return {
+        "activity": base64.b64encode(activity.astype("<f2").tobytes()).decode(),
+        "shape": list(activity.shape),
+        "frame_s": NemotronDiarizer.FRAME_S,
+        "keep": keep,
+        "speaker_segments": NemotronDiarizer.segments(activity, keep),
+    }
+
+
 def transcribe_request(
     pipe: ASRPipeline,
     body: bytes,
@@ -322,7 +354,14 @@ def transcribe_request(
     if batcher is not None:
         batcher.thread_wait(reset=True)
     try:
-        result = pipe(decoded, **params)
+        if params.pop("diarize_only", False):
+            result = diarize_response(
+                decoded["array"],
+                num_speakers=params.get("num_speakers"),
+                max_speakers=params.get("max_speakers"),
+            )
+        else:
+            result = pipe(decoded, **params)
     except ValueError as e:  # undecodable audio, bad speaker hints
         raise RequestError(str(e)) from e
     content = json.dumps(_jsonable(result)).encode()

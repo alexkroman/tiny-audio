@@ -23,6 +23,7 @@ from scripts.eval.evaluators import (
     AssemblyAIEvaluator,
     AssemblyAIModel,
     AssemblyAIStreamingEvaluator,
+    AssemblyAIStreamsEvaluator,
     DeepgramEvaluator,
     ElevenLabsEvaluator,
     EndpointEvaluator,
@@ -243,9 +244,21 @@ def _build_assemblyai_evaluator(
     api_key: str | None,
     base_url: str | None,
     num_workers: int,
+    diarizer_url: str | None = None,
 ) -> tuple[str, Evaluator]:
-    """Build the AssemblyAI batch or streaming evaluator."""
+    """Build the AssemblyAI batch or streaming evaluator, or batch inside diarizer streams."""
     key = _require_api_key(api_key, "--assemblyai-api-key", "ASSEMBLYAI_API_KEY")
+    if diarizer_url is not None:
+        if streaming:
+            msg = "--diarizer-url works with batch AssemblyAI, not --streaming"
+            raise typer.BadParameter(msg)
+        return f"{assemblyai_model.value}+streams", AssemblyAIStreamsEvaluator(
+            api_key=key,
+            diarizer_url=diarizer_url,
+            model=assemblyai_model.value,
+            base_url=base_url,
+            num_workers=num_workers,
+        )
     if streaming:
         return "universal-streaming", AssemblyAIStreamingEvaluator(
             api_key=key,
@@ -343,6 +356,7 @@ def _build_evaluator(
     num_workers: int,
     user_prompt: str | None,
     local_code: bool = False,
+    diarizer_url: str | None = None,
 ) -> tuple[str, Evaluator]:
     """Construct the evaluator once for a whole sweep. Returns (model_id, evaluator).
 
@@ -366,6 +380,9 @@ def _build_evaluator(
     # local code at all would read as "my change did nothing".
     if local_code:
         _reject_local_code(model, endpoint)
+    if diarizer_url is not None and model != "assemblyai":
+        msg = f"--diarizer-url runs AssemblyAI per speaker; it has no meaning for --model {model!r}"
+        raise typer.BadParameter(msg)
 
     if model == "assemblyai":
         return _build_assemblyai_evaluator(
@@ -374,6 +391,7 @@ def _build_evaluator(
             api_key=assemblyai_api_key,
             base_url=base_url,
             num_workers=num_workers,
+            diarizer_url=diarizer_url,
         )
     hosted = _HOSTED_BACKENDS.get(model)
     if hosted is not None:
@@ -515,6 +533,15 @@ def main(
             "--model and --max-samples.",
         ),
     ] = None,
+    diarizer_url: Annotated[
+        str | None,
+        typer.Option(
+            "--diarizer-url",
+            help="With -m assemblyai on a speaker dataset: a running `ta serve` URL whose "
+            "Nemotron diarization splits each recording into per-speaker streams, each "
+            "transcribed by AssemblyAI (billed per stream: ~speakers x the audio).",
+        ),
+    ] = None,
 ) -> None:
     """Evaluate ASR models on standard datasets."""
     # One id for the whole sweep, written into every dataset's metrics.txt so
@@ -537,6 +564,7 @@ def main(
         num_workers=num_workers,
         user_prompt=user_prompt,
         local_code=local_code,
+        diarizer_url=diarizer_url,
     )
 
     for dataset_name in expand_datasets(
