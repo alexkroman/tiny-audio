@@ -814,11 +814,16 @@ class AssemblyAIStreamingEvaluator(Evaluator):
 
 
 class DeepgramEvaluator(Evaluator):
-    """Evaluator for Deepgram Nova 3 API."""
+    """Evaluator for Deepgram Nova 3 API.
+
+    On a speaker-attributed dataset requests run with `diarize=True` and the
+    words are written as `<SPK_n>` turns by their `speaker`.
+    """
 
     def __init__(self, api_key: str, **kwargs: Unpack[EvaluatorOptions]) -> None:
         super().__init__(**kwargs)
-        self.client = DeepgramClient(api_key=api_key)
+        # Whole meetings (~100 MB WAV) outlast the SDK's 60 s default.
+        self.client = DeepgramClient(api_key=api_key, timeout=600)
 
     def transcribe(self, audio: object) -> Transcription:
         wav_bytes = prepare_wav_bytes(audio)
@@ -827,6 +832,7 @@ class DeepgramEvaluator(Evaluator):
         response = self.client.listen.v1.media.transcribe_file(
             request=wav_bytes,
             model="nova-3",
+            diarize=self.speakers,
         )
         elapsed = time.time() - start
 
@@ -836,6 +842,9 @@ class DeepgramEvaluator(Evaluator):
         if not alternatives:
             msg = "Deepgram response has no alternatives"
             raise RuntimeError(msg)
+        if self.speakers:
+            words = alternatives[0].words or []
+            return serialize_turns((w.speaker, w.word) for w in words), elapsed, None
         return alternatives[0].transcript or "", elapsed, None
 
 
@@ -910,7 +919,12 @@ class SmallestEvaluator(Evaluator):
 
 
 class ElevenLabsEvaluator(Evaluator):
-    """Evaluator for ElevenLabs Scribe API."""
+    """Evaluator for ElevenLabs Scribe API.
+
+    On a speaker-attributed dataset requests run with `diarize=True` and the
+    words are written as `<SPK_n>` turns by their `speaker_id`; audio events
+    and spacing tokens are dropped.
+    """
 
     def __init__(
         self, api_key: str, model: str = "scribe_v2", **kwargs: Unpack[EvaluatorOptions]
@@ -919,7 +933,8 @@ class ElevenLabsEvaluator(Evaluator):
         if not _ELEVENLABS_AVAILABLE:
             msg = "ElevenLabs backend requires the elevenlabs SDK: pip install elevenlabs"
             raise ImportError(msg)
-        self.client = ElevenLabs(api_key=api_key)
+        # Whole meetings outlast the SDK's 240 s default.
+        self.client = ElevenLabs(api_key=api_key, timeout=600)
         self.model = model
 
     def transcribe(self, audio: object) -> Transcription:
@@ -929,8 +944,13 @@ class ElevenLabsEvaluator(Evaluator):
         transcription = self.client.speech_to_text.convert(
             file=io.BytesIO(wav_bytes),
             model_id=self.model,
+            diarize=self.speakers,
         )
         elapsed = time.time() - start
+
+        if self.speakers and isinstance(transcription, SpeechToTextChunkResponseModel):
+            words = (w for w in transcription.words or [] if w.type == "word")
+            return serialize_turns((w.speaker_id, w.text) for w in words), elapsed, None
 
         # Extract text from transcription response
         text = (
