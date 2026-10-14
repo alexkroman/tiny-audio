@@ -7,6 +7,7 @@ from .apple_speech import AppleSpeechEvaluator
 from .asr import (
     AssemblyAIEvaluator,
     AssemblyAIStreamingEvaluator,
+    AssemblyAIStreamsEvaluator,
     DeepgramEvaluator,
     ElevenLabsEvaluator,
     EndpointEvaluator,
@@ -26,6 +27,7 @@ __all__ = [
     "AssemblyAIEvaluator",
     "AssemblyAIModel",
     "AssemblyAIStreamingEvaluator",
+    "AssemblyAIStreamsEvaluator",
     "DeepgramEvaluator",
     "ElevenLabsEvaluator",
     "EndpointEvaluator",

@@ -385,3 +385,39 @@ class TestDecodeAudio:
     def test_undecodable_audio_is_a_request_error(self) -> None:
         with pytest.raises(RequestError, match="could not decode audio"):
             serve.decode_audio(b"not audio at all")
+
+
+class TestDiarizeOnly:
+    """`diarize_only` answers Nemotron's activity and runs no ASR."""
+
+    def test_returns_activity_without_asr(
+        self, make_client: MakeClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client, pipe = make_client()
+        activity = np.zeros((300, 8), dtype=np.float32)
+        activity[:100, 0] = 0.9
+        activity[100:, 3] = 0.75
+        activity[50:60, 5] = 0.6  # a short third speaker, capped away below
+
+        def decode(_audio: bytes) -> dict[str, Any]:
+            return {"array": np.zeros(48000, dtype=np.float32), "sampling_rate": 16000}
+
+        def nemotron(_array: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]:
+            return activity
+
+        monkeypatch.setattr(serve, "decode_audio", decode)
+        monkeypatch.setattr(serve.NemotronDiarizer, "activity", nemotron)
+        response = client.post(
+            "/?diarize_only=true&max_speakers=2",
+            content=b"RIFF",
+            headers={"content-type": "audio/wav"},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert pipe.calls == []
+        assert body["keep"] == [0, 3]
+        assert body["shape"] == [300, 8]
+        assert body["frame_s"] == 0.01
+        decoded = np.frombuffer(base64.b64decode(body["activity"]), dtype="<f2").reshape(300, 8)
+        np.testing.assert_allclose(decoded, activity, atol=1e-3)
+        assert [s["speaker"] for s in body["speaker_segments"]] == ["SPEAKER_0", "SPEAKER_1"]

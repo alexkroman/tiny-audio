@@ -5,8 +5,11 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+import typer
 
-from scripts.eval.cli import save_results
+from scripts.eval.cli import _build_evaluator, save_results
+from scripts.eval.constants import AssemblyAIModel
+from scripts.eval.evaluators import AssemblyAIStreamsEvaluator
 from scripts.eval.evaluators.base import EvalResult, Metrics
 from scripts.utils import extract_model_from_dir, find_model_dirs
 
@@ -330,3 +333,39 @@ class TestResultsContent:
             content = (result_dir / "metrics.txt").read_text()
             assert "num_samples: 42" in content
             assert "model_type: test" in content
+
+
+def _build_with_diarizer(model: str, streaming: bool = False) -> tuple[str, object]:
+    return _build_evaluator(
+        model=model,
+        endpoint=False,
+        streaming=streaming,
+        assemblyai_model=AssemblyAIModel.universal_3_5_pro,
+        assemblyai_api_key="k",
+        deepgram_api_key="k",
+        elevenlabs_api_key=None,
+        smallest_api_key=None,
+        base_url=None,
+        locale="en-US",
+        num_workers=1,
+        user_prompt=None,
+        diarizer_url="https://pod-8000.proxy.runpod.net",
+    )
+
+
+class TestDiarizerUrl:
+    """`--diarizer-url` runs AssemblyAI per speaker stream, and only AssemblyAI batch."""
+
+    def test_builds_the_streams_evaluator(self) -> None:
+        model_id, evaluator = _build_with_diarizer("assemblyai")
+        assert model_id == "universal-3-5-pro+streams"
+        assert isinstance(evaluator, AssemblyAIStreamsEvaluator)
+        assert evaluator.diarizer.jobs_url == "https://pod-8000.proxy.runpod.net/jobs"
+
+    @pytest.mark.parametrize(
+        ("model", "streaming"),
+        [("deepgram", False), ("mazesmazes/tiny-audio", False), ("assemblyai", True)],
+    )
+    def test_rejected_elsewhere(self, model: str, streaming: bool) -> None:
+        with pytest.raises(typer.BadParameter, match="diarizer-url"):
+            _build_with_diarizer(model, streaming=streaming)
