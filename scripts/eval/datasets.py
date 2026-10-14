@@ -88,6 +88,16 @@ DATASET_REGISTRY: dict[str, DatasetConfig] = {
         speakers=True,
         verbatim_scoring=True,
     ),
+    # NOTSOFAR-1's full eval set (129 far-field office meetings, 4-8 speakers):
+    # one single-channel device per meeting, references from the human
+    # transcripts. Built by `scripts/eval/build_notsofar.py`.
+    "notsofar-test": DatasetConfig(
+        path="mazesmazes/notsofar-test",
+        audio_field="audio",
+        text_field="text",
+        speakers=True,
+        verbatim_scoring=True,
+    ),
     "gigaspeech": DatasetConfig(
         path="fixie-ai/gigaspeech",
         config="dev",
