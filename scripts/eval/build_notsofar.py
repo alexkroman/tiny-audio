@@ -66,14 +66,14 @@ def meeting_devices(files: list[str], root: str, devices: str) -> dict[str, list
     return {m: sorted(paths) for m, paths in sorted(out.items())}
 
 
-def _download(path: str) -> Path:
+def download_file(path: str) -> Path:
     return Path(hf_hub_download(REPO_ID, path, repo_type="dataset"))
 
 
 def first_live_recording(paths: list[str]) -> tuple[str, bytes]:
     """The first recording that is not silent: a few devices recorded nothing."""
     for path in paths:
-        data = _download(path).read_bytes()
+        data = download_file(path).read_bytes()
         audio, sr = soundfile.read(io.BytesIO(data), dtype="float32")
         if sr != 16000:
             msg = f"{path} is {sr} Hz; NOTSOFAR ships 16 kHz"
@@ -111,7 +111,7 @@ def main(
     console.print(f"{len(recordings)} meetings in {VERSION}")
     rows = []
     for meeting, paths in recordings.items():
-        transcript = json.loads(_download(f"{root}{meeting}/gt_transcription.json").read_text())
+        transcript = json.loads(download_file(f"{root}{meeting}/gt_transcription.json").read_text())
         path, audio = first_live_recording(paths)
         device = path.split("/")[-2]
         console.print(f"{meeting}: {len(transcript)} segments, {device}")

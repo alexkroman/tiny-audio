@@ -144,19 +144,21 @@ def _download(url: str, cache_dir: Path) -> bytes:
     return path.read_bytes()
 
 
-def publish_meetings(rows: list[dict[str, Any]], out: Path | None, push: str | None) -> None:
-    """Write meeting rows as the `test` split: Parquet under `out`, a private Hub repo `push`.
+def publish_meetings(
+    rows: list[dict[str, Any]], out: Path | None, push: str | None, split: str = "test"
+) -> None:
+    """Write rows as `split`: Parquet under `out`, a private Hub repo `push`.
 
-    Shared with `build_notsofar`.
+    Shared with `build_notsofar` and `build_notsofar_train`.
     """
     ds = Dataset.from_list(rows).cast_column("audio", Audio())
     if out is not None:
         out.mkdir(parents=True, exist_ok=True)
-        ds.to_parquet(str(out / "test-00000-of-00001.parquet"))
-        console.print(f"Wrote {len(ds)} meetings to {out}")
+        ds.to_parquet(str(out / f"{split}-00000-of-00001.parquet"))
+        console.print(f"Wrote {len(ds)} rows to {out}")
     if push is not None:
-        ds.push_to_hub(push, split="test", private=True)
-        console.print(f"Pushed {len(ds)} meetings to {push}")
+        ds.push_to_hub(push, split=split, private=True)
+        console.print(f"Pushed {len(ds)} rows to {push}")
 
 
 @app.command()
