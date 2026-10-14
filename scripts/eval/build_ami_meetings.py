@@ -21,6 +21,7 @@ import httpx
 import typer
 from datasets import Audio, Dataset
 from rich.console import Console
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential_jitter
 
 from scripts.eval.speaker_metrics import serialize_turns
 
@@ -39,6 +40,7 @@ AUDIO_URL = (
     "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/{m}/audio/{m}.Mix-Headset.wav"
 )
 ANNOTATIONS_URL = "https://groups.inf.ed.ac.uk/ami/AMICorpusAnnotations/ami_public_manual_1.6.2.zip"
+CACHE_DIR = Path.home() / ".cache" / "ami-meetings"
 
 
 class Word(TypedDict):
@@ -92,11 +94,54 @@ def reference_text(words: list[Word]) -> str:
     return serialize_turns((w["speaker"], w["text"]) for w in ordered)
 
 
-def _download(url: str) -> bytes:
+# The mirror also answers a burst of retries with a transient 403 (throttling),
+# so retry that and 429/5xx alongside dropped connections.
+_RETRY_STATUS = {403, 429, 500, 502, 503, 504}
+
+
+def _is_transient(exc: BaseException) -> bool:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in _RETRY_STATUS
+    return isinstance(exc, httpx.TransportError)
+
+
+@retry(
+    retry=retry_if_exception(_is_transient),
+    stop=stop_after_attempt(12),
+    wait=wait_exponential_jitter(initial=5, max=120),
+    before_sleep=lambda state: console.print(
+        f"  [yellow]retrying after {state.outcome and state.outcome.exception()!r}[/yellow]"
+    ),
+)
+def _fetch_to(url: str, part: Path) -> None:
+    """Stream `url` into `part`, resuming from its current size with a Range request.
+
+    The AMI mirror drops long transfers mid-body; each retry picks up where the
+    last one stopped instead of starting the file over.
+    """
+    offset = part.stat().st_size if part.exists() else 0
+    headers = {"Range": f"bytes={offset}-"} if offset else {}
+    with httpx.stream("GET", url, headers=headers, follow_redirects=True, timeout=60) as response:
+        if response.status_code == 416:  # already have every byte
+            return
+        response.raise_for_status()
+        # A server that ignores Range answers 200 with the whole file: start over.
+        mode = "ab" if response.status_code == 206 else "wb"
+        with part.open(mode) as f:
+            for chunk in response.iter_bytes():
+                f.write(chunk)
+
+
+def _download(url: str, cache_dir: Path) -> bytes:
+    """`url`'s bytes, cached in `cache_dir` so a rerun skips finished files."""
     console.print(f"  {url}")
-    response = httpx.get(url, follow_redirects=True, timeout=60)
-    response.raise_for_status()
-    return response.content
+    path = cache_dir / url.rsplit("/", 1)[-1]
+    if not path.exists():
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        part = path.with_name(path.name + ".part")
+        _fetch_to(url, part)
+        part.rename(path)
+    return path.read_bytes()
 
 
 @app.command()
@@ -107,13 +152,16 @@ def main(
     push: Annotated[
         str | None, typer.Option("--push", help="Push to this Hub dataset repo (private)")
     ] = None,
+    cache_dir: Annotated[
+        Path, typer.Option("--cache-dir", help="Keep downloads here; reruns skip finished files")
+    ] = CACHE_DIR,
 ) -> None:
     """Download the 24 AMI meetings and build the `ami-meetings-24` eval set."""
     if out is None and push is None:
         msg = "pass --out, --push or both"
         raise typer.BadParameter(msg)
     console.print("AMI manual annotations:")
-    annotations = zipfile.ZipFile(io.BytesIO(_download(ANNOTATIONS_URL)))
+    annotations = zipfile.ZipFile(io.BytesIO(_download(ANNOTATIONS_URL, cache_dir)))
     rows = []
     for meeting in MEETINGS:
         words = parse_words(annotations, meeting)
@@ -121,7 +169,7 @@ def main(
             msg = f"no reference words for {meeting} in {ANNOTATIONS_URL}"
             raise RuntimeError(msg)
         console.print(f"{meeting}: {len(words)} words")
-        audio = _download(AUDIO_URL.format(m=meeting))
+        audio = _download(AUDIO_URL.format(m=meeting), cache_dir)
         rows.append(
             {
                 "audio": {"bytes": audio, "path": f"{meeting}.Mix-Headset.wav"},
