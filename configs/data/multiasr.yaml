@@ -79,16 +79,20 @@
 # ┌──────────────────────────┬───────────┬───────────┬─────────┐
 # │ Dataset                  │ Raw       │ Effective │ Percent │
 # ├──────────────────────────┼───────────┼───────────┼─────────┤
-# │ LibriHeavy med (uncapped)│ 1,101,040 │  ~885,000 │   25.2% │
-# │ Gigaspeech M (uncapped)  │   910,140 │   656,893 │   18.7% │
-# │ CommonVoice 17 (uncapped)│ 1,101,170 │  ~938,000 │   26.7% │
+# │ LibriHeavy med (uncapped)│ 1,101,040 │  ~885,000 │   25.1% │
+# │ Gigaspeech M (uncapped)  │   910,140 │   656,893 │   18.6% │
+# │ CommonVoice 17 (uncapped)│ 1,101,170 │  ~938,000 │   26.6% │
 # │ SPGISpeech M             │   385,000 │   385,000 │   10.9% │
 # │ Peoples clean_sa         │  ~311,000 │  ~311,000 │    8.8% │
 # │ TEDLIUM-3                │   268,263 │  ~194,900 │    5.5% │
 # │ AMI SDM                  │   107,319 │    74,265 │    2.1% │
 # │ AMI IHM                  │   108,502 │    73,239 │    2.1% │
+# │ NOTSOFAR train+dev1      │     6,417 │     6,417 │    0.2% │
 # └──────────────────────────┴───────────┴───────────┴─────────┘
-# Total raw: ~4,292,434  →  Total effective: ~3,518,000
+# Total raw: ~4,298,851  →  Total effective: ~3,524,000
+# (2026-10-14: NOTSOFAR train+dev1 added as 3-18 s multi-speaker windows,
+# 17.1 h; every row is 3-18 s, so the duration filters drop none. See its
+# entry after AMI SDM.)
 # (2026-10-09: VoxPopuli removed, -182,482 raw / ~-157,000 effective; see
 # the note where its entry used to be, after Earnings22.)
 # (2026-09-24: LibriHeavy uncapped. ~885K is the pool left after the
@@ -99,9 +103,10 @@
 # measured 14.81% down_votes drop, an estimate until the next run logs it.
 # The previous capped mix was ~2,684,344 with each Big-3 source at 22.3%.)
 #
-# 8 training sources (9 before VoxPopuli left on 2026-10-09). Big-3
-# combined 70.5% (67.5% with VoxPopuli). AMI combined 4.0% and still the
-# entire conversational share; the mix has zero 8 kHz telephony. Finance is
+# 9 training sources (VoxPopuli left on 2026-10-09, NOTSOFAR joined on
+# 2026-10-14). Big-3 combined 70.3% (67.5% with VoxPopuli). AMI (4.2%) and
+# NOTSOFAR (0.2%) are the entire conversational share; the mix has zero
+# 8 kHz telephony. Finance is
 # carried by SPGISpeech alone (10.9%), professionally transcribed, no overlap
 # with any eval split.
 #
@@ -709,6 +714,31 @@ datasets:
     text_punct: false
     train_splits: [train]
     eval_splits: [validation]
+
+  # NOTSOFAR-1 train + dev1 -- far-field office meetings (4-8 people, 14
+  # rooms, consumer devices), the room/device diversity AMI's 3 rooms lack.
+  # Built by `scripts/build_notsofar_train.py` (CC BY 4.0, microsoft/NOTSOFAR):
+  # 3-18 s windows of 2 single-channel devices per meeting, cut where
+  # inference cuts (chunk_bounds), each labelled with EVERY word spoken inside
+  # it -- all speakers, overlap included -- because per-speaker segments leave
+  # the second voice out of half the audio. Cased, punctuated, fillers kept.
+  #
+  # Shares no meeting, room or speaker with the `notsofar-test` eval
+  # (eval_full_with_GT). dev1 shares speakers with train, so `notsofar-dev`
+  # is not a clean eval after this trains (Nemotron-3-Diarization already
+  # trained on train+dev). Dev-set-2 is challenge-only and never used.
+  #
+  # 17.1 h over ~11 h of unique text (the 2 devices are the same words under
+  # different mics). 0.2% of rows: rebuild with more `--devices-per-meeting`
+  # for more acoustic exposure before reaching for target_samples replay.
+  - path: mazesmazes/notsofar-train
+    audio_column: audio
+    text_column: text
+    task: transcribe
+    text_case: cased
+    text_punct: true
+    train_splits: [train]
+    eval_splits: []
 
 # Audio processing
 sample_rate: 16000

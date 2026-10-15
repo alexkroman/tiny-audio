@@ -440,7 +440,8 @@ training:
   # and this are >1, because they compound.
   #
   # ~3.52M loader rows (multiasr, all sources uncapped + Peoples, VoxPopuli
-  # removed 2026-10-09) at effective batch 56 is ~63k optimizer steps
+  # removed 2026-10-09, NOTSOFAR's 6.4K added 2026-10-14) at effective batch
+  # 56 is ~63k optimizer steps
   # without showing any row twice. Warmup 1,000 is ~1.5%
   # of the schedule and the modal published value for this architecture
   # class (Granite Speech 1000, Canary-Qwen 1000, SLAM-ASR 1000; Ultravox's
