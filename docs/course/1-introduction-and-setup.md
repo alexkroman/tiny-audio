@@ -253,8 +253,8 @@ ______________________________________________________________________
 | `tiny_audio/asr_config.py`     | `ASRConfig`: every model setting, with defaults                                            |
 | `tiny_audio/asr_processing.py` | `ASRProcessor`: feature extractor plus tokenizer                                           |
 | `tiny_audio/asr_pipeline.py`   | The `transformers` pipeline used for inference                                             |
-| `scripts/train.py`             | Training entry point: dataset loading, label normalization, and the trainer              |
-| `scripts/train_collator.py`    | The data collator: chat messages, loss masking, and label filtering                      |
+| `scripts/train.py`             | Training entry point: dataset loading, label normalization, and the trainer                |
+| `scripts/train_collator.py`    | The data collator: chat messages, loss masking, and label filtering                        |
 | `scripts/eval/`                | Dataset registry and evaluators (local models and commercial APIs)                         |
 | `configs/`                     | Hydra configuration                                                                        |
 
