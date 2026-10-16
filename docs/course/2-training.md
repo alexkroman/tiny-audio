@@ -57,7 +57,7 @@ Signs of trouble:
 ### What Convergence Looks Like
 
 The projector starts as random noise, so early on the decoder receives garbage and the loss is high.
-In the published `stage_1` runs on the production mix:
+In `stage_1` runs on the production mix:
 
 - **Steps 0 to ~500**: loss falls from ~3.5 to under 1.0 as the projector finds the basic
   audio-token-to-word mapping. Transcripts go from gibberish to recognizable within this window.
@@ -132,8 +132,9 @@ poetry run ta runpod plan --experiment stage_1
 ```
 
 Read the output. For the production recipe it will tell you that `multiasr` is over a terabyte on
-disk and that full-decoder fine-tuning at batch 100 wants an 80 GB GPU. That's the run behind the
-published model. It is not the run you'll do in class.
+disk and that full-decoder fine-tuning at batch 100 wants an 80 GB GPU. That's the production-scale
+recipe, on the full data mix. It is not the run you'll do in class — and it is not the recipe behind
+the published model; the published model was trained with `granite_qwen_frozen`.
 
 ### Exercise 3: Write Your Experiment (10 min)
 
@@ -141,7 +142,8 @@ You'll train on LoquaciousSet `small`: 250 hours, ~107K clips, 23 GB of parquet 
 after caching). It is a balanced mix of read and spontaneous, clean and noisy English, and its
 `test` split is the default `ta eval` benchmark, so you can score your model fairly afterward.
 
-**Data config** `configs/data/loquacious_small.yaml`:
+**Data config.** Create `configs/data/loquacious_small.yaml` (it is not in the repo) with this
+content:
 
 ```yaml
 # LoquaciousSet `small`: 250 h / 107K clips, 22.9 GB of parquet.
@@ -159,7 +161,8 @@ dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
 max_eval_samples_per_dataset: 200
 ```
 
-**Experiment config** `configs/experiments/my_run.yaml`:
+**Experiment config.** Create `configs/experiments/my_run.yaml` (also not in the repo) with this
+content:
 
 ```yaml
 # @package _global_

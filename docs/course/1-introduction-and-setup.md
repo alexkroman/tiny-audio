@@ -187,8 +187,8 @@ result = pipe("path/to/audio.wav")
 print(result["text"])
 
 # Word-level timestamps
-result = pipe("path/to/audio.wav", return_timestamps="word")
-print(result["chunks"])
+result = pipe("path/to/audio.wav", return_timestamps=True)
+print(result["words"])
 ```
 
 `trust_remote_code=True` is required because the model's architecture lives in the repo's own Python
@@ -253,12 +253,13 @@ ______________________________________________________________________
 | `tiny_audio/asr_config.py`     | `ASRConfig`: every model setting, with defaults                                            |
 | `tiny_audio/asr_processing.py` | `ASRProcessor`: feature extractor plus tokenizer                                           |
 | `tiny_audio/asr_pipeline.py`   | The `transformers` pipeline used for inference                                             |
-| `scripts/train.py`             | Dataset loading, label normalization, the data collator, and the trainer                   |
+| `scripts/train.py`             | Training entry point: dataset loading, label normalization, and the trainer                |
+| `scripts/train_collator.py`    | The data collator: chat messages, loss masking, and label filtering                        |
 | `scripts/eval/`                | Dataset registry and evaluators (local models and commercial APIs)                         |
 | `configs/`                     | Hydra configuration                                                                        |
 
 Worth reading in this order: the `MLPAudioProjector` class, then `ASRModel.forward`, then
-`DataCollator._make_messages` in the training script.
+`DataCollator._make_messages` in `scripts/train_collator.py`.
 
 ### Configuration System
 

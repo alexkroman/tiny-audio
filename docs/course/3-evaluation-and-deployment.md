@@ -274,6 +274,10 @@ Exercise 2 puts them side by side.
 poetry run ta eval -m $MODEL -d all -n 100
 ```
 
+`all` expands to the 12 plain ASR sets. It skips `expresso` and the speaker-attribution sets
+(`ami-speakers`, `ami-speakers-long`, `ami-meetings-24`, `notsofar-test`); name those explicitly
+when you want them.
+
 ### Running Evaluation on the Pod
 
 If you still have a RunPod instance up, evaluation is much faster there:
