@@ -190,6 +190,34 @@ trained with [Tiny Audio](https://github.com/alexkroman/tiny-audio).
 **[Train your own](https://github.com/alexkroman/tiny-audio)** ·
 **[Free 3.5-hour course](https://github.com/alexkroman/tiny-audio/blob/main/docs/course/0-course-overview.md)**
 
+## Model Description
+
+Tiny Audio connects a frozen, pretrained speech encoder to a pretrained LLM with a small trainable
+projector:
+
+```text
+Audio (16 kHz) → speech encoder (frozen) → MLP projector (trained) → LLM decoder → Text
+```
+
+The published model pairs the Granite Speech 5.0 470M encoder (kept frozen) with the Qwen3.5-2B
+decoder. The MLP projector stacks neighbouring encoder frames and maps them into the decoder's
+embedding space; it is the only part trained from scratch, and the decoder is adapted with LoRA.
+Only the projector and LoRA adapters are trained: ~80M parameters. The encoder, projector, and
+decoder are each swappable from config in the
+[training repo](https://github.com/alexkroman/tiny-audio).
+
+## Intended Use
+
+Tiny Audio is for transcribing English speech — meetings, calls, lectures, and other recorded
+audio — when you want the finished transcript itself: punctuation, capitalization, and formatted
+numbers included, plus word-level timestamps and speaker labels when you need them. It is also
+built to be read and retrained: the training code, data mix, and recipe are open, so you can adapt
+it to your own audio.
+
+Out of scope: non-English transcription, and audio far from the training distribution — far-field,
+noisy, or heavily overlapping speech — where word error rate rises (see Benchmarks and
+Limitations).
+
 ## Quick Start
 
 ```bash
@@ -213,7 +241,7 @@ the model writes punctuation, capitalization, and numbers itself.
 
 Word error rate (%, lower is better) on 11,822 samples (up to 1,000 per dataset), scored with the
 [Tiny Audio eval harness](https://github.com/alexkroman/tiny-audio/tree/main/scripts/eval)
-(`ta eval`) after text normalization.
+(`ta eval`) against the `ta serve` HTTP API on an RTX 4090, after text normalization.
 
 | Dataset                     |      WER |
 | --------------------------- | -------: |
@@ -336,6 +364,14 @@ The
 walks through how the pieces fit, training a model, evaluating it, and publishing it with a demo
 like [this one](https://huggingface.co/spaces/mazesmazes/tiny-audio).
 
+## Serving and Streaming
+
+For more than one-off calls, the [training repo](https://github.com/alexkroman/tiny-audio) ships a
+batched HTTP server (`ta serve`) with an async jobs API for long recordings, and the model class
+exposes token-by-token streaming output via `ASRModel.generate_streaming`. See the
+[repo README](https://github.com/alexkroman/tiny-audio#as-an-http-api-on-runpod) for setup and
+the request format.
+
 ## Model Specifications
 
 | Specification    | Value                                                              |
@@ -346,6 +382,8 @@ like [this one](https://huggingface.co/spaces/mazesmazes/tiny-audio).
 | Vocabulary       | Qwen3.5 tokenizer                                                  |
 | Languages        | English only                                                       |
 | Generation       | Greedy decoding (num_beams=1, do_sample=False), max 256 new tokens |
+| Optional output  | Word-level timestamps; speaker-labelled words and speaker segments |
+| Memory           | ~6 GB of GPU or Apple Silicon memory (bf16 weights)                |
 
 ## Training Details
 
@@ -407,10 +445,10 @@ pipe = pipeline(
 If you use this model, please cite:
 
 ```bibtex
-@misc{tinyaudio2024,
+@misc{tinyaudio2025,
   author = {Alex Kroman},
   title = {Tiny Audio: Minimal ASR Training},
-  year = {2024},
+  year = {2025},
   publisher = {GitHub},
   url = {https://github.com/alexkroman/tiny-audio}
 }
