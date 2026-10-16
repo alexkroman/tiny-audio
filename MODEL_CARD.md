@@ -208,15 +208,14 @@ decoder are each swappable from config in the
 
 ## Intended Use
 
-Tiny Audio is for transcribing English speech — meetings, calls, lectures, and other recorded
-audio — when you want the finished transcript itself: punctuation, capitalization, and formatted
-numbers included, plus word-level timestamps and speaker labels when you need them. It is also
-built to be read and retrained: the training code, data mix, and recipe are open, so you can adapt
-it to your own audio.
+Tiny Audio is for transcribing English speech — meetings, calls, lectures, and other recorded audio
+— when you want the finished transcript itself: punctuation, capitalization, and formatted numbers
+included, plus word-level timestamps and speaker labels when you need them. It is also built to be
+read and retrained: the training code, data mix, and recipe are open, so you can adapt it to your
+own audio.
 
 Out of scope: non-English transcription, and audio far from the training distribution — far-field,
-noisy, or heavily overlapping speech — where word error rate rises (see Benchmarks and
-Limitations).
+noisy, or heavily overlapping speech — where word error rate rises (see Benchmarks and Limitations).
 
 ## Quick Start
 
@@ -369,8 +368,8 @@ like [this one](https://huggingface.co/spaces/mazesmazes/tiny-audio).
 For more than one-off calls, the [training repo](https://github.com/alexkroman/tiny-audio) ships a
 batched HTTP server (`ta serve`) with an async jobs API for long recordings, and the model class
 exposes token-by-token streaming output via `ASRModel.generate_streaming`. See the
-[repo README](https://github.com/alexkroman/tiny-audio#as-an-http-api-on-runpod) for setup and
-the request format.
+[repo README](https://github.com/alexkroman/tiny-audio#as-an-http-api-on-runpod) for setup and the
+request format.
 
 ## Model Specifications
 

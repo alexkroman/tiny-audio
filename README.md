@@ -20,22 +20,22 @@ minutes.
 [![Model](https://img.shields.io/badge/%F0%9F%A4%97-mazesmazes%2Ftiny--audio-yellow)](https://huggingface.co/mazesmazes/tiny-audio)
 [![Demo](https://img.shields.io/badge/%F0%9F%A4%97-Live%20Demo-blue)](https://huggingface.co/spaces/mazesmazes/tiny-audio)
 
-**Live demo:** [huggingface.co/spaces/mazesmazes/tiny-audio](https://huggingface.co/spaces/mazesmazes/tiny-audio) ·
-**Model:** [mazesmazes/tiny-audio](https://huggingface.co/mazesmazes/tiny-audio) ·
-**Course:** [free 3.5-hour course](docs/course/0-course-overview.md)
+**Live demo:**
+[huggingface.co/spaces/mazesmazes/tiny-audio](https://huggingface.co/spaces/mazesmazes/tiny-audio) ·
+**Model:** [mazesmazes/tiny-audio](https://huggingface.co/mazesmazes/tiny-audio) · **Course:**
+[free 3.5-hour course](docs/course/0-course-overview.md)
 
 ## What you get
 
-- Transcripts with punctuation, capitalization, and formatted numbers, with no post-processing
-  step.
+- Transcripts with punctuation, capitalization, and formatted numbers, with no post-processing step.
 - Word-level timestamps from forced alignment (`return_timestamps=True`).
 - Speaker diarization (`return_speakers=True`): each speaker is transcribed separately, and every
   word stays with its speaker.
 - Token-by-token streaming output via `ASRModel.generate_streaming`.
-- A batched HTTP server (`ta serve`) that runs locally or on RunPod, with an async jobs API for
-  long recordings.
-- Training recipes that train only the projector and LoRA (~80M parameters for the published
-  model), from a five-minute laptop smoke test to a full run on one rented GPU.
+- A batched HTTP server (`ta serve`) that runs locally or on RunPod, with an async jobs API for long
+  recordings.
+- Training recipes that train only the projector and LoRA (~80M parameters for the published model),
+  from a five-minute laptop smoke test to a full run on one rented GPU.
 - An eval harness (`ta eval`) that scores the model against commercial APIs on the same samples.
 
 ## Try it in 30 seconds
