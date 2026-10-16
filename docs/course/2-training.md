@@ -133,8 +133,8 @@ poetry run ta runpod plan --experiment stage_1
 
 Read the output. For the production recipe it will tell you that `multiasr` is over a terabyte on
 disk and that full-decoder fine-tuning at batch 100 wants an 80 GB GPU. That's the production-scale
-recipe, on the full data mix. It is not the run you'll do in class — and it is not the recipe
-behind the published model; the published model was trained with `granite_qwen_frozen`.
+recipe, on the full data mix. It is not the run you'll do in class — and it is not the recipe behind
+the published model; the published model was trained with `granite_qwen_frozen`.
 
 ### Exercise 3: Write Your Experiment (10 min)
 
@@ -161,8 +161,8 @@ dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
 max_eval_samples_per_dataset: 200
 ```
 
-**Experiment config.** Create `configs/experiments/my_run.yaml` (also not in the repo) with
-this content:
+**Experiment config.** Create `configs/experiments/my_run.yaml` (also not in the repo) with this
+content:
 
 ```yaml
 # @package _global_
