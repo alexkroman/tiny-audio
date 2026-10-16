@@ -20,6 +20,24 @@ minutes.
 [![Model](https://img.shields.io/badge/%F0%9F%A4%97-mazesmazes%2Ftiny--audio-yellow)](https://huggingface.co/mazesmazes/tiny-audio)
 [![Demo](https://img.shields.io/badge/%F0%9F%A4%97-Live%20Demo-blue)](https://huggingface.co/spaces/mazesmazes/tiny-audio)
 
+**Live demo:** [huggingface.co/spaces/mazesmazes/tiny-audio](https://huggingface.co/spaces/mazesmazes/tiny-audio) ·
+**Model:** [mazesmazes/tiny-audio](https://huggingface.co/mazesmazes/tiny-audio) ·
+**Course:** [free 3.5-hour course](docs/course/0-course-overview.md)
+
+## What you get
+
+- Transcripts with punctuation, capitalization, and formatted numbers, with no post-processing
+  step.
+- Word-level timestamps from forced alignment (`return_timestamps=True`).
+- Speaker diarization (`return_speakers=True`): each speaker is transcribed separately, and every
+  word stays with its speaker.
+- Token-by-token streaming output via `ASRModel.generate_streaming`.
+- A batched HTTP server (`ta serve`) that runs locally or on RunPod, with an async jobs API for
+  long recordings.
+- Training recipes that train only the projector and LoRA (~80M parameters for the published
+  model), from a five-minute laptop smoke test to a full run on one rented GPU.
+- An eval harness (`ta eval`) that scores the model against commercial APIs on the same samples.
+
 ## Try it in 30 seconds
 
 **No install:** open the **[live demo](https://huggingface.co/spaces/mazesmazes/tiny-audio)**,
@@ -226,6 +244,8 @@ how the encoder, projector, and decoder fit together (with real tensor shapes), 
 evaluating it against commercial APIs, and publishing it with a live demo. You need Python, the
 command line, and git. The course trains the smaller `stage_1` recipe, not the published model, so
 your WER will be higher than the table above.
+
+## Contributing
 
 Want to try a new projector architecture, add a dataset, or change the codebase? See
 [CONTRIBUTING.md](CONTRIBUTING.md) for the CLI reference, config layout, and quality gates.
