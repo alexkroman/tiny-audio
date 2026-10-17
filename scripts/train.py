@@ -12,6 +12,7 @@ from typing import Any, NamedTuple
 
 import hydra
 import torch
+import torch._dynamo.config as dynamo_config
 import wandb
 from datasets import (
     Audio,
@@ -92,6 +93,13 @@ def _resolve_transcribe_prompt(
     return None
 
 
+def _add_constant_column(ds: Dataset, name: str, value: object) -> Dataset:
+    """`ds` with a column holding `value` on every row."""
+    # @fingerprint_transform computes `new_fingerprint` when it is omitted,
+    # though `add_column` annotates it as a required argument.
+    return ds.add_column(name, [value] * len(ds))  # pyright: ignore[reportCallIssue]
+
+
 def _add_source_policy_columns(ds: Dataset, dataset_cfg: DictConfig, dataset_path: str) -> Dataset:
     """Attach the source's declared `_text_case` / `_text_punct` as constant columns."""
     # text_case: declares whether this source's transcripts already carry
@@ -107,9 +115,7 @@ def _add_source_policy_columns(ds: Dataset, dataset_cfg: DictConfig, dataset_pat
                 f"got {text_case!r} for {dataset_path}"
             )
             raise ValueError(msg)
-        # @fingerprint_transform computes `new_fingerprint` when it is omitted,
-        # though `add_column` annotates it as a required argument.
-        ds = ds.add_column("_text_case", [text_case] * len(ds))  # pyright: ignore[reportCallIssue]
+        ds = _add_constant_column(ds, "_text_case", text_case)
 
     # text_punct: declares whether this source's transcripts carry
     # punctuation. Deliberately separate from text_case -- they are not the
@@ -121,11 +127,7 @@ def _add_source_policy_columns(ds: Dataset, dataset_cfg: DictConfig, dataset_pat
         if not isinstance(text_punct, bool):
             msg = f"text_punct must be a bool, got {text_punct!r} for {dataset_path}"
             raise ValueError(msg)
-        # @fingerprint_transform computes `new_fingerprint` when it is omitted,
-        # though `add_column` annotates it as a required argument.
-        ds = ds.add_column(  # pyright: ignore[reportCallIssue]
-            "_text_punct", [text_punct] * len(ds)
-        )
+        ds = _add_constant_column(ds, "_text_punct", text_punct)
     return ds
 
 
@@ -1049,7 +1051,6 @@ def main(cfg: DictConfig) -> None:
     # the first scalar-producing op (e.g. token_counts.max().item() in
     # _gather_audio_embeds).
     # torch exposes these knobs only under torch._dynamo.
-    dynamo_config = torch._dynamo.config  # pyright: ignore[reportPrivateUsage]
     dynamo_config.cache_size_limit = 256
     dynamo_config.capture_scalar_outputs = True
     trainer = ASRTrainer(

@@ -153,3 +153,10 @@ def test_token_count_matches_projector_for_each_row(mel_len: int) -> None:
     assert contents[0].count("<audio>") == expected_full
     # The 4-frame row: encoder 4 -> 2, projector (2-4)//4+1 = 0 placeholders.
     assert contents[1].count("<audio>") == 0
+
+
+def test_audio_token_must_map_to_one_id() -> None:
+    tok = MagicMock()
+    tok.convert_tokens_to_ids.return_value = [5, 6]
+    with pytest.raises(TypeError, match="not one id"):
+        ASRProcessor(MagicMock(), tok)

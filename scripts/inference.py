@@ -10,8 +10,10 @@ from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
+import torch._dynamo.config as dynamo_config
 from peft import PeftModel
 from peft.tuners.tuners_utils import BaseTuner
+from torch import nn
 from transformers import AttentionInterface, AttentionMaskInterface, StaticCache
 from transformers.integrations.sdpa_attention import sdpa_attention_forward
 from transformers.masking_utils import sdpa_mask
@@ -171,8 +173,8 @@ def gated_delta_step_(
     triton kernel aliased pointers directly made the compiled graph drop it.
     """
     # CUDA-only dependencies, installed on the pod by `ta runpod deploy`.
-    import triton  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
-    from fla.ops.gated_delta_rule.fused_recurrent import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
+    import triton  # noqa: PLC0415
+    from fla.ops.gated_delta_rule.fused_recurrent import (  # noqa: PLC0415
         fused_recurrent_gated_delta_rule_fwd_kernel,
     )
 
@@ -414,7 +416,7 @@ def load_serving_pipeline(
     model = ASRModel.from_pretrained(model_id)
     merge_lora_adapters(model)
     # PreTrainedModel.to is functools.wraps'd, which pyright cannot bind as a method.
-    model.to(device)  # pyright: ignore[reportArgumentType]
+    cast(nn.Module, model).to(device)
     model.eval()
     contiguous_lm_head_input(model)
     if device.type == "mps":
@@ -463,7 +465,6 @@ class GraphedDecoder:
         # Every bucket is a recompile of the one decode frame, short tier and
         # full, and dynamo's default limit of 8 would quietly run the rest
         # eagerly (no CUDA graph, correct but several times slower).
-        dynamo_config = torch._dynamo.config  # pyright: ignore[reportPrivateUsage]
         dynamo_config.recompile_limit = max(
             dynamo_config.recompile_limit, 2 * len(self.buckets) + 4
         )
@@ -561,7 +562,7 @@ def prompt_tokens(pipe: ASRPipeline, prepared: PreparedChunk) -> int:
     batch = collate_chunks([prepared])
     model = pipe.model
     with torch.inference_mode():
-        input_ids, _, _ = model._prepare_audio_inputs(  # pyright: ignore[reportPrivateUsage]
+        input_ids, _, _ = model.prepare_audio_inputs(
             batch["input_features"].to(model.device), batch["attention_mask"].to(model.device)
         )
     return int(input_ids.shape[1])

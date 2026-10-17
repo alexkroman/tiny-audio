@@ -5,7 +5,7 @@ Focuses on behavior testing rather than existence checks.
 
 import importlib
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -357,20 +357,27 @@ class TestDeployRetries:
 class TestBuildEvalScript:
     """build_eval_script turns eval options into the remote shell script."""
 
-    def _build(self, **overrides: object) -> str:
-        kwargs: dict[str, object] = {
-            "hf_token": "hf_x",
-            "model": "me/model",
-            "datasets": ["loquacious", "earnings22"],
-            "max_samples": 100,
-            "assemblyai_api_key": "aai_key",
-            "assemblyai_model": "best",
-            "num_workers": 4,
-            "streaming": True,
-            "extra_args": ["--foo", "bar"],
-        }
-        kwargs.update(overrides)
-        return build_eval_script(**kwargs)  # type: ignore[arg-type]
+    def _build(
+        self,
+        *,
+        datasets: Sequence[str] = ("loquacious", "earnings22"),
+        max_samples: int | None = 100,
+        assemblyai_api_key: str | None = "aai_key",
+        num_workers: int = 4,
+        streaming: bool = True,
+        extra_args: Sequence[str] | None = ("--foo", "bar"),
+    ) -> str:
+        return build_eval_script(
+            hf_token="hf_x",
+            model="me/model",
+            datasets=list(datasets),
+            max_samples=max_samples,
+            assemblyai_api_key=assemblyai_api_key,
+            assemblyai_model="best",
+            num_workers=num_workers,
+            streaming=streaming,
+            extra_args=None if extra_args is None else list(extra_args),
+        )
 
     def test_all_options(self) -> None:
         script = self._build()

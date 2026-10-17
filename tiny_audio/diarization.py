@@ -2,7 +2,7 @@
 
 import importlib.util
 import re
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -161,7 +161,7 @@ class NemotronDiarizer:
                 AutoModelForAudioFrameClassification.from_pretrained(cls.MODEL_ID)
             )
             # PreTrainedModel.to is functools.wraps'd, which pyright cannot bind as a method.
-            model.to(get_device())  # pyright: ignore[reportArgumentType]
+            cast(torch.nn.Module, model).to(get_device())
             model.eval()
             cls._model = model
             processor: Nemotron3DiarizationProcessor = AutoProcessor.from_pretrained(cls.MODEL_ID)

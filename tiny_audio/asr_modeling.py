@@ -22,8 +22,10 @@ from transformers import (
     AutoModelForCausalLM,
     AutoModelForSeq2SeqLM,
     AutoTokenizer,
+    GenerationConfig,
     LogitsProcessor,
     LogitsProcessorList,
+    PretrainedConfig,
     PreTrainedModel,
     PreTrainedTokenizerBase,
     SequenceFeatureExtractor,
@@ -40,7 +42,11 @@ from transformers.utils.hub import (
 if TYPE_CHECKING:
     from transformers import GraniteSpeech5Encoder as _GraniteSpeech5Encoder
 
-    from .asr_attention import resolve_attn_implementation, resolve_decoder_attn_implementation
+    from .asr_attention import (
+        active_attn_implementation,
+        resolve_attn_implementation,
+        resolve_decoder_attn_implementation,
+    )
     from .asr_config import ASRConfig, compute_encoder_output_length
     from .asr_layers import unfreeze_encoder_top_layers
     from .asr_processing import (
@@ -64,7 +70,11 @@ if TYPE_CHECKING:
     GraniteSpeech5Encoder: type[_GraniteSpeech5Encoder] | None
 else:
     try:
-        from .asr_attention import resolve_attn_implementation, resolve_decoder_attn_implementation
+        from .asr_attention import (
+            active_attn_implementation,
+            resolve_attn_implementation,
+            resolve_decoder_attn_implementation,
+        )
         from .asr_config import ASRConfig, compute_encoder_output_length
         from .asr_layers import unfreeze_encoder_top_layers
         from .asr_processing import (
@@ -76,7 +86,11 @@ else:
         from .asr_types import LoadStateDictResult, OutputLengthProjector, StateDictT
         from .projectors import MLPAudioProjector
     except ImportError:  # flat layout on the Hub: sibling modules, no package
-        from asr_attention import resolve_attn_implementation, resolve_decoder_attn_implementation
+        from asr_attention import (
+            active_attn_implementation,
+            resolve_attn_implementation,
+            resolve_decoder_attn_implementation,
+        )
         from asr_config import ASRConfig, compute_encoder_output_length
         from asr_layers import unfreeze_encoder_top_layers
         from asr_processing import (
@@ -97,7 +111,7 @@ else:
         GraniteSpeech5Encoder = None
 
 
-logger = logging.getLogger(__name__)
+logger: logging.Logger = logging.getLogger(__name__)
 
 # Vocab dimension the embedding table is padded to after adding the audio
 # token. 128 is what transformers' own `pad_to_multiple_of` docs recommend for
@@ -317,7 +331,7 @@ def _log_linear_attention_backends(level: int = logging.WARNING) -> None:
 class ASRModel(PreTrainedModel, GenerationMixin):
     """Audio-to-text model combining an audio encoder, projector, and language model."""
 
-    config_class = ASRConfig
+    config_class: type[PretrainedConfig] | None = ASRConfig
     base_model_prefix = "model"
     main_input_name = "input_features"
     _supports_flash_attn_2 = True
@@ -422,7 +436,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         target_dtype = getattr(torch, config.model_dtype)
 
         # Audio encoder (frozen)
-        self.audio_tower = self._load_audio_encoder(config, target_dtype)
+        self.audio_tower: nn.Module = self._load_audio_encoder(config, target_dtype)
 
         # Language model (frozen). Typed as the decoder even with LoRA attached:
         # a PeftModel forwards every attribute it does not define to the
@@ -465,7 +479,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         self._init_tokenizer(config)
 
         # Set up generation config with greedy decoding defaults
-        self.generation_config = self.language_model.generation_config
+        self.generation_config: GenerationConfig = self.language_model.generation_config
         self.generation_config.max_new_tokens = config.max_new_tokens
         self.generation_config.use_cache = config.use_cache
         # `generate()` reads the GenerationConfig and nothing else, so every
@@ -477,10 +491,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         self.generation_config.pad_token_id = self.tokenizer.pad_token_id
 
         # Feature extractor for audio preprocessing
-        self.feature_extractor = self._create_feature_extractor(config)
+        self.feature_extractor: SequenceFeatureExtractor = self._create_feature_extractor(config)
 
         # Audio projector (trainable unless freeze_projector is set)
-        self.projector = self._create_projector(config, target_dtype)
+        self.projector: MLPAudioProjector = self._create_projector(config, target_dtype)
 
         # Setup LoRA if enabled (Stage 2 fine-tuning)
         # Skip if loading from pretrained - from_pretrained will handle adapter loading
@@ -510,12 +524,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         feature_extractor: SequenceFeatureExtractor = AutoFeatureExtractor.from_pretrained(
             config.audio_model_id
         )
-        # Whisper's encoder requires a fixed 3000 mel frames (30s) and the
-        # feature extractor pads to that by default — leave it alone. Other
-        # encoders (e.g. GLM-ASR) accept variable-length input, so we disable
-        # padding to avoid wasting compute on silent frames.
-        if "whisper" not in config.audio_model_id.lower():
-            feature_extractor.padding = False  # pyright: ignore[reportAttributeAccessIssue]
         return feature_extractor
 
     @classmethod
@@ -613,8 +621,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # trainable blocks; it must be fp32 for Adam's step to survive
         # rounding. See ASRConfig.encoder_dtype for the arithmetic.
         encoder_dtype = _resolve_dtype(getattr(config, "encoder_dtype", None), dtype)
-        # PreTrainedModel.to is functools.wraps'd, which pyright cannot bind as a method.
-        encoder = encoder.to(dtype=encoder_dtype)  # pyright: ignore[reportCallIssue]
+        # PreTrainedModel.to is functools.wraps'd, which pyright cannot bind as a
+        # method; it casts in place and returns the module itself.
+        cast(nn.Module, encoder).to(dtype=encoder_dtype)
         if getattr(config, "freeze_audio_encoder", True):
             encoder.requires_grad_(False)
             encoder.train(False)  # equivalent to .eval(); avoids a security hook false-positive
@@ -699,7 +708,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # isn't fully propagated to every submodule.
         # `to` returns the module itself, so the cast happens in place.
         # PreTrainedModel.to is functools.wraps'd, which pyright cannot bind as a method.
-        decoder.to(dtype=dtype)  # pyright: ignore[reportCallIssue]
+        cast(nn.Module, decoder).to(dtype=dtype)
         decoder.config.use_cache = getattr(config, "use_cache", True)
         if getattr(config, "freeze_language_model", True):
             decoder.requires_grad_(False)
@@ -1368,7 +1377,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         input_ids, attention_mask = left_pad_prompt_rows(rows, self.tokenizer)
         return input_ids.to(device), attention_mask.to(device)
 
-    def _prepare_audio_inputs(
+    def prepare_audio_inputs(
         self,
         input_features: torch.Tensor,
         audio_attention_mask: torch.Tensor,
@@ -1429,10 +1438,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         """
         if attention_mask is None or attention_mask.device.type != "mps":
             return
-        if (
-            self.language_model.config._attn_implementation  # pyright: ignore[reportPrivateUsage]  # transformers has no public accessor
-            != "sdpa"
-        ):
+        if active_attn_implementation(self.language_model.config) != "sdpa":
             return
         if not bool((attention_mask == 0).any()):
             return
@@ -1447,7 +1453,6 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         )
         raise ValueError(msg)
 
-    @torch.no_grad()  # pyright: ignore[reportUntypedFunctionDecorator]
     def generate(
         self,
         *args: Any,
@@ -1467,68 +1472,73 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         signature stays compatible with `GenerationMixin.generate`, whose
         positional parameters mean something else entirely.
         """
-        if args:
-            msg = (
-                "ASRModel.generate takes input_ids, input_features, "
-                "audio_attention_mask and attention_mask as keyword arguments"
+        # A context manager, not the @torch.no_grad() decorator, which pyright
+        # cannot type and so would erase this signature.
+        with torch.no_grad():
+            if args:
+                msg = (
+                    "ASRModel.generate takes input_ids, input_features, "
+                    "audio_attention_mask and attention_mask as keyword arguments"
+                )
+                raise TypeError(msg)
+            if input_features is None:
+                msg = "input_features required for generation"
+                raise ValueError(msg)
+            if audio_attention_mask is None:
+                msg = "audio_attention_mask required for generation"
+                raise ValueError(msg)
+
+            input_ids, attention_mask, inputs_embeds = self.prepare_audio_inputs(
+                input_features,
+                audio_attention_mask,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
             )
-            raise TypeError(msg)
-        if input_features is None:
-            msg = "input_features required for generation"
-            raise ValueError(msg)
-        if audio_attention_mask is None:
-            msg = "audio_attention_mask required for generation"
-            raise ValueError(msg)
+            self._assert_sdpa_safe_on_mps(attention_mask)
 
-        input_ids, attention_mask, inputs_embeds = self._prepare_audio_inputs(
-            input_features,
-            audio_attention_mask,
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-        )
-        self._assert_sdpa_safe_on_mps(attention_mask)
+            # Fold generation flags (max_new_tokens, num_beams, output_scores, ...)
+            # into a private copy of generation_config instead of passing them
+            # alongside it: transformers v5 still applies such kwargs but warns that
+            # combining them with `generation_config` is deprecated. update() returns
+            # the kwargs that aren't config fields (streamer, logits_processor, ...),
+            # which still go to generate() directly.
+            gen_cfg = deepcopy(self.generation_config)
+            generate_kwargs = gen_cfg.update(**generate_kwargs)
+            # output_scores requires return_dict_in_generate for HF generate to
+            # actually populate .scores on the output object.
+            if gen_cfg.output_scores:
+                gen_cfg.return_dict_in_generate = True
+            if gen_cfg.no_repeat_ngram_size:
+                processors = LogitsProcessorList(
+                    generate_kwargs.pop("logits_processor", None) or []
+                )
+                processors.append(TensorNoRepeatNGram(gen_cfg.no_repeat_ngram_size))
+                generate_kwargs["logits_processor"] = processors
+                # 0, not None: generate refills None from the decoder's own config
+                # and would build the stock processor alongside this one.
+                gen_cfg.no_repeat_ngram_size = 0
 
-        # Fold generation flags (max_new_tokens, num_beams, output_scores, ...)
-        # into a private copy of generation_config instead of passing them
-        # alongside it: transformers v5 still applies such kwargs but warns that
-        # combining them with `generation_config` is deprecated. update() returns
-        # the kwargs that aren't config fields (streamer, logits_processor, ...),
-        # which still go to generate() directly.
-        gen_cfg = deepcopy(self.generation_config)
-        generate_kwargs = gen_cfg.update(**generate_kwargs)
-        # output_scores requires return_dict_in_generate for HF generate to
-        # actually populate .scores on the output object.
-        if gen_cfg.output_scores:
-            gen_cfg.return_dict_in_generate = True
-        if gen_cfg.no_repeat_ngram_size:
-            processors = LogitsProcessorList(generate_kwargs.pop("logits_processor", None) or [])
-            processors.append(TensorNoRepeatNGram(gen_cfg.no_repeat_ngram_size))
-            generate_kwargs["logits_processor"] = processors
-            # 0, not None: generate refills None from the decoder's own config
-            # and would build the stock processor alongside this one.
-            gen_cfg.no_repeat_ngram_size = 0
+            lm_inputs = self._lm_generate_inputs(input_ids, inputs_embeds)
+            output = self.language_model.generate(
+                **lm_inputs,
+                attention_mask=attention_mask,
+                generation_config=gen_cfg,
+                **generate_kwargs,
+            )
 
-        lm_inputs = self._lm_generate_inputs(input_ids, inputs_embeds)
-        output = self.language_model.generate(
-            **lm_inputs,
-            attention_mask=attention_mask,
-            generation_config=gen_cfg,
-            **generate_kwargs,
-        )
-
-        # With input_ids AND inputs_embeds, generate returns the full sequence
-        # (prompt + generated), so the prompt must be stripped. With
-        # inputs_embeds alone it already returns only the new tokens, so
-        # stripping would eat real output -- hence prompt_len = 0 there.
-        # When scores were requested, preserve the GenerateOutput so callers
-        # can read .scores; otherwise return the bare tensor for backward
-        # compatibility with existing callers.
-        prompt_len = input_ids.shape[1] if "input_ids" in lm_inputs else 0
-        if isinstance(output, torch.Tensor):
-            # Slicing a token-id tensor keeps its int64 dtype.
-            return cast("torch.LongTensor", output[:, prompt_len:])
-        output.sequences = cast("torch.LongTensor", output.sequences[:, prompt_len:])
-        return output
+            # With input_ids AND inputs_embeds, generate returns the full sequence
+            # (prompt + generated), so the prompt must be stripped. With
+            # inputs_embeds alone it already returns only the new tokens, so
+            # stripping would eat real output -- hence prompt_len = 0 there.
+            # When scores were requested, preserve the GenerateOutput so callers
+            # can read .scores; otherwise return the bare tensor for backward
+            # compatibility with existing callers.
+            prompt_len = input_ids.shape[1] if "input_ids" in lm_inputs else 0
+            if isinstance(output, torch.Tensor):
+                # Slicing a token-id tensor keeps its int64 dtype.
+                return cast("torch.LongTensor", output[:, prompt_len:])
+            output.sequences = cast("torch.LongTensor", output.sequences[:, prompt_len:])
+            return output
 
     def _lm_generate_inputs(
         self, input_ids: torch.Tensor, inputs_embeds: torch.Tensor
@@ -1560,7 +1570,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         Yields:
             Partial transcript text as each token is generated
         """
-        input_ids, attention_mask, inputs_embeds = self._prepare_audio_inputs(
+        input_ids, attention_mask, inputs_embeds = self.prepare_audio_inputs(
             input_features, audio_attention_mask
         )
 

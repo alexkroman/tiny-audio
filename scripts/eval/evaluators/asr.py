@@ -42,7 +42,7 @@ from scripts.eval.audio import (
 )
 from scripts.eval.speaker_metrics import serialize_turns
 from scripts.inference import merge_lora_adapters
-from tiny_audio.asr_attention import resolve_attn_implementation
+from tiny_audio.asr_attention import active_attn_implementation, resolve_attn_implementation
 from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
 from tiny_audio.asr_pipeline import ASRPipeline
@@ -231,9 +231,7 @@ def _use_sdpa_where_safe(model: ASRModel) -> None:
     """
     text_model_id = getattr(model.config, "text_model_id", None)
     resolved = resolve_attn_implementation(model.config.attn_implementation, model_id=text_model_id)
-    # transformers exposes the active kernel only as the private config field.
-    lm_config = model.language_model.config
-    current = lm_config._attn_implementation  # pyright: ignore[reportPrivateUsage]
+    current = active_attn_implementation(model.language_model.config)
     if resolved is None or resolved == current:
         return
     model.language_model.set_attn_implementation(resolved)
@@ -267,8 +265,7 @@ def _build_local_pipeline(model_path: str, *, local_code: bool = False) -> ASRPi
     # Which code ran, and which attention kernel, are both part of what the WER
     # means -- so they are logged next to the device rather than left to infer.
     source = "working tree" if local_code else "checkpoint (trust_remote_code)"
-    lm_config = pipe.model.language_model.config
-    resolved = lm_config._attn_implementation  # pyright: ignore[reportPrivateUsage]
+    resolved = active_attn_implementation(pipe.model.language_model.config)
     console.print(
         f"[dim]Using device: {device}, model_dtype: {model_dtype}, "
         f"code: {source}, decoder attn: {resolved}, "

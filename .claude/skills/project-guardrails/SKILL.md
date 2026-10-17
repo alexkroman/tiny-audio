@@ -37,9 +37,9 @@ when broken; the rest are held only by review, so they matter more.
 
 - **`auto_find_batch_size` stays false.** HF halves the per-device batch on OOM without touching
   gradient accumulation, silently changing the effective batch.
-- **Batch shapes are measured, not planned.** The comments in `configs/experiments/*.yaml` record
-  the GPU and peak memory each shape was measured on. Don't reuse a shape on a smaller card; step
-  down before a run, because the seeded data order replays an OOM on resume.
+- **Batch shapes are measured, not planned.** The comments in `configs/config.yaml` and
+  `configs/training/` record the GPU and peak memory each shape was measured on. Don't reuse a shape
+  on a smaller card; step down before a run, because the seeded data order replays an OOM on resume.
 - **Numbers in config comments are evidence.** Don't change a cap, ratio or learning rate whose
   comment cites a measurement without a new measurement.
 

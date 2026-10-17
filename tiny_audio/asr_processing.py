@@ -287,11 +287,17 @@ class ASRProcessor(ProcessorMixin):
         """
         self.feature_extractor = feature_extractor
         self.tokenizer = tokenizer
-        self.audio_token = audio_token or self.AUDIO_TOKEN
-        self.audio_token_id = tokenizer.convert_tokens_to_ids(self.audio_token)
-        self.projector = projector
-        self.encoder_conv_layers = encoder_conv_layers or DEFAULT_ENCODER_CONV_LAYERS
-        self.lead_in_seconds = float(lead_in_seconds)
+        self.audio_token: str = audio_token or self.AUDIO_TOKEN
+        token_id = tokenizer.convert_tokens_to_ids(self.audio_token)
+        if not isinstance(token_id, int):  # a str in always maps to one id
+            msg = f"audio token {self.audio_token!r} mapped to {token_id!r}, not one id"
+            raise TypeError(msg)
+        self.audio_token_id: int = token_id
+        self.projector: MLPAudioProjector | None = projector
+        self.encoder_conv_layers: list[ConvLayerSpec] = (
+            encoder_conv_layers or DEFAULT_ENCODER_CONV_LAYERS
+        )
+        self.lead_in_seconds: float = float(lead_in_seconds)
 
     def _render_prompt(self, num_audio_tokens: int, text: str | None) -> torch.Tensor:
         """Tokenize one chat prompt carrying exactly `num_audio_tokens` placeholders."""
@@ -359,7 +365,7 @@ class ASRProcessor(ProcessorMixin):
             # returns batch-1 `input_ids` against batch-B `input_features`, and
             # gives every shorter row more `<audio>` placeholders than the
             # projector produced for it. `masked_scatter` then mis-scatters
-            # silently. This is the same failure `_prepare_audio_inputs`
+            # silently. This is the same failure `prepare_audio_inputs`
             # documents as fixed on the model side, and it only shows up on a
             # ragged batch, so batch-1 eval never sees it.
             mel_lengths = audio_inputs["attention_mask"].sum(dim=-1).reshape(-1).long()

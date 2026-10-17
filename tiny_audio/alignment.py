@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import itertools
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, TypedDict, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -93,7 +93,7 @@ class QwenForcedAligner:
                 cls.MODEL_ID, dtype=torch.bfloat16, attn_implementation=attn
             )
             # PreTrainedModel.to is functools.wraps'd, which pyright cannot bind as a method.
-            model.to(device)  # pyright: ignore[reportArgumentType]
+            cast(torch.nn.Module, model).to(device)
             model.eval()
             cls._model = model
             cls._processor = Qwen3ASRProcessor.from_pretrained(cls.MODEL_ID)

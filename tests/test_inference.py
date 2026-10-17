@@ -6,6 +6,8 @@ from typing import Any, cast
 
 import pytest
 import torch
+import torch._dynamo.config as dynamo_config
+from transformers.integrations.hub_kernels import use_kernel_func_from_hub_with_fallback
 
 from scripts import inference
 from scripts.inference import (
@@ -85,7 +87,6 @@ class TestGraphedDecoder:
         assert dec.buckets == [1, 2, 4, 6, 8, 12, 16, 24]
         assert [dec.bucket(n) for n in (1, 3, 5, 9, 13, 17, 24)] == [1, 4, 6, 12, 16, 24, 24]
         # Room for every bucket on both tiers, or the rest would run eagerly.
-        dynamo_config = torch._dynamo.config  # pyright: ignore[reportPrivateUsage]
         assert dynamo_config.recompile_limit >= 2 * len(dec.buckets)
         assert dec.short_enabled  # 253 prompt + 128 budget fits 416 slots
         assert dec.short_max_frames == 40
@@ -157,7 +158,8 @@ class TestMpsSafeSdpa:
     @staticmethod
     def _qkv() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         gen = torch.Generator().manual_seed(0)
-        return tuple(torch.randn(1, 2, 4, 8, generator=gen) for _ in range(3))  # type: ignore[return-value]
+        q, k, v = (torch.randn(1, 2, 4, 8, generator=gen) for _ in range(3))
+        return q, k, v
 
     @pytest.mark.parametrize("boolean", [True, False])
     def test_padded_rows_finite_real_rows_exact(self, boolean: bool) -> None:
@@ -226,17 +228,13 @@ def _fake_modeling(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     `operator.neg` stands in for the kernel; dynamo's `is_exporting` answer
     inside torch.compile is simulated by patching it True.
     """
-    from transformers.integrations.hub_kernels import (  # noqa: PLC0415
-        use_kernel_func_from_hub_with_fallback,
-    )
 
     @use_kernel_func_from_hub_with_fallback("neg", "operator")
     def neg(a: int) -> str:
         return "reference"
 
     module = ModuleType("fake_modeling")
-    module.neg = neg  # pyright: ignore[reportAttributeAccessIssue]
-    module.helper = lambda: "untouched"  # pyright: ignore[reportAttributeAccessIssue]
+    vars(module).update(neg=neg, helper=lambda: "untouched")
     monkeypatch.setattr(torch.compiler, "is_exporting", lambda: True)
     return module
 
@@ -268,7 +266,7 @@ def test_lm_head_gets_a_contiguous_input() -> None:
     reason="needs CUDA and flash-linear-attention",
 )
 def test_in_place_delta_step_matches_fla() -> None:
-    from fla.ops.gated_delta_rule import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
+    from fla.ops.gated_delta_rule import (  # noqa: PLC0415
         fused_recurrent_gated_delta_rule,
     )
 
@@ -288,7 +286,7 @@ def test_in_place_delta_step_matches_fla() -> None:
     expected_out, expected_state = fused_recurrent_gated_delta_rule(
         q, k, v, initial_state=state.clone(), use_qk_l2norm_in_kernel=True, **kwargs
     )
-    out, new_state = inference._in_place_recurrent_step(  # pyright: ignore[reportPrivateUsage]
+    out, new_state = inference._in_place_recurrent_step(
         q, k, v, initial_state=state, use_qk_l2norm_in_kernel=True, fallback=None, **kwargs
     )
     assert new_state is state  # updated in place: the cache's copy becomes a no-op

@@ -12,12 +12,21 @@ import logging
 from typing import Any
 
 import torch
-from transformers import AutoConfig
+from transformers import AutoConfig, PretrainedConfig
 
-logger = logging.getLogger(__name__)
+logger: logging.Logger = logging.getLogger(__name__)
 
 # FlashAttention's kernels are compiled for head dimensions up to 256.
 FLASH_ATTENTION_MAX_HEAD_DIM = 256
+
+
+def active_attn_implementation(config: PretrainedConfig) -> object:
+    """The attention kernel a loaded model runs (e.g. "sdpa"), read from its config.
+
+    transformers exposes it only as the private `_attn_implementation` field,
+    so this is the one place that reads it.
+    """
+    return config._attn_implementation  # pyright: ignore[reportPrivateUsage]
 
 
 def _max_attention_head_dim(text_config: object) -> int | None:

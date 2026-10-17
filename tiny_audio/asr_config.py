@@ -230,15 +230,17 @@ class ASRConfig(transformers.PretrainedConfig):
         self.model_dtype = model_dtype
         self.encoder_dim = encoder_dim
         self.llm_dim = llm_dim
-        self.encoder_conv_layers = encoder_conv_layers or DEFAULT_ENCODER_CONV_LAYERS
-        self.encoder_attention_mask = (
+        self.encoder_conv_layers: list[ConvLayerSpec] = (
+            encoder_conv_layers or DEFAULT_ENCODER_CONV_LAYERS
+        )
+        self.encoder_attention_mask: bool = (
             is_time_major_encoder(audio_model_id)
             if encoder_attention_mask is None
             else encoder_attention_mask
         )
-        self.audio_token = audio_token or "<audio>"
-        self.projector_dtype = projector_dtype or model_dtype
-        self.encoder_dtype = encoder_dtype or model_dtype
+        self.audio_token: str = audio_token or "<audio>"
+        self.projector_dtype: str = projector_dtype or model_dtype
+        self.encoder_dtype: str = encoder_dtype or model_dtype
         self.audio_sample_rate = audio_sample_rate
         self.projector_pool_stride = projector_pool_stride
         self.projector_hidden_dim = projector_hidden_dim
@@ -248,8 +250,8 @@ class ASRConfig(transformers.PretrainedConfig):
         self.lora_rank = lora_rank
         self.lora_alpha = lora_alpha
         self.lora_dropout = lora_dropout
-        self.inference_lead_in_seconds = float(inference_lead_in_seconds)
-        self.lora_target_modules = lora_target_modules or [
+        self.inference_lead_in_seconds: float = float(inference_lead_in_seconds)
+        self.lora_target_modules: list[str] = lora_target_modules or [
             "q_proj",
             "k_proj",
             "v_proj",
@@ -307,17 +309,17 @@ class ASRConfig(transformers.PretrainedConfig):
 
         # Point encoder to audio_config so pipeline uses correct feature extractor
         # The pipeline looks for config.encoder._name_or_path for feature extractor
-        self.encoder = self.audio_config
+        self.encoder: transformers.PretrainedConfig | dict[str, Any] = self.audio_config
 
         # The Hub infers the model's task from the first model class listed, so
         # AutoModelForSpeechSeq2Seq must precede AutoModel (else: feature-extraction).
-        self.auto_map = {
+        self.auto_map: dict[str, str] = {
             "AutoConfig": "asr_config.ASRConfig",
             "AutoModelForSpeechSeq2Seq": "asr_modeling.ASRModel",
             "AutoModel": "asr_modeling.ASRModel",
             "AutoProcessor": "asr_processing.ASRProcessor",
         }
-        self.custom_pipelines = {
+        self.custom_pipelines: dict[str, dict[str, Any]] = {
             "automatic-speech-recognition": {
                 "impl": "asr_pipeline.ASRPipeline",
                 "pt": ["AutoModelForSpeechSeq2Seq"],
@@ -325,7 +327,7 @@ class ASRConfig(transformers.PretrainedConfig):
                 "type": "audio",
             }
         }
-        self.architectures = ["ASRModel"]
+        self.architectures: list[str] | None = ["ASRModel"]
         self.pipeline_tag = "automatic-speech-recognition"
 
 
