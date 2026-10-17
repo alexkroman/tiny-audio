@@ -37,6 +37,21 @@ def _frames(prepared: list[PreparedChunk]) -> list[int]:
     return [int(p["attention_mask"].shape[-1]) for p in prepared]
 
 
+def _poll[T](fetch: Callable[[], T], done: Callable[[T], bool], what: str) -> T:
+    """`fetch()` every 10 ms until `done` accepts it (up to 5 s), and return that value.
+
+    It sleeps before each check rather than only when a check fails, so the same
+    lines run whatever the thread timing: the per-file coverage floor for this
+    file was flaky when a fast CI runner never reached the sleep.
+    """
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        time.sleep(0.01)
+        if done(value := fetch()):
+            return value
+    pytest.fail(f"never: {what}")
+
+
 class TestChunkBatcher:
     """ChunkBatcher batches queued chunks, keeps per-request order and fans out errors."""
 
@@ -73,10 +88,8 @@ class TestChunkBatcher:
             assert entered.wait(timeout=5)  # the GPU thread is inside the first batch
             for t in threads[1:]:
                 t.start()
-            deadline = time.monotonic() + 5
-            while batcher._inbox.qsize() < 4:  # blocked GPU thread can't drain them
-                assert time.monotonic() < deadline, "requests never queued"
-                time.sleep(0.01)
+            # The blocked GPU thread can't drain them, so all four stay queued.
+            _poll(batcher._inbox.qsize, lambda queued: queued >= 4, "four requests queued")
             release.set()
             for t in threads:
                 t.join(timeout=5)
@@ -325,12 +338,11 @@ class TestJobs:
     @staticmethod
     def _wait(client: Client, job_id: str) -> httpx.Response:
         """Poll the job until it stops answering 202 (up to ~5 s) and return that response."""
-        for _ in range(500):
-            response = client.get(f"/jobs/{job_id}")
-            if response.status_code != 202:
-                return response
-            time.sleep(0.01)
-        pytest.fail("job never finished")
+
+        def fetch() -> httpx.Response:
+            return client.get(f"/jobs/{job_id}")
+
+        return _poll(fetch, lambda response: response.status_code != 202, "job finished")
 
     def test_job_returns_what_a_request_would(self, make_client: MakeClient) -> None:
         client, pipe = make_client()
