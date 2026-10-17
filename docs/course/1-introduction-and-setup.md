@@ -197,7 +197,10 @@ The quick brown fox jumps over the lazy dog.<|im_end|>
 
 Before the decoder runs, the model swaps each `<audio>` placeholder's embedding for one row of the
 projector's output. From the decoder's point of view it is completing a chat where the user pasted
-125 unusual words and asked for a transcript. Training loss is computed only on the assistant turn.
+125 unusual words and asked for a transcript: about 130 tokens in a row, of which only the last
+handful happen to be text. It answers one token at a time, the way it answers any request, with the
+spelling, punctuation, and grammar it already knows. Training loss is computed only on the assistant
+turn.
 
 This is why the chat template matters: Qwen3-0.6B ships with one, and the training collator depends
 on it.
@@ -400,7 +403,11 @@ ______________________________________________________________________
 
 ## Key Takeaways
 
+1. **Two skills, two parts**: the encoder is the ear, the decoder is the language expert. Most
+   errors are a hearing mistake or a language mistake, and each lives in one part.
 1. **Architecture**: frozen encoder, projector trained from scratch, decoder fine-tuned gently.
+1. **Weights stay, vectors flow**: parameter count measures the grids of weights, not the width of
+   the vectors passing through them.
 1. **Shapes**: 50 encoder frames/s at 1280 dims become 12.5 audio tokens/s at 1024 dims.
 1. **The trick**: the decoder sees a chat whose user turn is audio tokens plus a prompt.
 1. **Tools**: the `ta` CLI wraps evaluation, analysis, training, and deployment.

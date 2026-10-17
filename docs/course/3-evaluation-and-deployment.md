@@ -75,7 +75,17 @@ roadmap, because it tells you which data to add to the training mix next.
 
 ### Error Analysis
 
-An aggregate WER tells you *how much* the model fails. To improve it you need to know *how*:
+An aggregate WER tells you *how much* the model fails. To improve it you need to know *how*. Start
+with the split from Class 1 and ask, for each wrong word, which part failed:
+
+| Kind of error        | Example                                                | Where it lives  | Usual fix                                              |
+| -------------------- | ------------------------------------------------------ | --------------- | ------------------------------------------------------ |
+| **Hearing mistake**  | A mumbled name becomes an unrelated word               | Encoder         | More audio like it (accent, noise, mic) in the mix     |
+| **Language mistake** | "there" for "their"; a name heard right, spelled wrong | Decoder         | More text like it; a larger or better-tuned decoder    |
+| **Formatting gap**   | "$25" vs "twenty five dollars"; missing punctuation    | Labels / scorer | Check the normalizer and the references, not the model |
+| **Mode failure**     | Empty output, endless repetition                       | The whole run   | Check the loss curve and gradient flow                 |
+
+Then look at the data three ways:
 
 - **Worst samples**: sort by per-sample WER. The top of the list is usually noisy audio, mislabeled
   references, or a mode failure (empty output, endless repetition).
@@ -142,8 +152,10 @@ worst ones are a sort away:
 grep -h "WER:" outputs/*_${NAME}_loquacious/results.txt | sort -t: -k2 -rn | head -20
 ```
 
-Open `results.txt` and read a dozen of the worst. Sort them into buckets: bad audio, bad reference
-label, rare vocabulary, model mode failure. The bucket that dominates tells you what to fix.
+Open `results.txt` and read a dozen of the worst. Sort each into a bucket from the table above:
+hearing mistake, language mistake, formatting gap, or mode failure, plus "bad reference label" for
+clips where the reference itself is wrong. The bucket that dominates tells you which part, or which
+data, to fix.
 
 **Compare models.** Evaluate the published model on the same datasets and sample count, then read
 the corpus WER from each run's `metrics.txt`:

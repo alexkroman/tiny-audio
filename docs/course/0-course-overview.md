@@ -30,6 +30,20 @@ publish the result to the Hugging Face Hub and put a live demo on the web.
 > fine-tunes the decoder instead of adding LoRA, and trains on far less data, so expect a higher WER
 > from your course run.
 
+### Four Ideas to Leave With
+
+The commands change; these don't. Each class comes back to them.
+
+1. **Two skills, two parts.** Speech recognition needs a good ear and a good command of language.
+   The encoder is the ear, the decoder is the language model, and almost every error is a hearing
+   mistake or a language mistake. Knowing which tells you what to fix. (Class 1)
+1. **Weights stay, vectors flow.** A model is a stack of learned grids of numbers. Audio becomes
+   vectors that pass through them; training only changes the grids. (Class 1)
+1. **Whatever the labels lack, the model will lack.** The training loop is simple; the data mix and
+   how consistently its transcripts are written decide the result. (Class 2)
+1. **One benchmark is not an evaluation.** A WER depends on the domain and on how the reference
+   transcripts were written and normalized, as much as on the model. (Class 3)
+
 ______________________________________________________________________
 
 ## Course Structure

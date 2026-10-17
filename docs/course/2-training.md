@@ -374,6 +374,8 @@ ______________________________________________________________________
 
 1. Training is a normal `Trainer` run with a frozen encoder and two learning rates: hot for the
    fresh projector, cool for the pretrained decoder.
+1. The loop is simple; the data decides the result. Mix domains, make every transcript follow one
+   style, and remember that whatever the labels lack, the model will lack.
 1. Data is downloaded and cached, not streamed. Plan disk at twice the download size.
 1. `ta runpod plan` replaces guesswork about GPU and disk.
 1. The loss falls hardest in the first 500 steps; the rest is refinement.
