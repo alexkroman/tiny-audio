@@ -22,7 +22,11 @@ poetry run ta dev format                          # black, ruff, mdformat
 ### Training (Local)
 
 ```bash
-# Default recipe: Granite + Qwen3.5-2B + LoRA (80 GB GPU, terabyte of data). No laptop recipe.
+# Free run: the default recipe with Qwen3.5-0.8B on LibriSpeech dev-clean (16 GB Mac or any GPU)
+poetry run ta train asr -e tiny
+poetry run ta eval -m outputs/tiny --local-code -d librispeech -n 20
+
+# Default recipe: Granite + Qwen3.5-2B + LoRA (80 GB GPU, terabyte of data)
 poetry run python scripts/train.py
 
 # Your own experiment (configs/experiments/my_run.yaml), with overrides

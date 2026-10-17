@@ -8,6 +8,15 @@ A hands-on course: build, train, evaluate, and deploy your own ASR model with Ti
 | **Cost**          | Classes 1 and 3 are free. Class 2's cloud run costs GPU time (see [Budget](#budget)) |
 | **Prerequisites** | Python, the command line, git                                                        |
 
+> **Short on time? Three steps, no accounts, no cost.** (1) Transcribe a clip with the published
+> model ([Class 1, Exercise 2](./1-introduction-and-setup.md#exercise-2-run-inference-15-min), 5
+> minutes). (2) Train your own on your laptop with `ta train asr -e tiny`
+> ([Class 2, Exercise 0](./2-training.md#exercise-0-the-free-run-optional-30-min-unattended), about
+> 30 minutes unattended). (3) Read the
+> [projector](https://github.com/alexkroman/tiny-audio/blob/main/tiny_audio/projectors.py), the only
+> part trained from scratch, about twenty lines of code. The classes below explain what you just
+> ran, then scale it up to a real training run.
+
 ## What You'll Build
 
 ```text
@@ -63,6 +72,7 @@ ______________________________________________________________________
 **Time:** 1 hour, then training runs on its own
 
 - What `scripts/train.py` does, step by step
+- A free rehearsal on your laptop: the default recipe, scaled down
 - Sizing a cloud GPU with `ta runpod plan`
 - Writing your own experiment config and launching on RunPod
 - Reading the loss and gradient curves
@@ -114,9 +124,12 @@ ______________________________________________________________________
 **Development (Classes 1 and 3):** any modern laptop with 8 GB RAM and 20 GB of free disk. Loading
 the published model downloads about 6 GB (its own weights plus the encoder's repo).
 
-**Training (Class 2):** a RunPod account and a GPU. There is no laptop-sized training recipe: the
-default config is a 2B decoder sized for one 80 GB GPU, so Class 2 trains in the cloud. The class
-shows you how to size the GPU with `ta runpod plan`.
+**Free run (optional, Class 2):** a 16 GB Apple Silicon Mac or any CUDA GPU, including a free Colab
+T4. `ta train asr -e tiny` peaks at 8-10 GB of GPU memory and takes about 30 minutes on an M4 Max.
+
+**Course run (Class 2):** a RunPod account and a GPU. The default config is a 2B decoder sized for
+one 80 GB GPU, so the course run trains in the cloud. The class shows you how to size the GPU with
+`ta runpod plan`.
 
 ______________________________________________________________________
 
