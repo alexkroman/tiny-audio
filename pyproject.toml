@@ -5,7 +5,7 @@ build-backend = "poetry.core.masonry.api"
 [project]
 name = "tiny-audio"
 version = "0.1.0"
-description = "A speech-to-text system you can train yourself: a frozen speech encoder and an LLM joined by a small trained projector"
+description = "Build a speech-to-text LLM from scratch and train it on one GPU: a frozen speech encoder and an LLM joined by a small trained projector"
 authors = [{ name = "Alex Kroman", email = "alex@alexkroman.com" }]
 license = "MIT"
 readme = "README.md"

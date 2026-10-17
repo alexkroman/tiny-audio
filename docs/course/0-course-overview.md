@@ -96,10 +96,11 @@ ______________________________________________________________________
 
 ## Budget
 
-The cost of Class 2 is entirely yours to choose. Two tiers:
+The cost of Class 2 is entirely yours to choose. Three tiers:
 
 | Tier                                        | Data                                                   | Hardware                          | Cost                                    |
 | ------------------------------------------- | ------------------------------------------------------ | --------------------------------- | --------------------------------------- |
+| **Free run** (`ta train asr -e tiny`)       | 73 LibriSpeech clips                                   | Your laptop or a free Colab GPU   | Free                                    |
 | **Course run** (what Class 2 walks through) | LoquaciousSet `small` (~250 hours)                     | One rented 80 GB GPU, a few hours | A few GPU-hours at RunPod's hourly rate |
 | **Production recipe** (the default config)  | The `multiasr` mix, ~3M clips, over a terabyte on disk | An 80 GB GPU for a day or more    | Hundreds of dollars                     |
 

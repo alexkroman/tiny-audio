@@ -17,6 +17,9 @@ print(pipe("audio.wav")["text"])
 git clone https://github.com/alexkroman/tiny-audio.git && cd tiny-audio
 poetry install
 
+# Free: the default model trained on 73 LibriSpeech clips, on your own machine
+poetry run ta train asr -e tiny
+
 # Size the full run (VRAM, disk, pod command) before renting a GPU
 poetry run ta runpod plan
 
@@ -27,8 +30,10 @@ poetry run python scripts/train.py
 
 The default recipe (`configs/config.yaml` + `configs/training/production.yaml`) trains on the
 `multiasr` mix (about 3M utterances across ten corpora, over a terabyte on disk) at batch 64, sized
-for one 80 GB GPU. There is no laptop-sized recipe; run `ta runpod plan` to size any config before
-renting hardware. See [Training on RunPod](../README.md#training-on-runpod) for the remote workflow.
+for one 80 GB GPU. `-e tiny` (`configs/experiments/tiny.yaml`) is the same model on a 73-clip
+sample: it overfits those clips on a laptop or a free Colab GPU, so you can watch the loss fall
+before you rent anything. Run `ta runpod plan` to size any config before renting hardware. See
+[Training on RunPod](../README.md#training-on-runpod) for the remote workflow.
 
 ## Evaluate
 
