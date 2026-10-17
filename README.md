@@ -44,12 +44,21 @@ print(pipe("audio.wav")["text"])
 ```
 
 ```bash
-# 2. Train it yourself on one rented GPU
+# 2. Train the same model for free: 73 LibriSpeech clips, on your laptop or a free Colab GPU
 git clone https://github.com/alexkroman/tiny-audio.git && cd tiny-audio
 poetry install
+poetry run ta train asr -e tiny
+poetry run ta eval -m outputs/tiny --local-code -d librispeech -n 20   # read its transcripts
+
+# 3. The full run on one rented GPU
 poetry run ta runpod plan               # VRAM and disk the config needs, before you rent anything
 poetry run python scripts/train.py      # the default config: the published model's recipe
 ```
+
+The free run is the default recipe with only the data, step count and hardware settings changed
+([configs/experiments/tiny.yaml](configs/experiments/tiny.yaml)). It overfits its 73 clips, so its
+WER on unseen audio stays high; the point is to watch the projector learn before you pay for
+anything.
 
 No install at all: the **[live demo](https://huggingface.co/spaces/mazesmazes/tiny-audio)** lets you
 record yourself or upload a file.
@@ -129,10 +138,11 @@ ASSEMBLYAI_API_KEY=... poetry run ta eval -m assemblyai -d loquacious -n 100
 
 What each training budget costs:
 
-| Run                                  | Data                                 | Hardware                     | Cost                |
-| ------------------------------------ | ------------------------------------ | ---------------------------- | ------------------- |
-| **Course run**                       | LoquaciousSet `small` (~250 hours)   | One rented GPU, a few hours  | A few GPU-hours     |
-| **Default config** (published model) | ~3M clips across ten corpora (>1 TB) | One 80 GB GPU, a day or more | Hundreds of dollars |
+| Run                                  | Data                                 | Hardware                        | Cost                |
+| ------------------------------------ | ------------------------------------ | ------------------------------- | ------------------- |
+| **Free run** (`-e tiny`)             | 73 LibriSpeech clips                 | Your laptop or a free Colab GPU | Free                |
+| **Course run**                       | LoquaciousSet `small` (~250 hours)   | One rented GPU, a few hours     | A few GPU-hours     |
+| **Default config** (published model) | ~3M clips across ten corpora (>1 TB) | One 80 GB GPU, a day or more    | Hundreds of dollars |
 
 ## Using the published model
 
@@ -160,7 +170,7 @@ token-by-token output, see [`ASRModel.generate_streaming`](tiny_audio/asr_modeli
 ```text
 tiny_audio/      the model: projector, encoder/decoder glue, pipeline, diarization
 scripts/train.py the training loop (Hydra + HF Trainer)
-configs/         the default recipe and its data mix
+configs/         the default recipe, its data mix, and the free `tiny` preset
 scripts/         the `ta` CLI: eval, serve, push, deploy, runpod
 docs/course/     the course
 demo/            the Hugging Face Space

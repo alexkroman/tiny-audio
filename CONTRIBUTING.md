@@ -92,7 +92,9 @@ configs/
 ├── config.yaml                  # Main config: granite_qwen_frozen (Granite Speech + LoRA on Qwen3.5-2B)
 ├── data/
 │   ├── multiasr.yaml            # Ten-corpus training mix (default)
-│   └── librispeech_dummy.yaml   # 73-clip sample for smoke tests
+│   └── librispeech_dummy.yaml   # 73-clip LibriSpeech sample
+├── experiments/
+│   └── tiny.yaml                # The free run: default model on the 73-clip sample (`-e tiny`)
 └── training/
     └── production.yaml          # Training hyperparameters
 ```

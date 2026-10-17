@@ -1,0 +1,52 @@
+# @package _global_
+# The free run: the default recipe (same encoder, projector, decoder and LoRA)
+# trained on LibriSpeech's 73-clip sample instead of the ten-corpus mix.
+#
+#   poetry run ta train asr -e tiny
+#
+# It overfits those clips -- that is the point. You watch the projector go
+# from noise to something the frozen decoder can read, on your own machine,
+# before renting a GPU for the real run. Only the data, the step budget and
+# the hardware settings differ from configs/config.yaml; everything that
+# shapes the model is inherited unchanged.
+#
+# Runs on Apple Silicon, a CUDA GPU (including a free Colab T4), or slowly
+# on CPU. The trained checkpoint lands in outputs/tiny/:
+#
+#   poetry run ta eval -m outputs/tiny --local-code -d librispeech -n 20
+
+---
+defaults:
+  - override /data: librispeech_dummy
+
+data:
+  num_proc: 1
+
+training:
+  # ~16 passes over the 73 clips.
+  max_steps: 300
+  warmup_steps: 30
+  per_device_train_batch_size: 4
+  per_device_eval_batch_size: 4
+  logging_steps: 10
+
+  # Portable settings. The production config assumes a recent NVIDIA card:
+  # fused AdamW and tf32 are CUDA-only, and bf16 autocast refuses to start
+  # on a T4. The frozen weights are still stored in bf16; only autocast is off.
+  optim: adamw_torch
+  bf16: false
+  tf32: false
+  dataloader_num_workers: 0
+  dataloader_persistent_workers: false
+  dataloader_prefetch_factor: null
+  dataloader_pin_memory: false
+  # liger is linux-only. At batch 4 the unfused logits tensor is small, so
+  # going without its fused cross-entropy is fine here.
+  allow_unfused_ce: true
+
+  # Nothing leaves the machine: no W&B, no Hub, no mid-run checkpoints.
+  report_to: "none"
+  eval_strategy: "no"
+  save_strategy: "no"
+  push_to_hub: false
+  output_dir: ${hydra:runtime.cwd}/outputs/tiny
