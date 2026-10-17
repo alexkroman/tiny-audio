@@ -48,6 +48,7 @@ formats (m4a, video) need [ffmpeg](https://ffmpeg.org/download.html) installed.
 
 ```bash
 # 2. Train your own for free, on your laptop: ~30 minutes on an Apple Silicon Mac, ~3 GB download
+#    Needs Python 3.12 and Poetry (pip install poetry)
 git clone https://github.com/alexkroman/tiny-audio.git && cd tiny-audio
 poetry install
 poetry run ta train asr -e tiny
@@ -64,6 +65,14 @@ full mix. Watch the loss: it sits near 4 while the projector's output is still n
 then drops below 1 around step 500 as the decoder starts reading the audio. The result transcribes
 unseen LibriSpeech audio at about 16% WER, with mistakes like "furnishings" for "furniture". It fits
 in 16 GB of memory and also runs on a CUDA GPU, including a free Colab T4.
+
+What runs where:
+
+| Step                         | Apple Silicon (16 GB) | Any CUDA GPU (incl. Colab T4) | CPU only  | One 80 GB GPU |
+| ---------------------------- | --------------------- | ----------------------------- | --------- | ------------- |
+| 1. Transcribe                | Yes                   | Yes                           | Yes, slow | Yes           |
+| 2. Free run (`-e tiny`)      | Yes, ~30 min          | Yes                           | Slow      | Yes           |
+| 3. Full run (default config) | No                    | Needs 80 GB                   | No        | Yes, a day+   |
 
 No install at all: the **[live demo](https://huggingface.co/spaces/mazesmazes/tiny-audio)** lets you
 record yourself or upload a file.
@@ -184,6 +193,25 @@ demo/            the Hugging Face Space
 Every training setting is a [Hydra](https://hydra.cc/) override, for example
 `model.projector_hidden_dim=2048`. `ta push` publishes a model to the Hub and `ta deploy` puts a
 demo like the one above on a Space.
+
+## Stuck?
+
+| Problem                                     | Fix                                                   |
+| ------------------------------------------- | ----------------------------------------------------- |
+| `poetry install` refuses the Python version | Install Python 3.12, then `poetry env use python3.12` |
+| Model download fails                        | `poetry run hf auth login`, or export `HF_TOKEN`      |
+| `flash_attention_2` warning                 | Expected off CUDA; the model falls back to SDPA       |
+| Out of GPU memory during the free run       | Halve the batch and keep the effective batch of 4:    |
+
+```bash
+poetry run python scripts/train.py +experiments=tiny \
+    training.per_device_train_batch_size=1 training.gradient_accumulation_steps=4
+```
+
+Anything else: check
+[Common issues](https://alexkroman.github.io/tiny-audio/4-quick-reference/#common-issues), then
+[open an issue](https://github.com/alexkroman/tiny-audio/issues) with the command you ran and its
+output.
 
 ## Contributing
 

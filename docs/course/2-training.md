@@ -142,9 +142,32 @@ ______________________________________________________________________
 
 ## Part B: Hands-On (40 min)
 
-There is no laptop-sized smoke-test recipe: the default config is a 2B decoder sized for one 80 GB
-80GB, so all training in this class happens on a rented GPU. Exercises 1 and 2 (sizing and writing
-your config) still run on your laptop.
+The course run uses the default 2B decoder, sized for one 80 GB GPU, so it trains on a rented GPU.
+Exercises 1 and 2 (sizing and writing your config) still run on your laptop, and so does Exercise 0:
+a free rehearsal of the whole loop before you spend anything.
+
+### Exercise 0: The Free Run (optional, ~30 min unattended)
+
+`configs/experiments/tiny.yaml` is the default recipe with the smaller Qwen3.5-0.8B decoder, trained
+on LibriSpeech dev-clean (5.4 hours, a ~340 MB download). It peaks at 8-10 GB of GPU memory, so it
+runs on a 16 GB Apple Silicon Mac or any CUDA GPU, including a free Colab T4. Nothing leaves your
+machine: no W&B, no Hub, no RunPod.
+
+```bash
+poetry run ta train asr -e tiny
+```
+
+Watch the loss in the log. It sits near 4 while the projector's output is still noise to the
+decoder, then drops below 1 somewhere around step 400-650 as the decoder starts reading the audio.
+That drop is the moment the encoder and the decoder start talking to each other; the cloud run below
+shows the same curve on far more data. When it finishes, read what it learned:
+
+```bash
+poetry run ta eval -m outputs/tiny --local-code -d librispeech -n 20
+```
+
+Expect about 16% WER, with mistakes like "furnishings" for "furniture". Start it before Exercise 1
+and it trains while you work through the rest of the class.
 
 ### Exercise 1: Size Your Cloud Run (5 min)
 
