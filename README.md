@@ -23,7 +23,7 @@ minutes.
 **Live demo:**
 [huggingface.co/spaces/mazesmazes/tiny-audio](https://huggingface.co/spaces/mazesmazes/tiny-audio) ·
 **Model:** [mazesmazes/tiny-audio](https://huggingface.co/mazesmazes/tiny-audio) · **Course:**
-[free 3.5-hour course](docs/course/0-course-overview.md)
+[free 3.5-hour course](https://alexkroman.github.io/tiny-audio/)
 
 ## What you get
 
@@ -239,11 +239,11 @@ poetry run ta runpod attach <HOST> <PORT>       # watch the run in tmux
 
 ## Learn by building it
 
-The **[free 3.5-hour course](docs/course/0-course-overview.md)** walks you through the full loop:
-how the encoder, projector, and decoder fit together (with real tensor shapes), training a model,
-evaluating it against commercial APIs, and publishing it with a live demo. You need Python, the
-command line, and git. The course trains the smaller `stage_1` recipe, not the published model, so
-your WER will be higher than the table above.
+The **[free 3.5-hour course](https://alexkroman.github.io/tiny-audio/)** walks you through the full
+loop: how the encoder, projector, and decoder fit together (with real tensor shapes), training a
+model, evaluating it against commercial APIs, and publishing it with a live demo. You need Python,
+the command line, and git. The course trains the smaller `stage_1` recipe, not the published model,
+so your WER will be higher than the table above.
 
 ## Contributing
 
