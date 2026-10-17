@@ -88,8 +88,12 @@
 # │ AMI SDM                  │   107,319 │    74,265 │    2.1% │
 # │ AMI IHM                  │   108,502 │    73,239 │    2.1% │
 # │ NOTSOFAR train+dev1      │     6,417 │     6,417 │    0.2% │
+# │ EdAcc validation         │     9,848 │     6,249 │    0.2% │
 # └──────────────────────────┴───────────┴───────────┴─────────┘
-# Total raw: ~4,298,851  →  Total effective: ~3,524,000
+# Total raw: ~4,308,699  →  Total effective: ~3,530,000
+# (2026-10-16: EdAcc validation re-added -- verbatim accented conversation,
+# 9.3 h effective of 15.8 h raw; the <0.8s / >19.0s filters take 36.5% of
+# its rows. See its entry after NOTSOFAR.)
 # (2026-10-14: NOTSOFAR train+dev1 added as 3-18 s multi-speaker windows,
 # 17.1 h; every row is 3-18 s, so the duration filters drop none. See its
 # entry after AMI SDM.)
@@ -103,9 +107,10 @@
 # measured 14.81% down_votes drop, an estimate until the next run logs it.
 # The previous capped mix was ~2,684,344 with each Big-3 source at 22.3%.)
 #
-# 9 training sources (VoxPopuli left on 2026-10-09, NOTSOFAR joined on
-# 2026-10-14). Big-3 combined 70.3% (67.5% with VoxPopuli). AMI (4.2%) and
-# NOTSOFAR (0.2%) are the entire conversational share; the mix has zero
+# 10 training sources (VoxPopuli left on 2026-10-09, NOTSOFAR joined on
+# 2026-10-14, EdAcc on 2026-10-16). Big-3 combined 70.3% (67.5% with
+# VoxPopuli). AMI (4.2%), NOTSOFAR (0.2%) and EdAcc (0.2%) are the entire
+# conversational share; the mix has zero
 # 8 kHz telephony. Finance is
 # carried by SPGISpeech alone (10.9%), professionally transcribed, no overlap
 # with any eval split.
@@ -739,6 +744,43 @@ datasets:
     text_punct: true
     train_splits: [train]
     eval_splits: []
+
+  # EdAcc (Edinburgh International Accents of English Corpus) -- informal
+  # dyadic video-call conversations, 40+ L1/L2 accents, professionally
+  # transcribed VERBATIM: repeats, partial words, UH/UM kept. CC BY-SA 4.0
+  # (HF card + Edinburgh DataShare doi:10.7488/ds/7914, which ships the
+  # CC_BY_SA license text; the older ds/3832 record was withdrawn over a
+  # license correction). Attribution required.
+  #
+  # Re-added 2026-10-16. It was in the mix in May at 0.2% and fell out of
+  # the streaming refactor (3d99b42c) as collateral, not on a measured
+  # result. Why now: the decoder collapses spoken repeats on every
+  # conversational eval (refs vs our hyp, repeats per 1k words: AMI 12.2/
+  # 10.0, Gigaspeech 6.1/3.7, URGENT 5.1/2.5), and the only verbatim
+  # supervision left in the mix is AMI and NOTSOFAR. EdAcc carries 21.9
+  # repeats per 1k words against Gigaspeech M train's ~0.9.
+  #
+  # HF ships no train split: train on `validation`, monitor on `test`
+  # (load_best_model_at_end is false, so test never selects a checkpoint).
+  # The splits are speaker-disjoint (62 validation speakers, 60 test, 0
+  # shared). MEASURED over the full validation split (9,848 rows, 15.8 h,
+  # 32 kHz): 2,926 rows <0.8s (backchannels, as on AMI), 650 rows >19.0s
+  # (6.2 h -- 40% of the audio, unrecoverable without word timings), 62
+  # whole-label IGNORE_TIME_SEGMENT_IN_SCORING rows (never embedded), 129
+  # labels empty after marker stripping. Effective 6,249 rows / 9.3 h.
+  #
+  # NOT a Monsoon lever: only 249 effective Indian-English rows (0.32 h,
+  # 2 speakers). <LAUGH>/<DTMF>/<OVERLAP>/<FOREIGN>/<NO-SPEECH> are stripped
+  # by normalize_label (TestEdAccNormalization).
+  - path: edinburghcstr/edacc
+    audio_column: audio
+    text_column: text
+    task: transcribe
+    # ALL-CAPS, no punctuation -- the AMI convention, so the plain prompt.
+    text_case: mono
+    text_punct: false
+    train_splits: [validation]
+    eval_splits: [test]
 
 # Audio processing
 sample_rate: 16000
