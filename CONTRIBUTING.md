@@ -209,6 +209,15 @@ committed under `quality/` that may only improve:
 - **Type completeness:** the share of `tiny_audio`'s and `scripts`' public API with fully known
   types (`pyright --verifytypes`) may only rise.
 - **Tracked-ignored:** no tracked file may match a `.gitignore` rule.
+- **Owning imports:** repo code imports each name from the module that defines it, not from one that
+  happens to import it, and monkeypatch targets name the owner (`subprocess.run`, not
+  `scripts.dev.subprocess.run`). A target that ends at the consumer's own binding
+  (`tiny_audio.asr_pipeline.ffmpeg_read`) is how you patch where a name is used, and is allowed.
+
+Ruff also enforces Python idioms beyond style: no `assert` outside tests (it vanishes under
+`python -O`), no blind `except Exception` unless the handler logs the traceback, `_name` for
+arguments a signature forces on you, `@pytest.mark.usefixtures` for fixtures used only for their
+side effect, no commented-out code, seeded `np.random.default_rng`, and no `print` in `tiny_audio/`.
 
 After an intended improvement, refresh a baseline with `ta dev quality <check> --update` (record
 coverage floors from a run with Hub access) and commit the diff. `--update` for escape hatches and

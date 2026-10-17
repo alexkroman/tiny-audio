@@ -374,6 +374,21 @@ class TestRatchetFloors:
     def test_ruff_rule_families_are_not_dropped(self, pyproject: dict[str, Any]) -> None:
         selected = set(pyproject["tool"]["ruff"]["lint"]["select"])
         assert {"E", "F", "I", "B", "UP", "SIM", "PT", "RUF", "PLW", "PLE", "TRY"} <= selected
+        idioms = {
+            "S101",
+            "BLE",
+            "ARG",
+            "SLF",
+            "ERA",
+            "NPY",
+            "PLR0402",
+            "PYI",
+            "EM",
+            "ICN",
+            "ASYNC",
+            "T20",
+        }
+        assert idioms <= selected
 
 
 class TestPrecommitHookIsTheGate:

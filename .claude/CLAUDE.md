@@ -34,6 +34,8 @@ records an improvement:
   types.
 - `ta dev quality invariants`: restated facts agree and settled decisions hold
   (`scripts/invariants.py`; the backticked paths in this file must exist).
+- `ta dev quality owning-imports`: import every repo name from the module that defines it, and patch
+  `subprocess.run`, not `scripts.dev.subprocess.run` (`scripts/owning_imports.py`).
 
 `tiny_audio/`, `scripts/` and `tests/` go through every gate alike, including 95% docstring coverage
 per tree (nested and `test_*` functions exempt).
