@@ -511,7 +511,7 @@ class EndpointEvaluator(Evaluator):
         retry=retry_if_exception(_is_retryable),
         # ~90 s of backoff in total, long enough to ride out a proxy outage.
         stop=stop_after_attempt(8),
-        wait=wait_exponential_jitter(initial=1.0, max=30.0),
+        wait=wait_exponential_jitter(multiplier=1.0, max=30.0),
         reraise=True,
     )
     def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
@@ -734,7 +734,7 @@ class AssemblyAIStreamingEvaluator(Evaluator):
         retry=retry_if_exception(_is_retryable),
         stop=stop_after_attempt(_MAX_RETRIES + 1),
         # Exponential backoff with jitter, capped to keep latency bounded.
-        wait=wait_exponential_jitter(initial=0.5, max=_BACKOFF_CAP),
+        wait=wait_exponential_jitter(multiplier=0.5, max=_BACKOFF_CAP),
         reraise=True,
     )
     def _run_session_with_retry(self, pcm_data: bytes) -> tuple[str, float]:
@@ -887,7 +887,7 @@ class SmallestEvaluator(Evaluator):
     @retry(
         retry=retry_if_exception(_is_retryable),
         stop=stop_after_attempt(5),
-        wait=wait_exponential_jitter(initial=1.0, max=30.0),
+        wait=wait_exponential_jitter(multiplier=1.0, max=30.0),
         reraise=True,
     )
     def _post(self, wav_bytes: bytes) -> dict[str, Any]:
