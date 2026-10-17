@@ -193,6 +193,7 @@ mdformat-frontmatter = "^2.1.2"
 pre-commit-hooks = "^6.0.0"
 pymarkdownlnt = "^0.9.40"
 mdformat-gfm = "^1.0.0"
+djlint = "^1.46.6"              # HTML lint for tracked .html (docs/course/examples/)
 [tool.poetry.group.hybrid-kernels]
 optional = true
 
@@ -421,6 +422,11 @@ output = "coverage.xml"
 # Skip B615: We intentionally want latest HuggingFace model versions
 # Skip B108: RunPod deployment uses /tmp for remote scripts
 skips = ["B615", "B108"]
+
+[tool.djlint]
+# Plain HTML, not a template language. Covers unclosed and orphan tags,
+# inline styles and missing page metadata (`ta dev lint`).
+profile = "html"
 
 [tool.pymarkdown]
 # YAML front matter (MODEL_CARD.md, demo/README.md) and GFM tables, which

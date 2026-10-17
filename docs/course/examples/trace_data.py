@@ -1,4 +1,5 @@
 import base64
+import html
 import io
 import pathlib
 from collections.abc import Callable
@@ -278,6 +279,12 @@ def create_pipeline_summary(data: TracePayload) -> str:
     return fig_to_base64(fig)
 
 
+PAGE_DESCRIPTION = (
+    "A step-by-step trace of one audio clip through the ASR model: "
+    "waveform, spectrogram, encoder and projector."
+)
+
+
 def generate_observable_html(data: TracePayload) -> str:
     """Generate HTML report with matplotlib visualizations."""
 
@@ -361,12 +368,15 @@ def generate_observable_html(data: TracePayload) -> str:
     projector_img = fig_to_base64(fig)
 
     # Generate HTML
-    return f"""
-<!DOCTYPE html>
+    # Text from the model and the dataset goes into the page escaped, not as markup.
+    reference = html.escape(data["reference_text"])
+    nearest_tokens = html.escape(data["projector_output"]["nearest_tokens"])
+    return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="{PAGE_DESCRIPTION}">
     <title>ASR Data Trace</title>
     <style>
         body {{
@@ -417,6 +427,15 @@ def generate_observable_html(data: TracePayload) -> str:
             border-radius: 4px;
             font-family: 'Courier New', monospace;
         }}
+        .token-jumble {{
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            max-height: 150px;
+            overflow-y: scroll;
+            font-size: 11px;
+        }}
     </style>
 </head>
 <body>
@@ -434,7 +453,7 @@ def generate_observable_html(data: TracePayload) -> str:
 
         <div class="section">
             <h2>Input: The Audio Sample</h2>
-            <p><strong>Reference Text:</strong> <em>"{data["reference_text"]}"</em></p>
+            <p><strong>Reference Text:</strong> <em>"{reference}"</em></p>
             <p>This is what the speaker actually said. Our goal is to recover this text from the
                 raw audio signal alone.</p>
         </div>
@@ -485,7 +504,6 @@ def generate_observable_html(data: TracePayload) -> str:
             <p><strong>Important:</strong> At this stage, "to," "too," and "two" all look the
                 same because they sound the same! The AI knows the sound but not yet the
                 spelling.</p>
-        </div>
             <table>
                 <tr><th>Property</th><th>Value</th></tr>
                 <tr><td>Shape</td><td><code>{data["encoder_output"]["stats"]["shape"]}</code></td></tr>
@@ -515,7 +533,6 @@ def generate_observable_html(data: TracePayload) -> str:
                 <li><strong>Question marks</strong> - Rising tone at the end → add "?"</li>
                 <li><strong>Capitalization</strong> - "apple" (fruit) vs "Apple" (company)</li>
             </ul>
-        </div>
             <table>
                 <tr><th>Property</th><th>Value</th></tr>
                 <tr><td>Shape</td><td><code>{data["projector_output"]["stats"]["shape"]}</code></td></tr>
@@ -527,11 +544,10 @@ def generate_observable_html(data: TracePayload) -> str:
             </table>
 
             <h3>Checking: Does it Look Like Text?</h3>
-            <p><strong>What was actually said:</strong> <em>"{data["reference_text"]}"</em></p>
+            <p><strong>What was actually said:</strong> <em>"{reference}"</em></p>
             <p>If we check what vocabulary words are closest to each moment, we get this jumble:</p>
-            <p style="background-color: #f8f9fa; padding: 15px; border-radius: 4px; font-family:
-                'Courier New', monospace; max-height: 150px; overflow-y: scroll; font-size: 11px;">
-                {data["projector_output"]["nearest_tokens"]}
+            <p class="token-jumble">
+                {nearest_tokens}
             </p>
             <p><em>This isn't the final transcription! But it proves the projector is
                 working—the AI is now thinking in text-like patterns. The language model will clean
