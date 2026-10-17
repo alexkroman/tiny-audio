@@ -789,6 +789,9 @@ class AssemblyAIStreamingEvaluator(Evaluator):
                 sample_rate=16000,
                 format_turns=True,
                 speech_model=SpeechModel.universal_streaming_english,
+                # Optional upstream, but declared as Field(None, ...) positionally,
+                # which pyright doesn't read as a default.
+                speaker_labels_revision_interval_ms=None,
             )
         )
 
