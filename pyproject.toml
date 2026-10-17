@@ -5,7 +5,7 @@ build-backend = "poetry.core.masonry.api"
 [project]
 name = "tiny-audio"
 version = "0.1.0"
-description = "A speech-to-text system you can train yourself: a frozen speech encoder and an LLM joined by a small trained projector"
+description = "Build a speech-to-text LLM from scratch and train it on one GPU: a frozen speech encoder and an LLM joined by a small trained projector"
 authors = [{ name = "Alex Kroman", email = "alex@alexkroman.com" }]
 license = "MIT"
 readme = "README.md"
@@ -214,7 +214,15 @@ multi_line_output = 3
 include_trailing_comma = true
 
 [tool.pyright]
-include = ["tiny_audio", "scripts", "tests", "demo", "docs", "typings"]
+include = [
+  "model.py",
+  "tiny_audio",
+  "scripts",
+  "tests",
+  "demo",
+  "docs",
+  "typings",
+]
 exclude = ["**/node_modules", "**/__pycache__", "outputs", ".venv", "venv"]
 typeCheckingMode = "strict"
 # Minimal stubs for modules that cannot be installed everywhere (the Spaces

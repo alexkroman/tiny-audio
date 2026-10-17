@@ -1,55 +1,47 @@
-# Tiny Audio
+# tiny-audio
 
 <div align="center">
   <img
     src="https://raw.githubusercontent.com/alexkroman/tiny-audio/main/public/logo.png"
-    alt="Tiny Audio Logo"
+    alt="tiny-audio logo"
   />
 </div>
 
-**A speech-to-text system you can train for $25.**
+**Build a speech-to-text LLM from scratch, and train it on one GPU.**
 
-Tiny Audio connects a frozen, pretrained speech encoder to a pretrained LLM with a small trainable
-projector. The model published from this repo gets **1.8% WER on LibriSpeech test-clean and 7.4%
-across 12 benchmarks** (11,822 samples pooled) while training only ~80M parameters. The codebase is
-small enough to read in an afternoon, and you can run a training loop on your laptop in about five
-minutes.
+tiny-audio is to speech what nanoGPT is to text: a small, readable, hackable speech LLM (a
+pretrained audio encoder, a tiny MLP projector, and an open-source LLM decoder) plus a course that
+teaches you to build, train, evaluate, and ship it yourself. The model trained with this repo's
+default recipe gets **1.8% WER on LibriSpeech test-clean** while training only ~80M parameters.
+
+It is deliberately simple. For production speech recognition, use a mature toolkit or a hosted API.
+This repo is for understanding how the pieces fit, and for running cheap experiments of your own.
+
+*tiny-audio is a personal side project, independent of my work at AssemblyAI.*
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
 [![Model](https://img.shields.io/badge/%F0%9F%A4%97-mazesmazes%2Ftiny--audio-yellow)](https://huggingface.co/mazesmazes/tiny-audio)
 [![Demo](https://img.shields.io/badge/%F0%9F%A4%97-Live%20Demo-blue)](https://huggingface.co/spaces/mazesmazes/tiny-audio)
 
-**Live demo:**
+**Course:** [alexkroman.github.io/tiny-audio](https://alexkroman.github.io/tiny-audio/) · **Live
+demo:**
 [huggingface.co/spaces/mazesmazes/tiny-audio](https://huggingface.co/spaces/mazesmazes/tiny-audio) ·
-**Model:** [mazesmazes/tiny-audio](https://huggingface.co/mazesmazes/tiny-audio) · **Course:**
-[free 3.5-hour course](https://alexkroman.github.io/tiny-audio/)
+**Model:** [mazesmazes/tiny-audio](https://huggingface.co/mazesmazes/tiny-audio)
 
-## What you get
-
-- Transcripts with punctuation, capitalization, and formatted numbers, with no post-processing step.
-- Word-level timestamps from forced alignment (`return_timestamps=True`).
-- Speaker diarization (`return_speakers=True`): each speaker is transcribed separately, and every
-  word stays with its speaker.
-- Token-by-token streaming output via `ASRModel.generate_streaming`.
-- A batched HTTP server (`ta serve`) that runs locally or on RunPod, with an async jobs API for long
-  recordings.
-- Training recipes that train only the projector and LoRA (~80M parameters for the published model),
-  from a five-minute laptop smoke test to a full run on one rented GPU.
-- An eval harness (`ta eval`) that scores the model against commercial APIs on the same samples.
-
-## Try it in 30 seconds
-
-**No install:** open the **[live demo](https://huggingface.co/spaces/mazesmazes/tiny-audio)**,
-record yourself or upload a file, and get a transcript.
-
-**In Python:**
+## Quickstart
 
 ```bash
-pip install "transformers>=5.0" peft torch torchaudio librosa
+git clone https://github.com/alexkroman/tiny-audio.git && cd tiny-audio
+
+# 1. The whole idea in one file: train a projector on 73 LibriSpeech clips, then transcribe.
+#    Runs on a laptop (CPU, Apple Silicon, or CUDA).
+pip install torch transformers "datasets[audio]<4" librosa soundfile
+python model.py
 ```
 
 ```python
+# 2. Transcribe with the published model
 from transformers import pipeline
 
 pipe = pipeline(
@@ -59,99 +51,60 @@ print(pipe("audio.wav")["text"])
 # The quarterly revenue grew by 12% according to Dr. Smith.
 ```
 
-The output is punctuated, capitalized, and has numbers formatted, with no post-processing step. The
-input can be a file path, a URL, or a 16 kHz numpy array. Weights are bf16, so you need roughly 6 GB
-of GPU or Apple Silicon memory.
-
-### More than plain text
-
-```python
-# Word-level timestamps (forced alignment)
-pipe("audio.wav", return_timestamps=True)
-# {"text": "hello world", "words": [{"word": "hello", "start": 0.0, "end": 0.5}, ...]}
-
-# Who spoke when (speaker diarization)
-pipe("meeting.wav", return_speakers=True, num_speakers=2)
-```
-
-Each speaker Nemotron-3-Diarization finds is transcribed separately, on a copy of the audio where
-everyone else is silenced, and each word belongs to the stream it came from. This is a zero-shot
-port of NeMo's `masked_asr` recipe; a word two streams both heard at once is kept once. Each speaker
-costs roughly their own talk time in ASR, and single-speaker audio is transcribed unmasked. Overlap
-is only partly handled: another person's speech inside a speaker's turn stays in that speaker's
-stream.
-
-Speaker diarization needs `transformers` installed from `main`
-(`pip install git+https://github.com/huggingface/transformers`) until the next release. For
-token-by-token streaming output, see [`ASRModel.generate_streaming`](tiny_audio/asr_modeling.py).
-The [model card](https://huggingface.co/mazesmazes/tiny-audio) covers batching and GPU settings.
-
-### As an HTTP API on RunPod
-
-`ta serve` puts the model behind a batched HTTP server: requests arriving together share GPU
-batches, so throughput grows with load (about 460x real time at 128 concurrent requests on an RTX
-4090). To run it on a RunPod GPU:
-
 ```bash
-poetry run ta runpod up --serve                 # create an inference pod; prints <POD_ID>
-poetry run ta runpod wait <POD_ID>              # prints <HOST> <PORT>
-poetry run ta runpod deploy <HOST> <PORT>       # sync the project, install the fast kernels
-TINY_AUDIO_API_KEY=my-secret poetry run ta runpod serve <HOST> <PORT> --no-attach
-# Ready when https://<POD_ID>-8000.proxy.runpod.net/health answers (a few minutes: it compiles first)
+# 3. Train the full recipe on one rented GPU
+poetry install
+poetry run ta runpod plan               # VRAM and disk the config needs, before you rent anything
+poetry run python scripts/train.py      # the default config: the published model's recipe
 ```
 
-Without `TINY_AUDIO_API_KEY` the server is open to anyone who has the URL. `ta serve` also runs
-locally, on CUDA, Apple Silicon, or CPU.
+No install at all: the **[live demo](https://huggingface.co/spaces/mazesmazes/tiny-audio)** lets you
+record yourself or upload a file.
 
-Send the audio as the request body, with options in the query string:
+## Read this first
 
-```bash
-curl -X POST "https://<POD_ID>-8000.proxy.runpod.net/?return_timestamps=true" \
-  -H "Authorization: Bearer my-secret" \
-  -H "Content-Type: application/octet-stream" \
-  --data-binary @audio.wav
+The whole model is in **[model.py](model.py)**: about 250 lines, heavily commented, no clever
+tricks. If you read one file in this repo, read that one. The `Projector` class near the top is the
+entire idea, and it takes five minutes:
+
+```text
+Audio (16 kHz) → speech encoder (frozen) → MLP projector (trained) → LLM decoder (frozen) → Text
 ```
 
-```python
-import httpx
+1. A pretrained **speech encoder** turns audio into frame embeddings, one every 20 ms.
+1. The **projector** stacks four neighbouring frames and maps them into the LLM's embedding space.
+   It is the only part trained from scratch.
+1. The **LLM** reads those projected frames as if they were words and writes out the transcript.
 
-response = httpx.post(
-    "https://<POD_ID>-8000.proxy.runpod.net/",
-    params={"return_speakers": "true", "num_speakers": "2"},
-    content=open("meeting.wav", "rb").read(),
-    headers={"Authorization": "Bearer my-secret"},
-    timeout=600,
-)
-print(response.json()["text"])
-```
+`model.py` uses Whisper-small's encoder and Qwen3-0.6B so it fits on a laptop. Once it makes sense,
+the production version is in [`tiny_audio/`](tiny_audio/): the same three parts with a Granite
+Speech encoder, Qwen3.5-2B with LoRA, batching, timestamps, diarization, and streaming.
 
-- **Options:** `return_timestamps`, `return_speakers`, `num_speakers` and `max_speakers`, as in the
-  pipeline. The response is the same dict the pipeline returns.
-- **JSON body:** to send JSON instead, use `{"inputs": "<base64 audio>", "parameters": {...}}`.
-- **Audio formats:** anything FFmpeg can read.
-- **Errors:** `400` with `{"error": ...}` for bad audio or options, and `401` for a wrong key.
-- **Long requests:** `POST /jobs` takes the same body and options but answers `202` with
-  `{"id": ...}` at once; poll `GET /jobs/<id>`, which answers `202` while the job runs and then the
-  response `POST /` would have given. Use it for anything that may run past the proxy's 100 s limit,
-  such as a whole meeting with `return_speakers`; `ta eval --endpoint` does this for speaker
-  datasets.
-- **Other endpoints:** `GET /health` and `GET /stats` (batch sizes and GPU time).
+## The course
 
-RunPod's HTTP proxy rejects request bodies over 500 MiB, and it drops any request that takes more
-than 100 seconds. For long recordings, send 16 kHz mono FLAC:
+Each chapter is a section of the [course](https://alexkroman.github.io/tiny-audio/) with code you
+run and something concrete to check.
 
-```bash
-ffmpeg -i recording.wav -ac 1 -ar 16000 recording.flac
-```
+| #   | Chapter                                                                                                                 | What you build or learn                                         | Check                            |
+| --- | ----------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- | -------------------------------- |
+| 00  | [What a speech LLM is](https://alexkroman.github.io/tiny-audio/1-introduction-and-setup/#the-architecture)              | Encoder → projector → decoder, and why reusing two models works | —                                |
+| 01  | [Audio in, features out](https://alexkroman.github.io/tiny-audio/1-introduction-and-setup/#from-sound-to-a-spectrogram) | Waveform → spectrogram → encoder frames, with real shapes       | Frame counts per second of audio |
+| 02  | [The projector](https://alexkroman.github.io/tiny-audio/1-introduction-and-setup/#how-the-projector-works)              | Frame stacking and the two-layer MLP, in `model.py`             | `python model.py`: loss falls    |
+| 03  | [The decoder](https://alexkroman.github.io/tiny-audio/1-introduction-and-setup/#how-the-decoder-sees-audio)             | How an LLM reads audio tokens next to text tokens               | —                                |
+| 04  | [Run inference](https://alexkroman.github.io/tiny-audio/1-introduction-and-setup/#part-b-hands-on-50-min)               | Install, transcribe, timestamps, trace a clip through the code  | Your first transcript            |
+| 05  | [Data](https://alexkroman.github.io/tiny-audio/2-training/#data-make-the-labels-agree)                                  | Why the label conventions decide the result                     | —                                |
+| 06  | [Training on one GPU](https://alexkroman.github.io/tiny-audio/2-training/)                                              | Size a GPU, write a config, launch on RunPod, read the curves   | Loss and gradient curves in W&B  |
+| 07  | [Evaluating](https://alexkroman.github.io/tiny-audio/3-evaluation-and-deployment/#word-error-rate-wer)                  | WER, normalization, error analysis, commercial baselines        | Your WER next to the table below |
+| 08  | [Shipping it](https://alexkroman.github.io/tiny-audio/3-evaluation-and-deployment/#part-b-hands-on-45-min)              | Publish to the Hub, deploy a demo, run the HTTP server          | A live demo of your own model    |
 
-That's about 1 MB per minute of audio, and it costs nothing in accuracy, because the server converts
-everything to 16 kHz mono anyway. On an RTX 4090, 45 minutes of audio takes about 10 seconds, or 21
-seconds with speaker labels. The [demo Space](demo/app.py) calls the server this way.
+Coming next: per-speaker transcription (diarization), what changed between releases and why, and
+where to go after this (bigger encoders, streaming, post-training).
 
-## How good is it?
+## Expected results
 
-Word error rate (%, lower is better) on 11,822 samples (up to 1,000 per dataset), measured with this
-repo's `ta eval` against the `ta serve` HTTP API on an RTX 4090:
+Word error rate (%, lower is better) of the published model, trained with the default config, on
+11,822 samples (up to 1,000 per dataset), measured with this repo's `ta eval` against the `ta serve`
+HTTP API on an RTX 4090. A course run trains on far less data, so expect a higher WER from yours.
 
 | Dataset                     |      WER |
 | --------------------------- | -------: |
@@ -172,7 +125,7 @@ repo's `ta eval` against the `ta serve` HTTP API on an RTX 4090:
 
 † Held out: no data from this source was used in training.
 
-You can check these numbers yourself and compare against commercial APIs on the same samples:
+Check these numbers yourself, and compare against commercial APIs on the same samples:
 
 ```bash
 poetry run ta eval -m mazesmazes/tiny-audio -d loquacious -n 100
@@ -180,78 +133,67 @@ poetry run ta eval -m mazesmazes/tiny-audio -d loquacious -n 100
 ASSEMBLYAI_API_KEY=... poetry run ta eval -m assemblyai -d loquacious -n 100
 ```
 
-## How it works
+What each training budget costs:
+
+| Run                                  | Data                                 | Hardware                     | Cost                |
+| ------------------------------------ | ------------------------------------ | ---------------------------- | ------------------- |
+| **`model.py`**                       | 73 LibriSpeech clips                 | Your laptop                  | Free                |
+| **Course run**                       | LoquaciousSet `small` (~250 hours)   | One rented GPU, a few hours  | A few GPU-hours     |
+| **Default config** (published model) | ~3M clips across ten corpora (>1 TB) | One 80 GB GPU, a day or more | Hundreds of dollars |
+
+## Using the published model
+
+```python
+# Word-level timestamps (forced alignment)
+pipe("audio.wav", return_timestamps=True)
+# {"text": "hello world", "words": [{"word": "hello", "start": 0.0, "end": 0.5}, ...]}
+
+# Who spoke when (speaker diarization)
+pipe("meeting.wav", return_speakers=True, num_speakers=2)
+```
+
+Transcripts come punctuated, capitalized, and with numbers formatted. The input can be a file path,
+a URL, or a 16 kHz numpy array; the bf16 weights need roughly 6 GB of GPU or Apple Silicon memory.
+Speaker diarization needs `transformers` installed from `main`
+(`pip install git+https://github.com/huggingface/transformers`) until the next release. For
+token-by-token output, see [`ASRModel.generate_streaming`](tiny_audio/asr_modeling.py).
+
+- **HTTP server:** `ta serve` batches concurrent requests on one GPU, locally or on RunPod. See
+  [docs/SERVING.md](docs/SERVING.md).
+- **Batching and GPU settings:** the [model card](https://huggingface.co/mazesmazes/tiny-audio).
+
+## Repo layout
 
 ```text
-Audio (16 kHz) → speech encoder (frozen) → MLP projector (trained) → LLM decoder → Text
+model.py         the whole model in one file: read this first
+tiny_audio/      the production model: projector, encoder/decoder glue, pipeline, diarization
+scripts/train.py the training loop (Hydra + HF Trainer)
+configs/         the default recipe and its data mix
+scripts/         the `ta` CLI: eval, serve, push, deploy, runpod
+docs/course/     the course
+demo/            the Hugging Face Space
 ```
 
-1. A pretrained **speech encoder** turns audio into a sequence of frame embeddings.
-1. A small **MLP projector** stacks neighbouring frames and maps them into the LLM's embedding
-   space. It is the only part trained from scratch.
-1. The **LLM** reads those projected frames as if they were tokens and writes out the transcript.
-
-Encoder, projector, and decoder are each swappable from config. The default config
-(`configs/config.yaml`) is the `granite_qwen_frozen` recipe:
-
-| Encoder                      | Decoder                   | Trained                 |
-| ---------------------------- | ------------------------- | ----------------------- |
-| Granite Speech 470M (frozen) | Qwen3.5-2B, frozen + LoRA | Projector + LoRA (~80M) |
-
-## Train your own
-
-| Tier                  | Data                                 | Hardware                     | Cost                |
-| --------------------- | ------------------------------------ | ---------------------------- | ------------------- |
-| **Course run**        | LoquaciousSet `small` (~250 hours)   | One rented GPU, a few hours  | A few GPU-hours     |
-| **Production recipe** | ~3M clips across ten corpora (>1 TB) | One 80 GB GPU, a day or more | Hundreds of dollars |
-
-```bash
-git clone https://github.com/alexkroman/tiny-audio.git && cd tiny-audio
-poetry install
-
-# 1. Before renting hardware, estimate the VRAM and disk the config needs
-poetry run ta runpod plan
-
-# 2. Full run (the default config)
-poetry run python scripts/train.py
-```
-
-Every setting is a [Hydra](https://hydra.cc/) override, for example
-`model.projector_hidden_dim=2048` or `training.use_lora=true`. When you're happy with a model,
-`ta push` publishes it to the Hugging Face Hub and `ta deploy` puts a demo like the one above on a
-Space.
-
-### Training on RunPod
-
-```bash
-poetry run ta runpod up                         # create a pod with enough GPU for the config
-poetry run ta runpod wait <POD_ID>              # prints <HOST> <PORT>
-poetry run ta runpod deploy <HOST> <PORT>       # sync the project and install dependencies
-HF_TOKEN=hf_... poetry run ta runpod train <HOST> <PORT>
-poetry run ta runpod attach <HOST> <PORT>       # watch the run in tmux
-```
-
-## Learn by building it
-
-The **[free 3.5-hour course](https://alexkroman.github.io/tiny-audio/)** walks you through the full
-loop: how the encoder, projector, and decoder fit together (with real tensor shapes), training a
-model, evaluating it against commercial APIs, and publishing it with a live demo. You need Python,
-the command line, and git. The course run trains on far less data than the published model, so your
-WER will be higher than the table above.
+Every training setting is a [Hydra](https://hydra.cc/) override, for example
+`model.projector_hidden_dim=2048`. `ta push` publishes a model to the Hub and `ta deploy` puts a
+demo like the one above on a Space.
 
 ## Contributing
 
-Want to try a new projector architecture, add a dataset, or change the codebase? See
+Want to try a new projector, add a dataset, or change the codebase? See
 [CONTRIBUTING.md](CONTRIBUTING.md) for the CLI reference, config layout, and quality gates.
 
 ## Acknowledgments
 
 - [Granite Speech](https://huggingface.co/ibm-granite/granite-speech-5.0-470m-turboctc) and
-  [GLM-ASR](https://huggingface.co/zai-org/GLM-ASR-Nano-2512) for audio encoding
+  [Whisper](https://huggingface.co/openai/whisper-small) for audio encoding
 - [Qwen3.5](https://huggingface.co/Qwen/Qwen3.5-2B) and
   [Qwen3](https://huggingface.co/Qwen/Qwen3-0.6B) for language modeling
 - [LoquaciousSet](https://huggingface.co/datasets/speechbrain/LoquaciousSet) for the default
   evaluation set
+- [nanoGPT](https://github.com/karpathy/nanoGPT) and
+  [micrograd](https://github.com/karpathy/micrograd), whose one-readable-file approach this repo
+  borrows
 
 ## License
 

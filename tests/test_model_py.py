@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 import torch
 
-from model import IGNORE, Projector, TinyAudio
+from model import IGNORE, Projector, TinyAudio, Waveform
 
 
 @pytest.fixture(scope="module")
@@ -19,7 +19,7 @@ def tiny() -> TinyAudio:
     return TinyAudio.from_pretrained("openai/whisper-tiny", "HuggingFaceTB/SmolLM2-135M-Instruct")
 
 
-def _clip(seconds: float) -> np.ndarray:
+def _clip(seconds: float) -> Waveform:
     return np.random.default_rng(0).standard_normal(int(16_000 * seconds)).astype(np.float32)
 
 
@@ -41,7 +41,6 @@ def test_labels_cover_only_the_transcript_and_eos(tiny: TinyAudio) -> None:
     audio = tiny.embed_audio([_clip(1.0)])[0]
     embeds, labels = tiny.build_prompt(audio, "hello world")
     target = tiny.tokenizer("hello world", add_special_tokens=False).input_ids
-    assert labels is not None
     assert len(labels) == len(embeds)
     assert labels[labels != IGNORE].tolist() == [*target, tiny.tokenizer.eos_token_id]
 
@@ -54,6 +53,12 @@ def test_only_the_projector_receives_gradients(tiny: TinyAudio) -> None:
     assert torch.isfinite(loss)
     trained = {name for name, p in tiny.named_parameters() if p.grad is not None}
     assert trained == {name for name, _ in tiny.projector.named_parameters(prefix="projector")}
+
+
+def test_inference_prompt_has_no_targets(tiny: TinyAudio) -> None:
+    """Without a transcript the prompt ends where the decoder starts writing."""
+    _, labels = tiny.build_prompt(tiny.embed_audio([_clip(1.0)])[0])
+    assert bool((labels == IGNORE).all())
 
 
 def test_transcribe_returns_text(tiny: TinyAudio) -> None:

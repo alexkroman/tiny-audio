@@ -20,7 +20,10 @@ Run it:
 Defaults: Whisper-small's encoder and Qwen3-0.6B. Both are swappable.
 """
 
+from typing import Any
+
 import numpy as np
+import numpy.typing as npt
 import torch
 import torch.nn as nn
 from transformers import (
@@ -38,6 +41,8 @@ SAMPLE_RATE = 16_000
 INSTRUCTION = "Transcribe the audio."
 AUDIO_SLOT = "<|audio|>"  # marks where audio goes in the prompt; never tokenized
 IGNORE = -100  # label value the LLM's loss skips
+
+Waveform = npt.NDArray[np.float32]  # mono, 16 kHz
 
 
 # -----------------------------------------------------------------------------
@@ -109,8 +114,8 @@ class TinyAudio(nn.Module):
             enable_thinking=False,  # Qwen3: skip the <think> block; others ignore it
         )
         before, after = str(prompt).split(AUDIO_SLOT)
-        self.before_ids: list[int] = tokenizer(before, add_special_tokens=False).input_ids
-        self.after_ids: list[int] = tokenizer(after, add_special_tokens=False).input_ids
+        self.before_ids: list[int] = tokenizer.encode(before, add_special_tokens=False)
+        self.after_ids: list[int] = tokenizer.encode(after, add_special_tokens=False)
 
     @classmethod
     def from_pretrained(cls, encoder_id: str = ENCODER_ID, decoder_id: str = DECODER_ID):
@@ -130,7 +135,7 @@ class TinyAudio(nn.Module):
         """Where the weights live."""
         return self.projector.linear_1.weight.device
 
-    def embed_audio(self, audios: list[np.ndarray]) -> list[torch.Tensor]:
+    def embed_audio(self, audios: list[Waveform]) -> list[torch.Tensor]:
         """16 kHz waveforms -> one [n_audio_tokens, llm_dim] tensor per clip."""
         # 1. Waveform -> log-mel spectrogram, one frame per 10 ms. Whisper
         #    always pads to 30 s, so remember how much of each clip is real.
@@ -158,24 +163,29 @@ class TinyAudio(nn.Module):
         ids_tensor = torch.tensor(ids, dtype=torch.long, device=self.device)
         return self.decoder.get_input_embeddings()(ids_tensor)
 
-    def build_prompt(self, audio: torch.Tensor, transcript: str | None = None):
-        """Lay out one example as embeddings, plus labels when a transcript is given.
+    def build_prompt(
+        self, audio: torch.Tensor, transcript: str | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Lay out one example as embeddings [seq, llm_dim] and labels [seq].
 
-        Returns (embeddings [seq, llm_dim], labels [seq] or None). The labels
-        are IGNORE everywhere except the transcript, so the loss only asks the
-        decoder to predict the words -- not the prompt, not the audio.
+        The labels are IGNORE everywhere except the transcript, so the loss
+        only asks the decoder to predict the words -- not the prompt, not the
+        audio. With no transcript (inference) the prompt ends where the
+        decoder should start writing.
         """
         parts = [self.embed_text(self.before_ids), audio, self.embed_text(self.after_ids)]
         n_prompt = sum(len(part) for part in parts)
-        if transcript is None:
-            return torch.cat(parts), None
-        target = self.tokenizer(transcript, add_special_tokens=False).input_ids
-        target += [self.tokenizer.eos_token_id]  # learn when to stop
-        parts.append(self.embed_text(target))
+        target: list[int] = []
+        if transcript is not None:
+            eos = self.tokenizer.eos_token_id
+            assert isinstance(eos, int)
+            # Ending on the end-of-turn token teaches the decoder when to stop.
+            target = [*self.tokenizer.encode(transcript, add_special_tokens=False), eos]
+            parts.append(self.embed_text(target))
         labels = [IGNORE] * n_prompt + target
         return torch.cat(parts), torch.tensor(labels, device=self.device)
 
-    def forward(self, audios: list[np.ndarray], transcripts: list[str]) -> torch.Tensor:
+    def forward(self, audios: list[Waveform], transcripts: list[str]) -> torch.Tensor:
         """Next-token loss on the transcripts, given the audio."""
         examples = [
             self.build_prompt(audio, text)
@@ -194,11 +204,12 @@ class TinyAudio(nn.Module):
         # The decoder shifts labels by one and averages cross-entropy itself.
         return self.decoder(inputs_embeds=inputs, attention_mask=attention, labels=labels).loss
 
-    @torch.no_grad()
-    def transcribe(self, audio: np.ndarray, max_new_tokens: int = 128) -> str:
+    @torch.inference_mode()
+    def transcribe(self, audio: Waveform, max_new_tokens: int = 128) -> str:
         """Greedy-decode one clip."""
         embeds, _ = self.build_prompt(self.embed_audio([audio])[0])
-        out = self.decoder.generate(
+        # PreTrainedModel's stubs don't declare generate(); it comes from GenerationMixin.
+        out: torch.Tensor = self.decoder.generate(  # pyright: ignore[reportCallIssue]
             inputs_embeds=embeds[None],
             attention_mask=torch.ones(1, len(embeds), dtype=torch.long, device=self.device),
             max_new_tokens=max_new_tokens,
@@ -206,7 +217,9 @@ class TinyAudio(nn.Module):
             pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
         )
         # Given only embeddings, generate() returns just the new tokens.
-        return self.tokenizer.decode(out[0], skip_special_tokens=True).strip()
+        text = self.tokenizer.decode(out[0], skip_special_tokens=True)
+        assert isinstance(text, str)  # one sequence in, one string out
+        return text.strip()
 
 
 # -----------------------------------------------------------------------------
@@ -216,14 +229,16 @@ class TinyAudio(nn.Module):
 
 def main(steps: int = 300, batch_size: int = 8, lr: float = 1e-3) -> None:
     """Train the projector on LibriSpeech's 73-clip dummy split, then transcribe."""
-    from datasets import Audio, load_dataset  # noqa: PLC0415  (only needed here)
+    from datasets import Audio, Dataset, load_dataset  # noqa: PLC0415  (only needed here)
 
     device = "cuda" if torch.cuda.is_available() else "mps" if torch.mps.is_available() else "cpu"
     model = TinyAudio.from_pretrained().to(device)
     data = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation")
+    assert isinstance(data, Dataset)  # one split, fully loaded
     data = data.cast_column("audio", Audio(sampling_rate=SAMPLE_RATE))
-    audios = [np.asarray(row["audio"]["array"], dtype=np.float32) for row in data]
-    texts = [str(row["text"]).capitalize() for row in data]
+    rows: list[dict[str, Any]] = data.to_list()
+    audios = [np.asarray(row["audio"]["array"], dtype=np.float32) for row in rows]
+    texts = [str(row["text"]).capitalize() for row in rows]
 
     # Only the projector's parameters go to the optimizer.
     optimizer = torch.optim.AdamW(model.projector.parameters(), lr=lr)

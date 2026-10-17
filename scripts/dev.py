@@ -19,9 +19,9 @@ app = typer.Typer(
 app.add_typer(quality.app)
 console = Console()
 
-# Every Python tree in the repo: the package, its CLI, the tests, the Space
+# Every Python tree in the repo: the read-first model.py, the package, its CLI, the tests, the Space
 # demo and the course examples. Linters and type checkers all run over this.
-CODE_PATHS = ["tiny_audio", "scripts", "tests", "demo", "docs", "typings"]
+CODE_PATHS = ["model.py", "tiny_audio", "scripts", "tests", "demo", "docs", "typings"]
 LIB_PATH = "tiny_audio"
 TOML_FILES = ["pyproject.toml", ".mdformat.toml"]
 

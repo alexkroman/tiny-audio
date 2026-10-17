@@ -131,6 +131,7 @@ N blocks) to train it.
 ## Project Structure
 
 ```text
+├── model.py                 # The whole model in one readable file (teaching version)
 tiny-audio/
 ├── tiny_audio/              # Core library
 │   ├── asr_modeling.py      # ASRModel: encoder + projector + decoder
