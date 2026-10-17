@@ -20,6 +20,18 @@ two-layer MLP with frame stacking, about 6.3M parameters, trained from scratch. 
 and a text prompt. Tiny Audio uses Qwen3-0.6B, fine-tuned at a low learning rate. In code,
 `model.language_model`. "Decoder", "language model", and "LLM" are used interchangeably.
 
+**Vector** A fixed-length list of numbers; the unit every layer reads and writes. The encoder's
+vectors are 1280 numbers long, the decoder's 1024. No single number means anything alone; the
+pattern across all of them does.
+
+**Weight (Parameter)** A number learned during training. Layers hold grids of them, and a layer's
+work is multiplying an input vector by its grid to produce the next vector. "635M parameters" counts
+weights, not vector width: weights stay, vectors flow.
+
+**Embedding / Embedding Table** The decoder's lookup table from token ID to vector (`embed_tokens`).
+A language model never sees text directly, only these vectors. Audio tokens are built to have the
+same width so they slot in beside them.
+
 **GLM-ASR** An open speech recognition model from Z.ai (Zhipu). Tiny Audio borrows only its audio
 encoder and discards its own decoder.
 

@@ -41,6 +41,13 @@ jobs:
       - name: Install MkDocs
         run: pip install -r docs/site/requirements.txt
 
+      # Python, YAML and shell syntax of every code example, plus the scripts
+      # and configs they name (PyYAML comes with MkDocs). The CI test suite
+      # also parses each `ta` command with the real CLI
+      # (tests/test_course_code.py).
+      - name: Check course code examples
+        run: python docs/site/course_code.py --syntax-only
+
       # strict mode (mkdocs.yml) fails the build on broken links.
       - name: Build
         run: mkdocs build

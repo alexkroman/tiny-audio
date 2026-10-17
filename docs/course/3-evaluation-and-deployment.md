@@ -42,6 +42,15 @@ hallucinates a lot of extra words.
 placement would count as errors. It also means WER says nothing about your model's punctuation or
 capitalization. The raw pair is saved alongside the normalized one so you can inspect those by hand.
 
+**This is also why evaluations disagree.** A WER depends as much on how the reference transcripts
+were written, and what was tidied before scoring, as on the model. If a customer's references spell
+out numbers and the model writes digits, or their references have no punctuation and a scorer
+without normalization compares raw text, every one of those counts as an error even though the model
+heard every word. Two systems can swap places on the same test set just by changing the normalizer.
+Before trusting any WER, yours or a vendor's, ask two questions: how were the references written,
+and what was normalized before scoring? Often the gap between two models is a formatting gap, not a
+hearing gap.
+
 ### Evaluation Datasets
 
 Tiny Audio's registry covers 13 test sets. Each stresses something different:
@@ -61,7 +70,8 @@ Tiny Audio's registry covers 13 test sets. Each stresses something different:
 | `expresso`                         | Expressive read speech                       | Emotional and whispered speech                             |
 
 A model that does well on LibriSpeech and badly on AMI is normal. A model that does badly on
-LibriSpeech has a problem.
+LibriSpeech has a problem. One benchmark is not an evaluation: the gap between domains is your
+roadmap, because it tells you which data to add to the training mix next.
 
 ### Error Analysis
 

@@ -16,6 +16,12 @@ Automatic Speech Recognition converts speech to text. Two kinds of variability m
 - **Acoustic**: accents, background noise, microphone quality, speaking rate
 - **Linguistic**: homophones ("to" vs "two"), punctuation, capitalization, names and numbers
 
+Keep that split in mind; it is the most useful idea in this class. Almost every mistake a recognizer
+makes is either a **hearing mistake** (it misheard the sound) or a **language mistake** (it heard
+fine but chose the wrong word, spelling, or number format). The architecture below has one part for
+each skill, so when a transcript is wrong you can usually tell which part misfired. A mumbled name
+turned into a different word is the ear; "there" instead of "their" is the language model.
+
 The classic answer was to train one big model end to end on thousands of hours of audio. Tiny Audio
 takes a cheaper route: borrow a model that already understands audio, borrow a model that already
 understands language, and train a small bridge between them.
@@ -26,6 +32,16 @@ understands language, and train a small bridge between them.
 Audio → Log-mel spectrogram → Encoder → Projector → Decoder → Text
         (preprocessing)       (frozen)  (trained)   (fine-tuned)
 ```
+
+| Piece       | Role                | Job                                                              |
+| ----------- | ------------------- | ---------------------------------------------------------------- |
+| Spectrogram | The picture         | Turn raw sound into an image of which pitches are present when   |
+| Encoder     | The ear             | Work out which speech sounds were made, whoever said them        |
+| Projector   | The translator      | Hand what the ear heard to the language model in a form it reads |
+| Decoder     | The language expert | An ordinary chat-style language model that writes the transcript |
+
+**Log-mel spectrogram**: a fixed recipe, nothing learned. See
+[From Sound to a Spectrogram](#from-sound-to-a-spectrogram).
 
 **Encoder (GLM-ASR-Nano-2512, encoder only)**: a 32-layer Transformer that turns a spectrogram into
 one 1280-dimensional vector every 20 ms. It already knows what speech sounds like. We keep it
@@ -57,7 +73,71 @@ default trains both jointly because the joint gradient is what keeps improving t
 first few hundred steps. You can still run the frozen-decoder variant with one flag
 (`training.freeze_language_model=true`).
 
+### From Sound to a Spectrogram
+
+![Waveform of a short clip above its log-mel spectrogram](images/spectrogram.png)
+
+Sound is a wave of air pressure, and a digital recording is a long list of pressure readings: 16,000
+of them per second at Tiny Audio's sample rate. That **waveform** (top) shows *when* someone talks,
+but what makes "ba" different from "da" is buried in wiggles far too fast to see, and too fast for a
+model to pick out of raw readings.
+
+The **log-mel spectrogram** (bottom) asks, 100 times a second, how much energy there is at each
+pitch, low to high. Vowels become horizontal stripes, consonants become short, high, fuzzy smears,
+and each speech sound gets a visible signature. Two details make it "see like an ear":
+
+- **Mel spacing.** The 128 frequency bands are spaced the way human hearing is: fine at low pitches,
+  coarse at high ones.
+- **Log scale.** Energies are compressed so loud vowels don't drown out soft consonants.
+
+Nothing in this step is learned; it is the same fixed recipe for every clip. And a spectrogram is a
+grid of brightness values, time across and pitch up, which is exactly what a grayscale image is.
+That is no coincidence: speech models borrowed their tools from image models.
+
+### What the Encoder Produces
+
+![Encoder turning each 20 ms spectrogram slice into one vector](images/encoder.png)
+
+For every 20 ms slice (two spectrogram frames), the encoder emits one **vector**: a list of 1280
+numbers. That length is the model's *width*: every layer inside the encoder reads a list of 1280 and
+writes a list of 1280, so the output vector is the model's working unit, not something bolted on at
+the end.
+
+No single number means anything on its own; the pattern across all 1280 is a fingerprint of that
+moment of sound. The useful property is in the right-hand panel: the same speech sound gets nearly
+the same vector whoever says it and whatever the microphone, while different sounds get different
+vectors. The encoder has learned to ignore *who* and *how*, and keep *what*.
+
+### Weights vs. Vectors
+
+![One layer as a grid of weights, and the model as a stack of layers](images/weights.png)
+
+"635M parameters" and "1280-dimensional vectors" are different numbers, and it's worth being clear
+about why.
+
+- **A weight is a learned number.** A layer holds grids of them, each roughly 1280 × 1280.
+- **Each row of a grid is a recipe.** To make one output number, multiply every input number by the
+  weight in that row and add them up. Do that for every row and you have a new vector. This is the
+  matrix multiplication from high-school algebra, just enormous: `nn.Linear` in PyTorch.
+- **Layers stack.** The encoder has 32 layers, each with several grids. Every vector passes through
+  all of them in order; the output of layer 1 is the input to layer 2.
+
+One 1280 × 1280 grid is about 1.6M weights. Several grids per layer, 32 layers, and you reach
+hundreds of millions. The vectors stay 1280 numbers wide the whole way; there are just a lot of
+grids to pass through. Training is how weights get their values. Once trained (or frozen, like our
+encoder) they are the same for every clip. **Weights stay; vectors flow.**
+
 ### How the Projector Works
+
+![Projector: stack 4 encoder frames, then a small network makes audio tokens](images/projector.png)
+
+The encoder and decoder were trained separately, so their vectors don't match: different lengths
+(1280 vs 1024) and different number ranges. The projector is the adapter. It makes the sequence
+**fewer** (stack 4 neighbors), **reshapes** each stacked vector to the decoder's width with a small
+learned network, and **scales** it to the magnitude the decoder expects. Each resulting **audio
+token** covers about 80 ms of sound, roughly a syllable: not a word, not a letter, but a chunk of
+sound written in the decoder's language of numbers. Nobody designed what an audio token means;
+training settles on whatever packing helps the decoder write the right words.
 
 Follow a 10-second clip through the pipeline:
 
@@ -96,6 +176,14 @@ Parameter count with the defaults: about 5.2M in the first linear layer, about 1
 plus a 5120-element norm. Roughly 6.3M total.
 
 ### How the Decoder Sees Audio
+
+![Audio tokens and word tokens as same-size vectors feeding the decoder](images/decoder.png)
+
+A language model never sees words either. Text is first split into **tokens** (a word or part of
+one), and each token ID is looked up in the **embedding table** (`embed_tokens`, 151,936 rows × 1024
+columns for Qwen3-0.6B). What the first layer actually receives is a row of 1024-number vectors. The
+projector emits vectors of exactly that width, so audio tokens slot into the same row as word
+tokens, and the decoder has no way to tell them apart.
 
 The decoder never sees a spectrogram. It sees a normal chat conversation whose user turn contains
 placeholder tokens:
