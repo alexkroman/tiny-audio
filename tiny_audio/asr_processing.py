@@ -1,12 +1,18 @@
 """Processor that turns raw audio (and optional text) into model inputs."""
 
+import importlib
+import importlib.util
+import io
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, cast, overload
 
 import numpy as np
 import numpy.typing as npt
 import torch
+import torchaudio
 import transformers
+from huggingface_hub.utils import httpx
 from torch.nn.utils.rnn import pad_sequence
 from transformers import (
     BatchFeature,
@@ -14,6 +20,13 @@ from transformers import (
     ProcessorMixin,
     SequenceFeatureExtractor,
 )
+from transformers.pipelines.audio_utils import ffmpeg_read
+
+# soundfile is optional: it arrives with librosa, which the README installs, but
+# it is not in the model's requirements.txt, and transformers refuses to load a
+# remote-code file with a plain `import` of a missing package. Without it every
+# input goes to ffmpeg.
+_soundfile = importlib.import_module("soundfile") if importlib.util.find_spec("soundfile") else None
 
 if TYPE_CHECKING:
     from .asr_config import (
@@ -248,6 +261,35 @@ SILENCE_RMS = 1e-5
 def is_silent(audio: npt.NDArray[np.float32]) -> bool:
     """True for digital silence (or an empty array): nothing for the model to hear."""
     return audio.size == 0 or float(np.sqrt(np.mean(np.square(audio)))) < SILENCE_RMS
+
+
+def decode_audio_input(inputs: str | bytes) -> npt.NDArray[np.float32]:
+    """A URL, file path or encoded bytes to mono float32 at 16 kHz.
+
+    soundfile first: its bundled libsndfile reads WAV, FLAC, OGG and MP3 with
+    nothing else installed, so a fresh `pip install` can transcribe a file.
+    ffmpeg (a system binary the user may not have) only for what it can't
+    read, such as m4a or a video's audio track, or when soundfile is missing.
+    URLs are fetched the way transformers' own ASR pipeline fetches them.
+    """
+    if isinstance(inputs, bytes):
+        data = inputs
+    elif inputs.startswith(("http://", "https://")):
+        response = httpx.get(inputs, follow_redirects=True)
+        response.raise_for_status()
+        data = response.content
+    else:
+        data = Path(inputs).read_bytes()
+    try:
+        if _soundfile is None:
+            return ffmpeg_read(data, sampling_rate=16000)
+        array, sr = _soundfile.read(io.BytesIO(data), dtype="float32", always_2d=True)
+    except RuntimeError:  # LibsndfileError: a format libsndfile can't read
+        return ffmpeg_read(data, sampling_rate=16000)
+    mono = torch.from_numpy(array.mean(axis=1))
+    if sr != 16000:
+        mono = torchaudio.functional.resample(mono, orig_freq=sr, new_freq=16000)
+    return mono.numpy()
 
 
 class ASRProcessor(ProcessorMixin):

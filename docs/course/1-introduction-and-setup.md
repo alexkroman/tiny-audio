@@ -377,10 +377,12 @@ configs/
 ├── training/production.yaml  # Trainer defaults: LRs, batch size, schedule, checkpointing
 └── data/
     ├── multiasr.yaml         # Production mix: 10 corpora, ~3M clips
+    ├── librispeech_dev.yaml  # LibriSpeech dev-clean, 5.4 hours, for the free run
     └── librispeech_dummy.yaml  # 73 clips, for quick pipeline checks
 ```
 
-No experiment presets ship in the repo; `configs/experiments/` holds only the files you create.
+One experiment preset ships: `configs/experiments/tiny.yaml`, the free laptop run
+(`ta train asr -e tiny`). Presets you write go next to it.
 
 The comments in these YAML files are unusually detailed. They record why each value is what it is
 and which experiment changed it. Read `configs/config.yaml` and `configs/training/production.yaml`

@@ -45,6 +45,9 @@ class DatasetConfig:
 
     path: str | None = None
     name: str | None = None
+    # split -> file glob, e.g. with `path: parquet` and hf://datasets/... URLs
+    # to fetch one split's shards without the rest of its config.
+    data_files: dict[str, str] | None = None
     audio_column: str = "audio"
     text_column: str = "text"
     train_splits: list[str] = field(default_factory=lambda: ["train"])

@@ -3,14 +3,12 @@
 import logging
 import re
 from collections.abc import Callable, Iterator, MutableMapping, Sequence
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 import numpy as np
 import numpy.typing as npt
 import torch
 import transformers
-from transformers.pipelines.audio_utils import ffmpeg_read
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase, SequenceFeatureExtractor
@@ -21,6 +19,7 @@ if TYPE_CHECKING:
         audible_chunks,
         chunk_bounds,
         collate_chunks,
+        decode_audio_input,
         is_silent,
         prepend_lead_in,
     )
@@ -35,6 +34,7 @@ else:
             audible_chunks,
             chunk_bounds,
             collate_chunks,
+            decode_audio_input,
             is_silent,
             prepend_lead_in,
         )
@@ -48,6 +48,7 @@ else:
             audible_chunks,
             chunk_bounds,
             collate_chunks,
+            decode_audio_input,
             is_silent,
             prepend_lead_in,
         )
@@ -487,9 +488,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                 return None
             array, sr = inputs[key], inputs.get("sampling_rate", 16000)
         elif isinstance(inputs, (str, bytes)):
-            # File path or encoded bytes - decode with ffmpeg (same as HF pipeline)
-            data = Path(inputs).read_bytes() if isinstance(inputs, str) else inputs
-            array, sr = ffmpeg_read(data, sampling_rate=16000), 16000
+            array, sr = decode_audio_input(inputs), 16000
         elif isinstance(inputs, np.ndarray):
             array, sr = inputs, 16000
         else:

@@ -1331,6 +1331,20 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # inert everywhere else.
         if labels is not None and self._lm_accepts_skip_logits:
             kwargs.setdefault("skip_logits", True)
+        elif labels is not None:
+            # No liger (a mac, or liger missing): the stock forward projects
+            # every position through lm_head, audio and prompt included, though
+            # only the transcript carries labels. Keep just the positions that
+            # predict a label and hand the loss its already-shifted targets,
+            # which ForCausalLMLoss takes as-is. Same loss, same
+            # num_items_in_batch normalization, a (B, K, V) logits tensor with
+            # K ~ the longest transcript instead of T ~ the whole prompt. On
+            # Qwen3.5's 248K vocab that tensor and its fp32 upcast and gradient
+            # are what pushed a batch-4 mac run past 40 GB.
+            shift_labels = nn.functional.pad(labels, (0, 1), value=-100)[:, 1:]
+            keep = (shift_labels != -100).any(dim=0).nonzero().squeeze(-1)
+            kwargs.setdefault("logits_to_keep", keep)
+            kwargs.setdefault("shift_labels", shift_labels[:, keep])
 
         outputs: CausalLMOutputWithPast = self.language_model(
             attention_mask=attention_mask,
@@ -1778,7 +1792,10 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         """
         # Store repo_id in config so save_pretrained can access it
         self.config.pretrained_model_path = repo_id
-        # Call parent's push_to_hub
+        # `tags` only when given: transformers reads it as
+        # `kwargs.get("tags", [])` and iterates the result, so an explicit
+        # None is a TypeError after the whole run has trained.
+        extra: dict[str, Any] = {"tags": tags} if tags is not None else {}
         return PreTrainedModel.push_to_hub(
             self,
             repo_id,
@@ -1789,7 +1806,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             revision=revision,
             create_pr=create_pr,
             max_shard_size=max_shard_size,
-            tags=tags,
+            **extra,
         )
 
 
