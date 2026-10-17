@@ -31,17 +31,9 @@ demo:**
 
 ## Quickstart
 
-```bash
-git clone https://github.com/alexkroman/tiny-audio.git && cd tiny-audio
-
-# 1. The whole idea in one file: train a projector on 73 LibriSpeech clips, then transcribe.
-#    Runs on a laptop (CPU, Apple Silicon, or CUDA).
-pip install torch transformers "datasets[audio]<4" librosa soundfile
-python model.py
-```
-
 ```python
-# 2. Transcribe with the published model
+# 1. Transcribe with the published model
+#    pip install "transformers>=5.0" peft torch torchaudio librosa
 from transformers import pipeline
 
 pipe = pipeline(
@@ -52,7 +44,8 @@ print(pipe("audio.wav")["text"])
 ```
 
 ```bash
-# 3. Train the full recipe on one rented GPU
+# 2. Train it yourself on one rented GPU
+git clone https://github.com/alexkroman/tiny-audio.git && cd tiny-audio
 poetry install
 poetry run ta runpod plan               # VRAM and disk the config needs, before you rent anything
 poetry run python scripts/train.py      # the default config: the published model's recipe
@@ -63,22 +56,23 @@ record yourself or upload a file.
 
 ## Read this first
 
-The whole model is in **[model.py](model.py)**: about 250 lines, heavily commented, no clever
-tricks. If you read one file in this repo, read that one. The `Projector` class near the top is the
-entire idea, and it takes five minutes:
+The idea fits in one class. **[tiny_audio/projectors.py](tiny_audio/projectors.py)** holds the
+projector, the only part trained from scratch: frame stacking plus a two-layer MLP, about twenty
+lines of code under a docstring that records what was tried and why it was rejected. Read it first.
 
 ```text
-Audio (16 kHz) → speech encoder (frozen) → MLP projector (trained) → LLM decoder (frozen) → Text
+Audio (16 kHz) → speech encoder (frozen) → MLP projector (trained) → LLM decoder (LoRA) → Text
 ```
 
-1. A pretrained **speech encoder** turns audio into frame embeddings, one every 20 ms.
-1. The **projector** stacks four neighbouring frames and maps them into the LLM's embedding space.
-   It is the only part trained from scratch.
+1. A pretrained **speech encoder** turns audio into a sequence of frame embeddings.
+1. The **projector** stacks neighbouring frames and maps them into the LLM's embedding space.
 1. The **LLM** reads those projected frames as if they were words and writes out the transcript.
 
-`model.py` uses Whisper-small's encoder and Qwen3-0.6B so it fits on a laptop. Once it makes sense,
-the production version is in [`tiny_audio/`](tiny_audio/): the same three parts with a Granite
-Speech encoder, Qwen3.5-2B with LoRA, batching, timestamps, diarization, and streaming.
+Then follow one clip through [tiny_audio/asr_modeling.py](tiny_audio/asr_modeling.py):
+`_encode_audio` runs the encoder and the projector, `forward` splices the audio embeddings into the
+prompt and computes the loss, and `generate` decodes. That file is the model that was trained and
+published, so it is longer: it also handles batching, LoRA, memory, and several encoder and decoder
+families.
 
 ## The course
 
@@ -89,7 +83,7 @@ run and something concrete to check.
 | --- | ----------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- | -------------------------------- |
 | 00  | [What a speech LLM is](https://alexkroman.github.io/tiny-audio/1-introduction-and-setup/#the-architecture)              | Encoder → projector → decoder, and why reusing two models works | —                                |
 | 01  | [Audio in, features out](https://alexkroman.github.io/tiny-audio/1-introduction-and-setup/#from-sound-to-a-spectrogram) | Waveform → spectrogram → encoder frames, with real shapes       | Frame counts per second of audio |
-| 02  | [The projector](https://alexkroman.github.io/tiny-audio/1-introduction-and-setup/#how-the-projector-works)              | Frame stacking and the two-layer MLP, in `model.py`             | `python model.py`: loss falls    |
+| 02  | [The projector](https://alexkroman.github.io/tiny-audio/1-introduction-and-setup/#how-the-projector-works)              | Frame stacking and the two-layer MLP, with real shapes          | Shapes and parameter count       |
 | 03  | [The decoder](https://alexkroman.github.io/tiny-audio/1-introduction-and-setup/#how-the-decoder-sees-audio)             | How an LLM reads audio tokens next to text tokens               | —                                |
 | 04  | [Run inference](https://alexkroman.github.io/tiny-audio/1-introduction-and-setup/#part-b-hands-on-50-min)               | Install, transcribe, timestamps, trace a clip through the code  | Your first transcript            |
 | 05  | [Data](https://alexkroman.github.io/tiny-audio/2-training/#data-make-the-labels-agree)                                  | Why the label conventions decide the result                     | —                                |
@@ -137,7 +131,6 @@ What each training budget costs:
 
 | Run                                  | Data                                 | Hardware                     | Cost                |
 | ------------------------------------ | ------------------------------------ | ---------------------------- | ------------------- |
-| **`model.py`**                       | 73 LibriSpeech clips                 | Your laptop                  | Free                |
 | **Course run**                       | LoquaciousSet `small` (~250 hours)   | One rented GPU, a few hours  | A few GPU-hours     |
 | **Default config** (published model) | ~3M clips across ten corpora (>1 TB) | One 80 GB GPU, a day or more | Hundreds of dollars |
 
@@ -165,8 +158,7 @@ token-by-token output, see [`ASRModel.generate_streaming`](tiny_audio/asr_modeli
 ## Repo layout
 
 ```text
-model.py         the whole model in one file: read this first
-tiny_audio/      the production model: projector, encoder/decoder glue, pipeline, diarization
+tiny_audio/      the model: projector, encoder/decoder glue, pipeline, diarization
 scripts/train.py the training loop (Hydra + HF Trainer)
 configs/         the default recipe and its data mix
 scripts/         the `ta` CLI: eval, serve, push, deploy, runpod
@@ -186,13 +178,12 @@ Want to try a new projector, add a dataset, or change the codebase? See
 ## Acknowledgments
 
 - [Granite Speech](https://huggingface.co/ibm-granite/granite-speech-5.0-470m-turboctc) and
-  [Whisper](https://huggingface.co/openai/whisper-small) for audio encoding
+  [GLM-ASR](https://huggingface.co/zai-org/GLM-ASR-Nano-2512) for audio encoding
 - [Qwen3.5](https://huggingface.co/Qwen/Qwen3.5-2B) and
   [Qwen3](https://huggingface.co/Qwen/Qwen3-0.6B) for language modeling
 - [LoquaciousSet](https://huggingface.co/datasets/speechbrain/LoquaciousSet) for the default
   evaluation set
-- [nanoGPT](https://github.com/karpathy/nanoGPT) and
-  [micrograd](https://github.com/karpathy/micrograd), whose one-readable-file approach this repo
+- [nanoGPT](https://github.com/karpathy/nanoGPT), whose small-and-readable approach this repo
   borrows
 
 ## License

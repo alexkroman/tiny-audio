@@ -214,15 +214,7 @@ multi_line_output = 3
 include_trailing_comma = true
 
 [tool.pyright]
-include = [
-  "model.py",
-  "tiny_audio",
-  "scripts",
-  "tests",
-  "demo",
-  "docs",
-  "typings",
-]
+include = ["tiny_audio", "scripts", "tests", "demo", "docs", "typings"]
 exclude = ["**/node_modules", "**/__pycache__", "outputs", ".venv", "venv"]
 typeCheckingMode = "strict"
 # Minimal stubs for modules that cannot be installed everywhere (the Spaces
