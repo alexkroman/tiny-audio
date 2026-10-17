@@ -106,11 +106,11 @@ ______________________________________________________________________
 Audio → GLM-ASR encoder (frozen) → MLP projector (trained) → Qwen3-0.6B (fine-tuned) → Text
 ```
 
-| Component     | Model                            | Params | Trains?           | LR   |
-| ------------- | -------------------------------- | ------ | ----------------- | ---- |
-| Audio encoder | GLM-ASR-Nano-2512, encoder only  | ~635M  | No                | none |
-| Projector     | RMSNorm → Linear → GELU → Linear | ~6.3M  | Yes, from scratch | 1e-3 |
-| Decoder       | Qwen3-0.6B                       | ~600M  | Yes, fine-tuned   | 2e-5 |
+| Component     | Role                | Model                            | Params | Trains?           | LR   |
+| ------------- | ------------------- | -------------------------------- | ------ | ----------------- | ---- |
+| Audio encoder | The ear             | GLM-ASR-Nano-2512, encoder only  | ~635M  | No                | none |
+| Projector     | The translator      | RMSNorm → Linear → GELU → Linear | ~6.3M  | Yes, from scratch | 1e-3 |
+| Decoder       | The language expert | Qwen3-0.6B                       | ~600M  | Yes, fine-tuned   | 2e-5 |
 
 ### Shapes (10 s of audio)
 
@@ -249,6 +249,17 @@ Every variable below also has a flag on the command that reads it, and `--help` 
 | `WANDB_RUN_ID`, `WANDB_RESUME`                                 | Resume a W&B run                                                | `ta runpod train --wandb-run-id / --wandb-resume`                          |
 | `MODEL_ID`                                                     | Model served by the Gradio demo / Space                         | `ta demo --model`                                                          |
 | `ASSEMBLYAI_API_KEY`, `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY` | Commercial API baselines                                        | `ta eval --assemblyai-api-key / --deepgram-api-key / --elevenlabs-api-key` |
+
+______________________________________________________________________
+
+## Which Part Failed?
+
+| Error looks like                                    | Kind             | Look at                   |
+| --------------------------------------------------- | ---------------- | ------------------------- |
+| An unrelated word where the audio was unclear       | Hearing mistake  | Encoder; audio in the mix |
+| Right sound, wrong word or spelling ("their/there") | Language mistake | Decoder                   |
+| Digits vs words, punctuation, casing                | Formatting gap   | References and normalizer |
+| Empty output or endless repetition                  | Mode failure     | Loss curve, gradient flow |
 
 ______________________________________________________________________
 

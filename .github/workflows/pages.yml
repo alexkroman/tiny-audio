@@ -1,0 +1,75 @@
+---
+name: Course Site
+
+"on":
+  push:
+    branches: [main]
+    paths:
+      - docs/course/**
+      - docs/site/**
+      - mkdocs.yml
+      - .github/workflows/pages.yml
+  pull_request:
+    paths:
+      - docs/course/**
+      - docs/site/**
+      - mkdocs.yml
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build course site
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install MkDocs
+        run: pip install -r docs/site/requirements.txt
+
+      # Python, YAML and shell syntax of every code example, plus the scripts
+      # and configs they name (PyYAML comes with MkDocs). The CI test suite
+      # also parses each `ta` command with the real CLI
+      # (tests/test_course_code.py).
+      - name: Check course code examples
+        run: python docs/site/course_code.py --syntax-only
+
+      # strict mode (mkdocs.yml) fails the build on broken links.
+      - name: Build
+        run: mkdocs build
+
+      - name: Upload Pages artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9  # v5.0.0
+        with:
+          path: site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346  # v5.0.1

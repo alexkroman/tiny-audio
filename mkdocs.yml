@@ -1,0 +1,61 @@
+---
+# Builds the course in docs/course as a static site, published to GitHub Pages
+# by .github/workflows/pages.yml. Preview locally with:
+#   pip install -r docs/site/requirements.txt && mkdocs serve
+site_name: Tiny Audio Course
+site_description: Build, train, evaluate, and deploy your own speech recognition model.
+site_url: https://alexkroman.github.io/tiny-audio/
+repo_url: https://github.com/alexkroman/tiny-audio
+repo_name: alexkroman/tiny-audio
+edit_uri: edit/main/docs/course/
+
+docs_dir: docs/course
+site_dir: site
+strict: true
+
+hooks:
+  - docs/site/hooks.py
+
+nav:
+  - Overview: 0-course-overview.md
+  - "Class 1: Introduction and Setup": 1-introduction-and-setup.md
+  - "Class 2: Training": 2-training.md
+  - "Class 3: Evaluation and Deployment": 3-evaluation-and-deployment.md
+  - Quick Reference: 4-quick-reference.md
+  - Glossary: 5-glossary.md
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - content.code.copy
+    - navigation.footer
+    - navigation.instant
+    - navigation.top
+    - search.highlight
+    - toc.follow
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.tasklist:
+      custom_checkbox: true

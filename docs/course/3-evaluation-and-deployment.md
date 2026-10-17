@@ -42,6 +42,15 @@ hallucinates a lot of extra words.
 placement would count as errors. It also means WER says nothing about your model's punctuation or
 capitalization. The raw pair is saved alongside the normalized one so you can inspect those by hand.
 
+**This is also why evaluations disagree.** A WER depends as much on how the reference transcripts
+were written, and what was tidied before scoring, as on the model. If a customer's references spell
+out numbers and the model writes digits, or their references have no punctuation and a scorer
+without normalization compares raw text, every one of those counts as an error even though the model
+heard every word. Two systems can swap places on the same test set just by changing the normalizer.
+Before trusting any WER, yours or a vendor's, ask two questions: how were the references written,
+and what was normalized before scoring? Often the gap between two models is a formatting gap, not a
+hearing gap.
+
 ### Evaluation Datasets
 
 Tiny Audio's registry covers 13 test sets. Each stresses something different:
@@ -61,11 +70,22 @@ Tiny Audio's registry covers 13 test sets. Each stresses something different:
 | `expresso`                         | Expressive read speech                       | Emotional and whispered speech                             |
 
 A model that does well on LibriSpeech and badly on AMI is normal. A model that does badly on
-LibriSpeech has a problem.
+LibriSpeech has a problem. One benchmark is not an evaluation: the gap between domains is your
+roadmap, because it tells you which data to add to the training mix next.
 
 ### Error Analysis
 
-An aggregate WER tells you *how much* the model fails. To improve it you need to know *how*:
+An aggregate WER tells you *how much* the model fails. To improve it you need to know *how*. Start
+with the split from Class 1 and ask, for each wrong word, which part failed:
+
+| Kind of error        | Example                                                | Where it lives  | Usual fix                                              |
+| -------------------- | ------------------------------------------------------ | --------------- | ------------------------------------------------------ |
+| **Hearing mistake**  | A mumbled name becomes an unrelated word               | Encoder         | More audio like it (accent, noise, mic) in the mix     |
+| **Language mistake** | "there" for "their"; a name heard right, spelled wrong | Decoder         | More text like it; a larger or better-tuned decoder    |
+| **Formatting gap**   | "$25" vs "twenty five dollars"; missing punctuation    | Labels / scorer | Check the normalizer and the references, not the model |
+| **Mode failure**     | Empty output, endless repetition                       | The whole run   | Check the loss curve and gradient flow                 |
+
+Then look at the data three ways:
 
 - **Worst samples**: sort by per-sample WER. The top of the list is usually noisy audio, mislabeled
   references, or a mode failure (empty output, endless repetition).
@@ -132,8 +152,10 @@ worst ones are a sort away:
 grep -h "WER:" outputs/*_${NAME}_loquacious/results.txt | sort -t: -k2 -rn | head -20
 ```
 
-Open `results.txt` and read a dozen of the worst. Sort them into buckets: bad audio, bad reference
-label, rare vocabulary, model mode failure. The bucket that dominates tells you what to fix.
+Open `results.txt` and read a dozen of the worst. Sort each into a bucket from the table above:
+hearing mistake, language mistake, formatting gap, or mode failure, plus "bad reference label" for
+clips where the reference itself is wrong. The bucket that dominates tells you which part, or which
+data, to fix.
 
 **Compare models.** Evaluate the published model on the same datasets and sample count, then read
 the corpus WER from each run's `metrics.txt`:

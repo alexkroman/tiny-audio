@@ -15,6 +15,14 @@ ______________________________________________________________________
 
 ### What `scripts/train.py` Does
 
+![Training: set up once, then take a batch, predict, score, adjust, repeat](images/training-loop.png)
+
+Every run has the same two parts, whether it's an afternoon on one rented GPU or weeks on hundreds:
+set up once, then loop. Each pass through the loop takes a batch of clips, lets the model predict
+their transcripts, boils the gap between prediction and truth down to one number (the **loss**, a
+penalty score that's near zero for a perfect transcript), and nudges the weights to lower it: the
+projector a lot, the decoder a little, the encoder not at all. In detail:
+
 1. **Loads the two pretrained models** from the Hub: the GLM-ASR encoder and Qwen3-0.6B. The
    decoder's master weights are kept in float32 so tiny updates aren't rounded away; compute runs in
    bfloat16.
@@ -35,6 +43,28 @@ ______________________________________________________________________
    clipping, bf16.
 1. **Evaluates and checkpoints** every 2,000 steps. With `push_to_hub: true` every checkpoint is
    uploaded to your Hub repo as it is saved, so you can evaluate mid-run from any machine.
+
+### Data: Make the Labels Agree
+
+The loop is simple. What makes or breaks a run is what you feed it, and two things matter.
+
+**The mix.** A model trained only on audiobooks falls apart in a meeting. Combine read and
+spontaneous speech, clean and noisy recordings, and many accents, weighted toward where the model
+will be used. That is why the production recipe trains on `multiasr`, a blend of 10 corpora, and why
+the smaller single-corpus run you launch in this class will be weaker on some domains than others.
+
+**Consistency.** Every corpus writes its transcripts differently, and a model trained on all of them
+unchanged learns all of their habits: its output flickers between styles at random. Step 4 above
+picks one style and makes every label match it:
+
+![Raw transcript problems and how each is cleaned or dropped](images/data-cleaning.png)
+
+(In the code the exact length limits are 0.8 s and 19 s.)
+
+One rule of thumb: **whatever the labels lack, the model will lack.** A truecaser can put capital
+letters back, but punctuation nobody wrote down is gone for good. If you want the model to
+punctuate, some of its training data must be punctuated. And always keep held-out clips the model
+never trains on; that is the only honest test, and it is what the eval loss below measures.
 
 ### Key Metrics
 
@@ -344,6 +374,8 @@ ______________________________________________________________________
 
 1. Training is a normal `Trainer` run with a frozen encoder and two learning rates: hot for the
    fresh projector, cool for the pretrained decoder.
+1. The loop is simple; the data decides the result. Mix domains, make every transcript follow one
+   style, and remember that whatever the labels lack, the model will lack.
 1. Data is downloaded and cached, not streamed. Plan disk at twice the download size.
 1. `ta runpod plan` replaces guesswork about GPU and disk.
 1. The loss falls hardest in the first 500 steps; the rest is refinement.
