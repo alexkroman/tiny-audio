@@ -9,7 +9,7 @@ import typer
 
 from scripts.eval.cli import _build_evaluator, save_results
 from scripts.eval.constants import AssemblyAIModel
-from scripts.eval.evaluators import AssemblyAIStreamsEvaluator
+from scripts.eval.evaluators.asr import AssemblyAIStreamsEvaluator
 from scripts.eval.evaluators.base import EvalResult, Metrics
 from scripts.utils import extract_model_from_dir, find_model_dirs
 

@@ -14,6 +14,7 @@ current tree; review its diff like any other change.
     ta dev quality type-completeness [--update]
     ta dev quality tracked-ignored
     ta dev quality invariants                   # scripts/invariants.py
+    ta dev quality owning-imports               # scripts/owning_imports.py
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ from typing import Annotated, Any
 
 import typer
 
-from scripts import invariants
+from scripts import invariants, owning_imports
 from scripts.utils import get_project_root
 
 app: typer.Typer = typer.Typer(
@@ -477,6 +478,7 @@ def tracked_ignored() -> None:
 
 
 app.command("invariants")(invariants.check)
+app.command("owning-imports")(owning_imports.check)
 
 
 if __name__ == "__main__":

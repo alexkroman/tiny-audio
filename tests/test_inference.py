@@ -8,6 +8,7 @@ import pytest
 import torch
 import torch._dynamo.config as dynamo_config
 from transformers.integrations.hub_kernels import use_kernel_func_from_hub_with_fallback
+from transformers.integrations.sdpa_attention import sdpa_attention_forward
 
 from scripts import inference
 from scripts.inference import (
@@ -19,7 +20,8 @@ from scripts.inference import (
     use_fast_kernels_under_compile,
 )
 from tiny_audio.asr_modeling import ASRModel
-from tiny_audio.asr_pipeline import ASRPipeline, PreparedChunk
+from tiny_audio.asr_pipeline import ASRPipeline
+from tiny_audio.asr_types import PreparedChunk
 
 
 def _chunk(frames: int) -> PreparedChunk:
@@ -201,7 +203,7 @@ def test_missing_fast_kernels_reports_pip_names(monkeypatch: pytest.MonkeyPatch)
     def no_spec(_name: str) -> None:
         return None
 
-    monkeypatch.setattr(inference.importlib.util, "find_spec", no_spec)
+    monkeypatch.setattr(importlib.util, "find_spec", no_spec)
     assert missing_fast_kernels() == ["causal-conv1d", "flash-linear-attention"]
 
 
@@ -230,7 +232,7 @@ class TestGqaDecodeSdpa:
         }[mask_kind]
         module = self._module()
         out, _ = _gqa_decode_sdpa(module, q, k, v, mask, scaling=0.25)
-        expected, _ = inference.sdpa_attention_forward(module, q, k, v, mask, scaling=0.25)
+        expected, _ = sdpa_attention_forward(module, q, k, v, mask, scaling=0.25)
         assert out.shape == (3, q_len, 8, 16)
         torch.testing.assert_close(out, expected)
 

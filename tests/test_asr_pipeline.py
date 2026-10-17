@@ -11,15 +11,12 @@ import pytest
 import torch
 import transformers
 
-from tiny_audio.alignment import AlignedWord
+from tiny_audio.alignment import AlignedWord, QwenForcedAligner
 from tiny_audio.asr_modeling import ASRModel
-from tiny_audio.asr_pipeline import (
-    ASRPipeline,
-    NemotronDiarizer,
-    PreparedChunk,
-    QwenForcedAligner,
-    collate_chunks,
-)
+from tiny_audio.asr_pipeline import ASRPipeline
+from tiny_audio.asr_processing import collate_chunks
+from tiny_audio.asr_types import PreparedChunk
+from tiny_audio.diarization import NemotronDiarizer
 
 
 class TestExtractAudio:

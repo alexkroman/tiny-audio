@@ -12,13 +12,9 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 
-from tiny_audio.alignment import AlignedWord
-from tiny_audio.asr_pipeline import (
-    ASRPipeline,
-    NemotronDiarizer,
-    QwenForcedAligner,
-)
-from tiny_audio.diarization import masked_audio, stream_chunks
+from tiny_audio.alignment import AlignedWord, QwenForcedAligner
+from tiny_audio.asr_pipeline import ASRPipeline
+from tiny_audio.diarization import NemotronDiarizer, masked_audio, stream_chunks
 
 SR = 16000
 

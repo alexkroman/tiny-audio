@@ -1,6 +1,7 @@
 """The quality ratchets in scripts/quality.py."""
 
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -239,7 +240,7 @@ class TestTypeCompleteness:
         def run(*_args: object, **_kwargs: object) -> SimpleNamespace:
             return SimpleNamespace(stdout=stdout, stderr="")
 
-        monkeypatch.setattr(quality.subprocess, "run", run)
+        monkeypatch.setattr(subprocess, "run", run)
 
     @staticmethod
     def report(score: float) -> str:
@@ -280,7 +281,7 @@ class TestTrackedIgnored:
         def run(*_args: object, **_kwargs: object) -> SimpleNamespace:
             return SimpleNamespace(stdout="results.json\n")
 
-        monkeypatch.setattr(quality.subprocess, "run", run)
+        monkeypatch.setattr(subprocess, "run", run)
         result = runner.invoke(quality.app, ["tracked-ignored"])
         assert result.exit_code == 1
         assert "results.json" in result.output

@@ -19,7 +19,9 @@ from starlette.types import Message
 
 from scripts import serve
 from scripts.serve import ChunkBatcher, RequestError, decode_request, parse_parameters
-from tiny_audio.asr_pipeline import ASRPipeline, PreparedChunk
+from tiny_audio.asr_pipeline import ASRPipeline
+from tiny_audio.asr_types import PreparedChunk
+from tiny_audio.diarization import NemotronDiarizer
 
 
 def _chunk(frames: int) -> PreparedChunk:
@@ -432,7 +434,7 @@ class TestDiarizeOnly:
             return activity
 
         monkeypatch.setattr(serve, "decode_audio", decode)
-        monkeypatch.setattr(serve.NemotronDiarizer, "activity", nemotron)
+        monkeypatch.setattr(NemotronDiarizer, "activity", nemotron)
         response = client.post(
             "/?diarize_only=true&max_speakers=2",
             content=b"RIFF",

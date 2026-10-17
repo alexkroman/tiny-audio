@@ -3,9 +3,11 @@
 import sys
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from scripts.cli import app
+from scripts.train_cli import _run
 
 runner = CliRunner()
 
@@ -19,7 +21,7 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
         seen.append(cmd)
         return 0
 
-    monkeypatch.setattr("scripts.train_cli.subprocess.call", fake_call)
+    monkeypatch.setattr("subprocess.call", fake_call)
     return seen
 
 
@@ -48,5 +50,12 @@ def test_exit_code_is_the_trainers(monkeypatch: pytest.MonkeyPatch) -> None:
     def failing_call(cmd: list[str]) -> int:
         return 3
 
-    monkeypatch.setattr("scripts.train_cli.subprocess.call", failing_call)
+    monkeypatch.setattr("subprocess.call", failing_call)
     assert runner.invoke(app, ["train", "asr"]).exit_code == 3
+
+
+def test_run_without_a_preset_adds_no_override(calls: list[list[str]]) -> None:
+    with pytest.raises(typer.Exit) as exc:
+        _run("scripts.train", "experiments", None, ["a=1"])
+    assert exc.value.exit_code == 0
+    assert calls == [[sys.executable, "-m", "scripts.train", "a=1"]]

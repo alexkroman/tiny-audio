@@ -59,7 +59,8 @@ from torchcodec.decoders import AudioDecoder
 
 from scripts.inference import GraphedDecoder, load_serving_pipeline
 from tiny_audio.alignment import get_device
-from tiny_audio.asr_pipeline import ASRPipeline, PreparedChunk
+from tiny_audio.asr_pipeline import ASRPipeline
+from tiny_audio.asr_types import PreparedChunk
 from tiny_audio.diarization import NemotronDiarizer
 
 logger: logging.Logger = logging.getLogger(__name__)

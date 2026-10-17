@@ -1,5 +1,6 @@
 """Tests for tiny_audio.diarization helpers."""
 
+import importlib.util
 from collections.abc import Callable
 from unittest.mock import MagicMock
 
@@ -8,7 +9,8 @@ import pytest
 import torch
 
 from tiny_audio import diarization
-from tiny_audio.diarization import NemotronDiarizer, get_device
+from tiny_audio.alignment import get_device
+from tiny_audio.diarization import NemotronDiarizer
 
 
 class TestDeviceHelper:
@@ -39,13 +41,13 @@ class TestNemotronGetInstance:
         return find_spec
 
     def test_missing_model_type_raises_install_hint(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(diarization.importlib.util, "find_spec", self._find_spec(None))
+        monkeypatch.setattr(importlib.util, "find_spec", self._find_spec(None))
         with pytest.raises(ImportError, match="nemotron3_diarization"):
             NemotronDiarizer.get_instance()
 
     def test_loads_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
         model_cls, processor_cls = MagicMock(), MagicMock()
-        monkeypatch.setattr(diarization.importlib.util, "find_spec", self._find_spec(object()))
+        monkeypatch.setattr(importlib.util, "find_spec", self._find_spec(object()))
         monkeypatch.setattr(diarization, "AutoModelForAudioFrameClassification", model_cls)
         monkeypatch.setattr(diarization, "AutoProcessor", processor_cls)
         monkeypatch.setattr(diarization, "get_device", lambda: torch.device("cpu"))

@@ -47,7 +47,7 @@ def _fake_server(
         assert kwargs.get("trust_env") is False  # never through a local HTTPS_PROXY
         return real_client(transport=httpx.MockTransport(handler), **kwargs)
 
-    monkeypatch.setattr(bench_serve.httpx, "AsyncClient", client)
+    monkeypatch.setattr(httpx, "AsyncClient", client)
     return posted
 
 

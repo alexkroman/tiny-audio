@@ -74,6 +74,7 @@ MODULE_TESTS_COMMAND = [*QUALITY, "module-tests"]
 TYPE_COMPLETENESS_COMMAND = [*QUALITY, "type-completeness"]
 TRACKED_IGNORED_COMMAND = [*QUALITY, "tracked-ignored"]
 INVARIANTS_COMMAND = [*QUALITY, "invariants"]
+OWNING_IMPORTS_COMMAND = [*QUALITY, "owning-imports"]
 # Reads the coverage.json TEST_COMMAND writes, so it runs after the tests.
 COVERAGE_FLOORS_COMMAND = [*QUALITY, "coverage-floors"]
 # Copy-pasted blocks of 4+ lines across QUALITY_PATHS, within and between
@@ -126,6 +127,7 @@ ANALYSIS_COMMANDS = [
     TYPE_COMPLETENESS_COMMAND,
     TRACKED_IGNORED_COMMAND,
     INVARIANTS_COMMAND,
+    OWNING_IMPORTS_COMMAND,
     DEPS_COMMAND,
     *DOCSTRINGS_COMMANDS,
 ]

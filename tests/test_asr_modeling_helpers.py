@@ -113,7 +113,7 @@ class TestHasSlidingWindowAttention:
             return config
 
         monkeypatch.setattr(
-            "tiny_audio.asr_attention.AutoConfig.from_pretrained",
+            "transformers.AutoConfig.from_pretrained",
             from_pretrained,
         )
 
@@ -153,7 +153,7 @@ class TestHasSlidingWindowAttention:
             msg = "no network"
             raise OSError(msg)
 
-        monkeypatch.setattr("tiny_audio.asr_attention.AutoConfig.from_pretrained", boom)
+        monkeypatch.setattr("transformers.AutoConfig.from_pretrained", boom)
         assert _has_sliding_window_attention("missing/model") is True
 
 

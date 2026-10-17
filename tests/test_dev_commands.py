@@ -51,7 +51,7 @@ class TestRunHelpers:
             seen["args"] = args
             return 7
 
-        monkeypatch.setattr("scripts.dev.subprocess.call", fake_call)
+        monkeypatch.setattr("subprocess.call", fake_call)
         assert dev.run("echo", "hi") == 7
         assert seen["args"] == ("echo", "hi")
 
@@ -279,7 +279,7 @@ class TestFormatCode:
     def test_every_tracked_markdown_and_json_file_is_formatted(
         self, recorded_runs: list[tuple[str, ...]], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr("scripts.dev.subprocess.run", self._fake_ls_files)
+        monkeypatch.setattr("subprocess.run", self._fake_ls_files)
         dev.format_code()
         assert ("mdformat", "README.md", "MODEL_CARD.md", "demo/README.md") in recorded_runs
         assert ("pretty-format-json", "--autofix", "quality/file_length.json") in recorded_runs
@@ -292,7 +292,7 @@ class TestFormatCode:
         def empty_ls_files(*_a: object, **_kw: object) -> SimpleNamespace:
             return SimpleNamespace(stdout="")
 
-        monkeypatch.setattr("scripts.dev.subprocess.run", empty_ls_files)
+        monkeypatch.setattr("subprocess.run", empty_ls_files)
         dev.format_code()
         assert all(c[0] not in {"mdformat", "pretty-format-json"} for c in recorded_runs)
 
@@ -331,6 +331,7 @@ class TestQualityGateContents:
         assert dev.TYPE_COMPLETENESS_COMMAND in dev.check_commands()
         assert dev.TRACKED_IGNORED_COMMAND in dev.check_commands()
         assert dev.INVARIANTS_COMMAND in dev.check_commands()
+        assert dev.OWNING_IMPORTS_COMMAND in dev.check_commands()
         for cmd in dev.DOCSTRINGS_COMMANDS:
             assert cmd in dev.check_commands()
 
