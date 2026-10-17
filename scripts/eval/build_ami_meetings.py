@@ -108,7 +108,7 @@ def _is_transient(exc: BaseException) -> bool:
 @retry(
     retry=retry_if_exception(_is_transient),
     stop=stop_after_attempt(12),
-    wait=wait_exponential_jitter(initial=5, max=120),
+    wait=wait_exponential_jitter(multiplier=5, max=120),
     before_sleep=lambda state: console.print(
         f"  [yellow]retrying after {state.outcome and state.outcome.exception()!r}[/yellow]"
     ),

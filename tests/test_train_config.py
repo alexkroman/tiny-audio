@@ -81,6 +81,20 @@ def test_default_config_is_the_published_recipe() -> None:
     assert cfg.training.freeze_language_model is True
 
 
+def test_tiny_preset_trains_the_default_model_on_the_sample() -> None:
+    """`-e tiny` is the default recipe on 73 clips: only data, steps and hardware differ."""
+    default, tiny = _compose(), _compose(["+experiments=tiny"])
+    assert tiny.model == default.model
+    for key in ("freeze_audio_encoder", "freeze_language_model", "learning_rate"):
+        assert tiny.training[key] == default.training[key], key
+    assert [d.path for d in tiny.data.datasets] == ["hf-internal-testing/librispeech_asr_dummy"]
+    # Nothing leaves the machine, and nothing CUDA-only is required.
+    assert tiny.training.push_to_hub is False
+    assert tiny.training.report_to == "none"
+    assert tiny.training.optim == "adamw_torch"
+    assert tiny.training.bf16 is False
+
+
 @pytest.mark.parametrize("data", DATA_CONFIGS)
 def test_data_config_composes(data: str) -> None:
     cfg = _compose([f"data={data}"])
