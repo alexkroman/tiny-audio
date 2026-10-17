@@ -304,6 +304,16 @@ class TestQualityGateContents:
         assert ["ruff", "format", "--check", *dev.CODE_PATHS] in dev.LINT_COMMANDS
         assert ["black", "--check", *dev.CODE_PATHS] in dev.LINT_COMMANDS
 
+    def test_lint_checks_tracked_shell_scripts(self) -> None:
+        shellcheck = next(cmd for cmd in dev.lint_commands() if cmd[0] == "shellcheck")
+        assert ".claude/hooks/session-start.sh" in shellcheck
+
+    def test_no_shell_scripts_means_no_shellcheck_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(dev, "shell_files", list)
+        assert all(cmd[0] != "shellcheck" for cmd in dev.lint_commands())
+
     def test_lint_checks_all_tracked_markdown(self) -> None:
         commands = {cmd[0]: cmd for cmd in dev.lint_commands()}
         assert commands["mdformat"][:2] == ["mdformat", "--check"]

@@ -192,6 +192,7 @@ mdformat-frontmatter = "^2.1.2"
 pre-commit-hooks = "^6.0.0"
 pymarkdownlnt = "^0.9.40"
 mdformat-gfm = "^1.0.0"
+shellcheck-py = "^0.11.0.1"     # `shellcheck` for tracked .sh files (`ta dev lint`)
 [tool.poetry.group.hybrid-kernels]
 optional = true
 

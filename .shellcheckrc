@@ -1,0 +1,3 @@
+# Read by shellcheck wherever it runs (`ta dev lint`, editors): every optional
+# check on, so scripts are held to the strictest rules shellcheck has.
+enable=all

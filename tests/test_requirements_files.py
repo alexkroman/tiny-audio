@@ -1,8 +1,9 @@
 """The hand-maintained requirements files must stay installable by pip.
 
-requirements.txt is uploaded next to the model on the Hub (scripts/hub/push.py)
-and demo/requirements.txt is what the Space installs; neither is generated from
-poetry.lock, so nothing else checks them before a user's `pip install` does.
+requirements.txt is uploaded next to the model on the Hub (scripts/hub/push.py),
+demo/requirements.txt is what the Space installs, and docs/site/requirements.txt
+is what the Pages workflow installs to build the course. None is generated from
+poetry.lock, so nothing else checks them before a `pip install` does.
 """
 
 from pathlib import Path
@@ -10,7 +11,11 @@ from pathlib import Path
 import pytest
 from packaging.requirements import InvalidRequirement, Requirement
 
-REQUIREMENTS_FILES = [Path("requirements.txt"), Path("demo/requirements.txt")]
+REQUIREMENTS_FILES = [
+    Path("requirements.txt"),
+    Path("demo/requirements.txt"),
+    Path("docs/site/requirements.txt"),  # what the Pages workflow installs to build the course
+]
 
 
 def requirement_lines(path: Path) -> list[str]:

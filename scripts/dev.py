@@ -195,6 +195,11 @@ def markdown_files() -> list[str]:
     return tracked_files("*.md")
 
 
+def shell_files() -> list[str]:
+    """Tracked shell scripts that `ta dev lint` checks with shellcheck."""
+    return tracked_files("*.sh")
+
+
 def json_files() -> list[str]:
     """Tracked JSON (the quality/ baselines) that `ta dev lint` checks.
 
@@ -216,6 +221,8 @@ def lint_commands() -> list[list[str]]:
         ["mdformat", "--check", *markdown],
         ["pymarkdown", "scan", *markdown],
         ["pretty-format-json", *json_files()],
+        # Optional checks are switched on in .shellcheckrc.
+        *([["shellcheck", *shell]] if (shell := shell_files()) else []),
     ]
 
 

@@ -178,7 +178,7 @@ poetry run pytest -k "test_forward" -v    # By name pattern
 ```bash
 poetry run ta dev format       # Format code (black, ruff, mdformat)
 poetry run ta dev lint         # Lint + format check (poetry check --lock, ruff, black, yamllint, taplo,
-                               #   actionlint, zizmor, mdformat --check)
+                               #   actionlint, zizmor, mdformat --check, shellcheck)
 poetry run ta dev type-check   # Type check (pyright, strict)
 poetry run ta dev check        # Lint + type-check + security + dead code + duplication + ratchets
                                #   + invariants + deptry + docstrings
