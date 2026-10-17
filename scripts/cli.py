@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import importlib
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
 import typer
 import typer.core
@@ -47,10 +47,12 @@ class LazyGroup(typer.core.TyperGroup):
     because rendering the command table needs each one's help text.
     """
 
+    @override
     def list_commands(self, ctx: _click.Context) -> list[str]:
         """Registration order, without importing any module."""
         return [*self.commands, *(name for name in SUBCOMMANDS if name not in self.commands)]
 
+    @override
     def get_command(self, ctx: _click.Context, cmd_name: str) -> _click.Command | None:
         """Import the module behind `cmd_name` on first use and cache its command."""
         if cmd_name not in self.commands and cmd_name in SUBCOMMANDS:

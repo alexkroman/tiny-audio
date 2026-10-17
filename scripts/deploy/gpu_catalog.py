@@ -103,7 +103,7 @@ def datacenter_catalog() -> tuple[dict[str, Any], ...]:
         out = runpodctl_json("datacenter", "list")
         rows: list[dict[str, Any]] = json.loads(out[out.index("[") :])
         return tuple(rows)
-    except Exception:
+    except (OSError, subprocess.SubprocessError, ValueError):  # no CLI, timeout, no JSON
         return ()
 
 

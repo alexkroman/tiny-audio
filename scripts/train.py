@@ -228,7 +228,9 @@ class DatasetLoader:
         )
         # A concrete `split` without streaming always yields a single Dataset
         # (not a DatasetDict / IterableDataset).
-        assert isinstance(ds, Dataset)
+        if not isinstance(ds, Dataset):
+            msg = f"load_dataset returned {type(ds).__name__} for {dataset_path}, expected Dataset"
+            raise TypeError(msg)
 
         # Constant per-source provenance columns. These MUST be added here,
         # before any filter() below, and not down next to the other column
@@ -243,8 +245,8 @@ class DatasetLoader:
         ds = self._filter_common_voice_down_votes(ds, dataset_path)
 
         # Declarative row filter on a source-metadata column, e.g.
-        #   exclude_where: {column: source, values: [audiobook]}
-        #   exclude_where: {column: audio_duration, above: 19.0}
+        # `exclude_where: {column: source, values: [audiobook]}` or
+        # `exclude_where: {column: audio_duration, above: 19.0}`.
         # It must run HERE, before _select_training_columns drops every
         # column that is not audio/text/_text_case/_text_punct -- by then the
         # column you want to filter on no longer exists.
@@ -870,12 +872,19 @@ def _require_fused_cross_entropy(model: ASRModel, cfg: DictConfig) -> None:
     raise RuntimeError(msg)
 
 
+def _resolved_dict(node: DictConfig, what: str) -> dict[str, Any]:
+    """`node` resolved to a plain dict with string keys (config keys are field names)."""
+    container = OmegaConf.to_container(node, resolve=True)
+    if not isinstance(container, dict):
+        msg = f"{what} config must be a mapping, got {type(container).__name__}"
+        raise TypeError(msg)
+    return {str(k): v for k, v in container.items()}
+
+
 def _init_wandb(cfg: DictConfig) -> None:
     """Start the wandb run with the resolved config and the current git state."""
-    cfg_container = OmegaConf.to_container(cfg, resolve=True)
-    assert isinstance(cfg_container, dict)
     # The root config's keys are the group names (model/data/training).
-    wandb_config = {str(k): v for k, v in cfg_container.items()}
+    wandb_config = _resolved_dict(cfg, "root")
     git_commit, git_dirty = _git_state()
     if git_commit:
         # Surface the commit in the run config so it's queryable/filterable
@@ -919,28 +928,28 @@ def _apply_liger_kernels(cfg: DictConfig) -> None:
             cfg.model.get("text_model_id"),
         )
         return
-    try:
-        if _liger_transformers is None:
-            assert _liger_import_error is not None
-            raise _liger_import_error
-        getattr(_liger_transformers, patcher_name)()
-        logger.info("Applied liger kernels via %s()", patcher_name)
-    except (ImportError, AttributeError) as e:
-        logger.warning(
-            "liger-kernel unavailable or missing %s (%s) — falling back to "
-            "stock kernels. Install with `poetry install` on Linux and pin a "
-            "version that exports it to enable fused linear CE.",
-            patcher_name,
-            e,
-        )
+    reason: BaseException | str | None = _liger_import_error
+    if _liger_transformers is not None:
+        try:
+            getattr(_liger_transformers, patcher_name)()
+        except (ImportError, AttributeError) as e:
+            reason = e
+        else:
+            logger.info("Applied liger kernels via %s()", patcher_name)
+            return
+    logger.warning(
+        "liger-kernel unavailable or missing %s (%s) — falling back to "
+        "stock kernels. Install with `poetry install` on Linux and pin a "
+        "version that exports it to enable fused linear CE.",
+        patcher_name,
+        reason or "liger_kernel.transformers did not import",
+    )
 
 
 def build_asr_config(cfg: DictConfig) -> ASRConfig:
     """Merge `model:` with the TRAINING_MODEL_PARAMS set under `training:` into an ASRConfig."""
-    model_container = OmegaConf.to_container(cfg.model, resolve=True)
-    assert isinstance(model_container, dict), "model config must be a dict"
-    # Keys are ModelConfig field names (scripts/train_config.py), i.e. strings.
-    model_config_dict = {str(k): v for k, v in model_container.items()}
+    # Keys are ModelConfig field names (scripts/train_config.py).
+    model_config_dict = _resolved_dict(cfg.model, "model")
     for param in TRAINING_MODEL_PARAMS:
         val = cfg.training.get(param)
         if val is None:
@@ -1043,10 +1052,8 @@ def main(cfg: DictConfig) -> None:
     if push_to_hub:
         callbacks.append(PushToHubCallback())
 
-    training_container = OmegaConf.to_container(cfg.training, resolve=True)
-    assert isinstance(training_container, dict)
-    # Keys are TrainingConfig field names (scripts/train_config.py), i.e. strings.
-    training_config = {str(k): v for k, v in training_container.items()}
+    # Keys are TrainingConfig field names (scripts/train_config.py).
+    training_config = _resolved_dict(cfg.training, "training")
     decoder_learning_rate = training_config.pop("decoder_learning_rate", None)
     projector_weight_decay = training_config.pop("projector_weight_decay", None)
     encoder_learning_rate = training_config.pop("encoder_learning_rate", None)

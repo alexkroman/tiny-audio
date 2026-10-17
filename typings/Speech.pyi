@@ -1,9 +1,8 @@
-"""Stub for PyObjC's `Speech` bridge (macOS-only, so not installable on Linux).
-
-PyObjC generates its bindings at runtime; this declares only the names the
-repo uses (scripts/eval/evaluators/apple_speech.py). Method names are
-Objective-C selectors, hence the N802 exemptions.
-"""
+# Stub for PyObjC's `Speech` bridge (macOS-only, so not installable on Linux).
+#
+# PyObjC generates its bindings at runtime; this declares only the names the
+# repo uses (scripts/eval/evaluators/apple_speech.py). Method names are
+# Objective-C selectors, hence the N802 exemptions.
 
 from collections.abc import Callable
 from typing import Self

@@ -759,7 +759,9 @@ class AssemblyAIStreamingEvaluator(Evaluator):
     )
     def _run_session_with_retry(self, pcm_data: bytes) -> tuple[str, float]:
         """Run one session under the concurrency semaphore, retrying on backpressure codes."""
-        assert self._stream_semaphore is not None
+        if self._stream_semaphore is None:
+            msg = "_run_session_with_retry called before the stream semaphore was created"
+            raise RuntimeError(msg)
         with self._stream_semaphore:
             return self._run_session(pcm_data)
 

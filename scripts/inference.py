@@ -230,6 +230,7 @@ def _(
     use_qk_l2norm: bool,
 ) -> torch.Tensor:
     """Shape-only stand-in for `gated_delta_step_` under tracing: output matches `v`."""
+    del q, k, g, beta, state, scale, use_qk_l2norm  # the op's signature; only `v` shapes the output
     return torch.empty_like(v)
 
 
@@ -518,7 +519,9 @@ class GraphedDecoder:
             past_key_values=self._cache(size, cache_len),
             max_new_tokens=budget,
         )
-        assert torch.is_tensor(tokens)  # no output_scores: plain token ids
+        if not isinstance(tokens, torch.Tensor):  # no output_scores: plain token ids
+            msg = f"generate returned {type(tokens).__name__}, expected token ids"
+            raise TypeError(msg)
         rows = tokens[: len(prepared)].cpu()
         texts = [self.pipe.postprocess({"tokens": row})["text"] for row in rows]
         cut = [row.shape[-1] >= budget and not self.eos_ids & set(row.tolist()) for row in rows]

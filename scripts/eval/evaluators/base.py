@@ -1,6 +1,7 @@
 """Base evaluator classes and shared utilities."""
 
 import itertools
+import logging
 import os
 from collections.abc import Iterable, Iterator, Mapping
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
@@ -23,6 +24,7 @@ from scripts.eval.speaker_metrics import (
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 console: Console = Console()
+logger: logging.Logger = logging.getLogger(__name__)
 
 Metrics = dict[str, float]
 DatasetRow = Mapping[str, Any]
@@ -139,8 +141,8 @@ class Evaluator:
         confidence: Confidence | None = None
         try:
             prediction, inference_time, confidence = self.transcribe(audio)
-        except Exception as e:
-            print(f"Error on sample {idx}: {e}")
+        except Exception:  # one bad sample scores as an empty prediction, not a dead run
+            logger.warning("Error on sample %d", idx, exc_info=True)
             prediction, inference_time = "", 0.0
 
         norm_pred = self.normalizer.normalize(scoring_text(prediction))

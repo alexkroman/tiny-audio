@@ -24,6 +24,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, Any
 
+import httpx
 import typer
 from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig
@@ -356,7 +357,7 @@ def _add_datasets(plan: Plan, data: DictConfig) -> None:
             continue
         try:
             size = repo_weight_bytes(path, "dataset", str(name) if name else None)
-        except Exception as exc:  # gated repos, renames, network
+        except (OSError, httpx.HTTPError) as exc:  # gated repos, renames, network
             plan.warnings.append(f"dataset {path}: size unknown ({type(exc).__name__})")
             continue
         plan.dataset_bytes += size
@@ -948,6 +949,8 @@ def wait_command(
         raise typer.Exit(1) from None
     # retry_if_result keeps polling while the result is None, so a return
     # without RetryError always carries an endpoint.
-    assert endpoint is not None
+    if endpoint is None:
+        msg = "pod polling returned without an SSH endpoint"
+        raise RuntimeError(msg)
     ip, port = endpoint
     print(f"{ip} {port}")

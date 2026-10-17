@@ -85,8 +85,10 @@ async def _bench(
     url: str, audio: Path, levels: list[int], requests: int | None, parameters: dict[str, Any]
 ) -> None:
     """Warm the server once, then print client latency and server stats per concurrency level."""
-    seconds = soundfile.info(str(audio)).duration
-    payload = {"inputs": base64.b64encode(audio.read_bytes()).decode(), "parameters": parameters}
+    # Off the event loop: both read the file.
+    seconds = (await asyncio.to_thread(soundfile.info, str(audio))).duration
+    data = await asyncio.to_thread(audio.read_bytes)
+    payload = {"inputs": base64.b64encode(data).decode(), "parameters": parameters}
     base = url.rstrip("/")
     # trust_env=False: connect straight to the server, ignoring HTTPS_PROXY.
     # A local proxy (e.g. Aikido safe-chain under `poetry run`) drops some of

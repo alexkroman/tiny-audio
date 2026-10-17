@@ -4,9 +4,9 @@ import pathlib
 from collections.abc import Callable
 from typing import Any, TypedDict, cast
 
-import matplotlib
+import matplotlib as mpl
 
-matplotlib.use("Agg")  # Use non-interactive backend
+mpl.use("Agg")  # Use non-interactive backend
 import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
@@ -129,15 +129,17 @@ def main() -> None:
     with torch.no_grad():
         # Get the text embedding matrix from the decoder
         text_embeddings = model.get_input_embeddings().weight  # [vocab_size, hidden_dim]
-        assert isinstance(text_embeddings, torch.Tensor)
+        if not isinstance(text_embeddings, torch.Tensor):
+            msg = f"expected an embedding weight tensor, got {type(text_embeddings).__name__}"
+            raise TypeError(msg)
 
         # Move to same device as projector output
         device = projector_output.device
         text_embeddings = text_embeddings.to(device)
 
-        # Compute similarity between projector output and all text embeddings
-        # projector_output: [1, seq_len, hidden_dim]
-        # text_embeddings: [vocab_size, hidden_dim]
+        # Compute similarity between projector output and all text embeddings.
+        # Shapes: projector output is [1, seq_len, hidden_dim], text embeddings
+        # are [vocab_size, hidden_dim].
         projector_flat = projector_output.squeeze(0)  # [seq_len, hidden_dim]
 
         # Normalize for cosine similarity

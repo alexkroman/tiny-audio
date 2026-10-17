@@ -119,7 +119,7 @@ def current_normalizer() -> TextNormalizer | None:
     """
     try:
         return TextNormalizer()
-    except Exception as exc:  # any failure means "score as stored"
+    except (OSError, ValueError, ImportError) as exc:  # e.g. tokenizer unavailable offline
         console.print(
             f"[yellow]Could not build the eval normalizer ({exc}); scoring the stored "
             "normalized text instead. Sweeps made under different normalizer versions "

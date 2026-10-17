@@ -2,6 +2,7 @@
 """Unified CLI for RunPod operations."""
 
 import io
+import logging
 import shlex
 import subprocess
 import sys
@@ -25,6 +26,8 @@ from scripts.utils import get_project_root
 app: typer.Typer = typer.Typer(
     help="Train and evaluate on remote RunPod pods.", add_completion=False
 )
+
+logger: logging.Logger = logging.getLogger(__name__)
 
 SSH_KEY_PATH = "~/.ssh/id_ed25519"
 SSH_CONNECT_ATTEMPTS = 3
@@ -487,8 +490,9 @@ def _check_remote_disk(
         return
     try:
         need = deploy_plan.build_plan(experiment, overrides, 512).disk["recommended"]
-    except Exception as exc:  # unresolvable config, gated repo, Hub outage
+    except Exception as exc:  # best effort: a preflight never blocks the deploy
         print(f"Disk preflight skipped ({type(exc).__name__}: {exc}).")
+        logger.debug("Disk preflight failed", exc_info=True)
         return
 
     # `need` is the size of a run starting from an empty pod. Re-running an

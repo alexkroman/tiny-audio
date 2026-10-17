@@ -5,7 +5,8 @@
     "scripts/inference.py": 2,
     "tests/conftest.py": 1,
     "tests/offline_assets.py": 2,
-    "tests/test_inference.py": 1
+    "tests/test_inference.py": 1,
+    "tiny_audio/asr_attention.py": 1
   },
   "nosec": {
     "scripts/eval/build_ami_meetings.py": 1,

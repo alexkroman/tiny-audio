@@ -328,7 +328,32 @@ select = [
   "PLW",  # pylint warnings
   "FURB", # refurb (modernization)
   "RUF",  # ruff-specific rules
+  # Idioms below: each one flags Python that works but is not how Python is
+  # written. Exemptions, where an idiom differs by tree, are in per-file-ignores.
+  "S101",    # assert outside tests: stripped under `python -O`, so not a check
+  "BLE",     # blind `except Exception`: catch what you can handle
+  "ARG",     # unused arguments: `_name` for one a signature forces on you
+  "SLF",     # reaching into another object's `_private` members
+  "ERA",     # commented-out code: delete it, git keeps it
+  "NPY",     # legacy numpy idioms (`np.random.seed`, global RNG state)
+  "PLR0402", # `import a.b as b` instead of `from a import b`
+  "PYI",     # stub-file conventions for typings/
+  "EM",      # build the exception message first (`msg = ...; raise X(msg)`)
+  "ICN",     # conventional import aliases (`import numpy as np`)
+  "ASYNC",   # blocking calls inside `async def`
+  "T20",     # print in library code: tiny_audio logs, CLIs print (see below)
 ]
+
+[tool.ruff.lint.per-file-ignores]
+# pytest's idiom is the bare assert, and unit tests exercise private helpers
+# directly (pyright's reportPrivateUsage is off for tests/ for the same reason).
+"tests/**" = ["S101", "SLF001"]
+# Printing is what a CLI, a demo and a course example are for.
+"{scripts,demo,docs}/**" = ["T20"]
+
+[tool.ruff.lint.flake8-unused-arguments]
+# `*args, **kwargs` on a fake or callback accept a signature, not values.
+ignore-variadic-names = true
 
 [tool.ruff.lint.isort]
 # A local `wandb/` run directory at the repo root makes ruff classify `wandb`

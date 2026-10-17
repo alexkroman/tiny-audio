@@ -1,4 +1,4 @@
-"""Stub for `liger_kernel.transformers`: the `apply_liger_kernel_to_*` patchers train.py uses."""
+# Stub for `liger_kernel.transformers`: the `apply_liger_kernel_to_*` patchers train.py uses.
 
 from typing import Any
 

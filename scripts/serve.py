@@ -227,6 +227,8 @@ class ChunkBatcher:
         except BaseException as e:  # every waiter must hear about it
             for job in batch:
                 job.future.set_exception(e)
+            if not isinstance(e, Exception):  # KeyboardInterrupt, SystemExit: keep unwinding
+                raise
             return
         for job, text in zip(batch, texts, strict=True):
             job.future.set_result(text)

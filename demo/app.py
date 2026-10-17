@@ -84,7 +84,7 @@ def gpu_seconds(audio: str, kwargs: Mapping[str, Any]) -> int:
     """
     try:
         seconds = soundfile.info(audio).duration
-    except Exception:  # unreadable here: let the pipeline report it, reserve the cap
+    except (OSError, RuntimeError, TypeError):  # unreadable or no audio: reserve the cap
         return 120
     per_second = 0.4 if kwargs.get("return_timestamps") or kwargs.get("return_speakers") else 0.2
     return int(min(120, max(20, 10 + per_second * seconds)))

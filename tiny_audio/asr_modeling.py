@@ -12,9 +12,9 @@ from threading import Thread
 from typing import TYPE_CHECKING, Any, Self, cast, overload
 
 import torch
-import torch.nn as nn
 from peft import LoraConfig, PeftModel, get_peft_model
 from safetensors.torch import load_file
+from torch import nn
 from torch.nn import functional
 from transformers import (
     AutoFeatureExtractor,
@@ -466,7 +466,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             # text_model_id, liger missing (it is linux-only), or a patcher
             # that patched a different class than the one that got loaded.
             logger.log(
-                logging.INFO if type(self)._is_loading_from_pretrained else logging.WARNING,
+                logging.INFO if self._is_loading_from_pretrained else logging.WARNING,
                 "%s's forward does not accept `skip_logits` — liger's fused "
                 "linear cross-entropy is NOT active, so every training step "
                 "materializes a (batch, seq, %s) logits tensor. Check for an "
@@ -498,7 +498,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         # Setup LoRA if enabled (Stage 2 fine-tuning)
         # Skip if loading from pretrained - from_pretrained will handle adapter loading
-        if getattr(config, "use_lora", False) and not type(self)._is_loading_from_pretrained:
+        if getattr(config, "use_lora", False) and not self._is_loading_from_pretrained:
             self._setup_lora(config)
 
         # Freeze projector if specified (for Stage 2 LoRA-only training)
@@ -929,7 +929,8 @@ class ASRModel(PreTrainedModel, GenerationMixin):
                 tokenize=False,
                 add_generation_prompt=False,
             )
-        except Exception:
+        except Exception:  # any template that cannot render this probe has no usable tail
+            logger.debug("Chat template probe failed", exc_info=True)
             return None
         if not isinstance(rendered, str) or sentinel not in rendered:
             return None
@@ -1299,11 +1300,9 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         # the (B, T, V) tensor is pure cost on both train and eval.
         #
         # Requesting it EXPLICITLY on both, rather than leaning on liger's
-        # default, because that default is wrong here in both directions:
-        #
-        #   skip_logits = self.training and labels is not None
-        #
-        # where `self` is the LANGUAGE MODEL. Two ways that misfires:
+        # default, because that default is wrong here in both directions. Liger
+        # sets `skip_logits = self.training and labels is not None`, where
+        # `self` is the LANGUAGE MODEL. Two ways that misfires:
         #
         #   eval  -- runs under model.eval(), so the default is False and the
         #            full tensor gets built. granite_qwen.yaml's claim that
