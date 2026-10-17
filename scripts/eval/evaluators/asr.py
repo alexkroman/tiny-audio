@@ -46,6 +46,7 @@ from tiny_audio.asr_attention import active_attn_implementation, resolve_attn_im
 from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
 from tiny_audio.asr_pipeline import ASRPipeline
+from tiny_audio.asr_processing import ASRProcessor
 from tiny_audio.diarization import NemotronDiarizer, masked_audio
 
 from .base import (
@@ -284,6 +285,7 @@ class LocalEvaluator(Evaluator):
         local_code: bool = False,
         **kwargs: Unpack[EvaluatorOptions],
     ) -> None:
+        """Load `model_path` into a pipeline in eval mode (`local_code`: this checkout's code)."""
         # PyTorch's MPS backend is not thread-safe: concurrent threads encode
         # into a shared Metal command encoder and segfault in the AGX driver
         # (setComputePipelineState). `-w 4` on frozen-4 crashed within 3 minutes.
@@ -294,7 +296,7 @@ class LocalEvaluator(Evaluator):
             )
             kwargs["num_workers"] = 1
         super().__init__(**kwargs)
-        self.pipe = _build_local_pipeline(model_path, local_code=local_code)
+        self.pipe: ASRPipeline = _build_local_pipeline(model_path, local_code=local_code)
         # Explicit, not incidental. LocalStreamingEvaluator has always done
         # this; this class never did, and got away with it only because
         # nothing in the stack was train/eval-sensitive. A partially unfrozen
@@ -306,6 +308,10 @@ class LocalEvaluator(Evaluator):
         print_generation_config(self.pipe.model, model_path)
 
     def transcribe(self, audio: object) -> Transcription:
+        """Run the pipeline on one clip, with confidence stats when it returns per-step logprobs.
+
+        On a speaker-attributed dataset this returns `<SPK_n>` turns instead.
+        """
         if self.speakers:
             return self._transcribe_speakers(audio)
         start = time.time()
@@ -360,11 +366,12 @@ class LocalStreamingEvaluator(Evaluator):
         local_code: bool = False,
         **kwargs: Unpack[EvaluatorOptions],
     ) -> None:
+        """Load `model_path` in eval mode and keep its processor for direct `generate` calls."""
         super().__init__(**kwargs)
-        self.pipe = _build_local_pipeline(model_path, local_code=local_code)
-        self.model = self.pipe.model
+        self.pipe: ASRPipeline = _build_local_pipeline(model_path, local_code=local_code)
+        self.model: ASRModel = self.pipe.model
         _module_eval(self.model)
-        self.processor = self.model.get_processor()
+        self.processor: ASRProcessor = self.model.get_processor()
         self.user_prompt = user_prompt
 
         # Track timing stats
@@ -386,6 +393,10 @@ class LocalStreamingEvaluator(Evaluator):
         self.processing_times = []
 
     def transcribe(self, audio: object) -> Transcription:
+        """Generate with a token streamer, recording time-to-first-token and processing time.
+
+        The returned time is the generation time, measured from when `generate` starts.
+        """
         audio_array = as_16k_array(audio)
 
         # Process audio (ASRProcessor handles sampling_rate internally)
@@ -483,12 +494,13 @@ class EndpointEvaluator(Evaluator):
     JOB_TIMEOUT_SECONDS = 2 * 60 * 60
 
     def __init__(self, endpoint_url: str, **kwargs: Unpack[EvaluatorOptions]) -> None:
+        """Target the server's `/transcribe` URL; `/jobs` is derived from the same base."""
         super().__init__(**kwargs)
-        self.url = endpoint_url
+        self.url: str = endpoint_url
         base = endpoint_url.rstrip("/").removesuffix("/transcribe")
-        self.jobs_url = f"{base}/jobs"
+        self.jobs_url: str = f"{base}/jobs"
         api_key = os.environ.get("TINY_AUDIO_API_KEY")
-        self.headers = {"content-type": "audio/wav"}
+        self.headers: dict[str, str] = {"content-type": "audio/wav"}
         if api_key:
             self.headers["authorization"] = f"Bearer {api_key}"
 
@@ -499,6 +511,7 @@ class EndpointEvaluator(Evaluator):
 
     @staticmethod
     def _is_retryable(exc: BaseException) -> bool:
+        """True for a retryable HTTP status or a dropped connection."""
         if isinstance(exc, httpx.HTTPStatusError):
             return exc.response.status_code in EndpointEvaluator._RETRYABLE_STATUSES
         return isinstance(exc, httpx.TransportError)
@@ -511,6 +524,7 @@ class EndpointEvaluator(Evaluator):
         reraise=True,
     )
     def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        """Send one authenticated request, raising on an HTTP error status (retried)."""
         # trust_env=False: straight to the server, past any local HTTPS_PROXY
         # (e.g. Aikido safe-chain), which drops tunnels under `-w` concurrency.
         response = httpx.request(
@@ -533,6 +547,7 @@ class EndpointEvaluator(Evaluator):
         raise TimeoutError(msg)
 
     def transcribe(self, audio: object) -> Transcription:
+        """POST one clip to the server; speaker datasets go through a polled job instead."""
         wav_bytes = prepare_wav_bytes(audio)
         start = time.time()
         if not self.speakers:
@@ -573,13 +588,15 @@ class AssemblyAIEvaluator(Evaluator):
         base_url: str | None = None,
         **kwargs: Unpack[EvaluatorOptions],
     ) -> None:
+        """Build two transcribers for `model`: plain, and one with speaker labels."""
         super().__init__(**kwargs)
-        self.transcriber = setup_assemblyai(api_key, model, base_url=base_url)
-        self.speaker_transcriber = setup_assemblyai(
+        self.transcriber: aai.Transcriber = setup_assemblyai(api_key, model, base_url=base_url)
+        self.speaker_transcriber: aai.Transcriber = setup_assemblyai(
             api_key, model, speaker_labels=True, base_url=base_url
         )
 
     def transcribe(self, audio: object) -> Transcription:
+        """Upload one clip; with speakers on, return its utterances as `<SPK_n>` text."""
         wav_bytes = prepare_wav_bytes(audio)
         transcriber = self.speaker_transcriber if self.speakers else self.transcriber
         start = time.time()
@@ -623,8 +640,9 @@ class AssemblyAIStreamsEvaluator(AssemblyAIEvaluator):
         base_url: str | None = None,
         **kwargs: Unpack[EvaluatorOptions],
     ) -> None:
+        """Set up AssemblyAI as the parent does, plus the `ta serve` diarizer at `diarizer_url`."""
         super().__init__(api_key, model=model, base_url=base_url, **kwargs)
-        self.diarizer = EndpointEvaluator(endpoint_url=diarizer_url)
+        self.diarizer: EndpointEvaluator = EndpointEvaluator(endpoint_url=diarizer_url)
 
     def _stream_words(
         self, audio: npt.NDArray[np.float32], frames: npt.NDArray[np.bool_], speaker: str
@@ -650,6 +668,7 @@ class AssemblyAIStreamsEvaluator(AssemblyAIEvaluator):
         return words
 
     def transcribe(self, audio: object) -> Transcription:
+        """Diarize, transcribe each speaker's stream in parallel, and merge them as turns."""
         if not self.speakers:
             return super().transcribe(audio)
         array = np.asarray(as_16k_array(audio), dtype=np.float32)
@@ -676,6 +695,7 @@ class _StreamingError(RuntimeError):
     """A streaming-session failure carrying the server's close code (or None)."""
 
     def __init__(self, code: object, detail: str) -> None:
+        """Format the message and keep `code` as `streaming_code` for the retry check."""
         super().__init__(f"Streaming error (code={code}): {detail}")
         self.streaming_code = code
 
@@ -700,12 +720,14 @@ class AssemblyAIStreamingEvaluator(Evaluator):
     _semaphore_lock = threading.Lock()
 
     def __init__(self, api_key: str, **kwargs: Unpack[EvaluatorOptions]) -> None:
+        """Keep the API key and create the shared stream semaphore on first use."""
         super().__init__(**kwargs)
         self.api_key = api_key
         self._ensure_semaphore()
 
     @classmethod
     def _ensure_semaphore(cls) -> None:
+        """Create the class-wide stream semaphore once, sized by ASSEMBLYAI_STREAM_CONCURRENCY."""
         if cls._stream_semaphore is not None:
             return
         with cls._semaphore_lock:
@@ -715,6 +737,7 @@ class AssemblyAIStreamingEvaluator(Evaluator):
 
     @staticmethod
     def _is_retryable(exc: BaseException) -> bool:
+        """True for a `_StreamingError` whose close code signals transient backpressure."""
         return (
             isinstance(exc, RuntimeError)
             and getattr(exc, "streaming_code", None)
@@ -722,6 +745,7 @@ class AssemblyAIStreamingEvaluator(Evaluator):
         )
 
     def transcribe(self, audio: object) -> Transcription:
+        """Stream one clip over a fresh websocket and join its formatted turns."""
         pcm_data = self._prepare_pcm(audio)
         text, elapsed = self._run_session_with_retry(pcm_data)
         return text, elapsed, None
@@ -734,11 +758,13 @@ class AssemblyAIStreamingEvaluator(Evaluator):
         reraise=True,
     )
     def _run_session_with_retry(self, pcm_data: bytes) -> tuple[str, float]:
+        """Run one session under the concurrency semaphore, retrying on backpressure codes."""
         assert self._stream_semaphore is not None
         with self._stream_semaphore:
             return self._run_session(pcm_data)
 
     def _prepare_pcm(self, audio: object) -> bytes:
+        """Convert audio to 16 kHz 16-bit PCM bytes, peak-normalizing if it exceeds [-1, 1]."""
         audio_array = as_16k_array(audio)
 
         if audio_array.dtype != np.float32:
@@ -748,6 +774,10 @@ class AssemblyAIStreamingEvaluator(Evaluator):
         return (audio_array * 32767).astype(np.int16).tobytes()
 
     def _run_session(self, pcm_data: bytes) -> tuple[str, float]:
+        """Stream `pcm_data` in 100 ms chunks and return (joined turns, elapsed seconds).
+
+        Raises `_StreamingError` if the session reported an error.
+        """
         # Per-call state — closures capture these, so threads cannot stomp on
         # each other's connection or callback buckets.
         transcripts: dict[int, str] = {}
@@ -820,11 +850,13 @@ class DeepgramEvaluator(Evaluator):
     """
 
     def __init__(self, api_key: str, **kwargs: Unpack[EvaluatorOptions]) -> None:
+        """Create a Deepgram client with a timeout long enough for whole meetings."""
         super().__init__(**kwargs)
         # Whole meetings (~100 MB WAV) outlast the SDK's 60 s default.
-        self.client = DeepgramClient(api_key=api_key, timeout=600)
+        self.client: DeepgramClient = DeepgramClient(api_key=api_key, timeout=600)
 
     def transcribe(self, audio: object) -> Transcription:
+        """Transcribe one clip with nova-3; with speakers on, return diarized `<SPK_n>` turns."""
         wav_bytes = prepare_wav_bytes(audio)
         start = time.time()
 
@@ -848,7 +880,10 @@ class DeepgramEvaluator(Evaluator):
 
 
 class _SmallestHTTPError(RuntimeError):
+    """An HTTP error from Smallest.ai, keeping its status for the retry check."""
+
     def __init__(self, status: int, body: str) -> None:
+        """Format the message with the first 200 characters of the response `body`."""
         super().__init__(f"Smallest.ai HTTP {status}: {body[:200]}")
         self.status = status
 
@@ -872,6 +907,7 @@ class SmallestEvaluator(Evaluator):
         language: str = "en",
         **kwargs: Unpack[EvaluatorOptions],
     ) -> None:
+        """Keep the API key and the Pulse model and language sent with every request."""
         super().__init__(**kwargs)
         self.api_key = api_key
         self.model = model
@@ -879,6 +915,7 @@ class SmallestEvaluator(Evaluator):
 
     @staticmethod
     def _is_retryable(exc: BaseException) -> bool:
+        """True for a 429/5xx response, a connection error, or a timeout."""
         if isinstance(exc, _SmallestHTTPError):
             return exc.status in SmallestEvaluator._RETRYABLE_STATUSES
         return isinstance(exc, (urllib.error.URLError, TimeoutError))
@@ -890,6 +927,7 @@ class SmallestEvaluator(Evaluator):
         reraise=True,
     )
     def _post(self, wav_bytes: bytes) -> dict[str, Any]:
+        """POST the WAV bytes and return the decoded JSON payload (retried)."""
         query = urllib.parse.urlencode({"model": self.model, "language": self.language})
         request = urllib.request.Request(
             f"{self.URL}?{query}",
@@ -906,6 +944,7 @@ class SmallestEvaluator(Evaluator):
             raise _SmallestHTTPError(e.code, e.read().decode(errors="replace")) from e
 
     def transcribe(self, audio: object) -> Transcription:
+        """Transcribe one clip, raising if the payload's status is not "success"."""
         wav_bytes = prepare_wav_bytes(audio)
         start = time.time()
         payload = self._post(wav_bytes)
@@ -928,15 +967,17 @@ class ElevenLabsEvaluator(Evaluator):
     def __init__(
         self, api_key: str, model: str = "scribe_v2", **kwargs: Unpack[EvaluatorOptions]
     ) -> None:
+        """Create the ElevenLabs client; raises ImportError if the SDK is not installed."""
         super().__init__(**kwargs)
         if not _ELEVENLABS_AVAILABLE:
             msg = "ElevenLabs backend requires the elevenlabs SDK: pip install elevenlabs"
             raise ImportError(msg)
         # Whole meetings outlast the SDK's 240 s default.
-        self.client = ElevenLabs(api_key=api_key, timeout=600)
+        self.client: ElevenLabs = ElevenLabs(api_key=api_key, timeout=600)
         self.model = model
 
     def transcribe(self, audio: object) -> Transcription:
+        """Transcribe one clip with Scribe; with speakers on, return diarized `<SPK_n>` turns."""
         wav_bytes = prepare_wav_bytes(audio)
         start = time.time()
 

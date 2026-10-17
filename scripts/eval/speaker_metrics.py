@@ -23,6 +23,7 @@ CONTEXT_END = "<CONTINUE>"
 
 
 def _identity(s: str) -> str:
+    """Return `s` unchanged: the default `normalize`, scoring text as written."""
     return s
 
 
@@ -99,6 +100,7 @@ def word_errors(ref: list[str], hyp: list[str]) -> int:
 
 
 def _speaker_words(text: str, normalize: Callable[[str], str]) -> dict[int, list[str]]:
+    """Each speaker label's normalized words, concatenated across all of its turns."""
     words: dict[int, list[str]] = {}
     for label, chunk in parse_turns(text):
         words.setdefault(label, []).extend(normalize(chunk).split())

@@ -9,7 +9,7 @@ from typing import Annotated, TypedDict
 import typer
 from rich.console import Console
 
-console = Console()
+console: Console = Console()
 
 # Written by the (since removed) `ta analysis extract-entities`: spaCy entities
 # per reference, keyed on the normalized reference.

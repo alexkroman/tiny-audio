@@ -26,8 +26,8 @@ from rich.console import Console
 from scripts.eval.build_ami_meetings import publish_meetings
 from scripts.eval.speaker_metrics import serialize_turns
 
-app = typer.Typer(add_completion=False)
-console = Console()
+app: typer.Typer = typer.Typer(add_completion=False)
+console: Console = Console()
 
 REPO_ID = "microsoft/NOTSOFAR"
 # The full eval set with ground truth: 129 meetings, speakers disjoint from train.
@@ -67,6 +67,7 @@ def meeting_devices(files: list[str], root: str, devices: str) -> dict[str, list
 
 
 def download_file(path: str) -> Path:
+    """Fetch one file of the NOTSOFAR dataset repo into the Hub cache and return its path."""
     return Path(hf_hub_download(REPO_ID, path, repo_type="dataset"))
 
 

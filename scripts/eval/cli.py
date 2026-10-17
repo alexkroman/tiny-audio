@@ -35,8 +35,8 @@ from scripts.eval.evaluators import (
 )
 from scripts.eval.evaluators.base import Metrics
 
-app = typer.Typer(add_completion=False)
-console = Console()
+app: typer.Typer = typer.Typer(add_completion=False)
+console: Console = Console()
 
 
 # `--datasets` choices, built from the registry so Click validates them and the

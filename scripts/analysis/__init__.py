@@ -5,7 +5,7 @@ import typer
 from scripts.analysis.compare import compare
 from scripts.analysis.samples import entity_errors, high_wer
 
-app = typer.Typer(
+app: typer.Typer = typer.Typer(
     name="analysis",
     help="Analyze and compare `ta eval` results.",
     no_args_is_help=True,

@@ -28,6 +28,8 @@ if TYPE_CHECKING:
 # they hand back are annotated with the stub classes in typings/.
 @dataclass(frozen=True)
 class _AppleFrameworks:
+    """The imported CoreFoundation, Foundation and Speech framework modules."""
+
     core_foundation: ModuleType
     foundation: ModuleType
     speech: ModuleType
@@ -68,6 +70,10 @@ class AppleSpeechEvaluator(Evaluator):
     TRANSCRIBE_TIMEOUT_SECONDS = 60.0
 
     def __init__(self, locale: str = "en-US", **kwargs: Unpack[EvaluatorOptions]) -> None:
+        """Authorize speech recognition and build an on-device recognizer for `locale`.
+
+        Raises ImportError off macOS (no PyObjC). `num_workers` is forced to 1.
+        """
         if _APPLE_FRAMEWORKS is None:
             msg = (
                 "Apple SFSpeechRecognizer backend requires PyObjC on macOS. "
@@ -87,9 +93,13 @@ class AppleSpeechEvaluator(Evaluator):
         self.locale = locale
         self.temp_dir: str | None = tempfile.mkdtemp(prefix="apple-speech-")
         self._authorize()
-        self.recognizer = self._build_recognizer(locale)
+        self.recognizer: SFSpeechRecognizer = self._build_recognizer(locale)
 
     def _authorize(self) -> None:
+        """Request speech-recognition permission, blocking until the user answers.
+
+        Raises TimeoutError if no answer arrives and RuntimeError if access is denied.
+        """
         auth_event = threading.Event()
         status_box: list[int | None] = [None]
 
@@ -111,6 +121,7 @@ class AppleSpeechEvaluator(Evaluator):
             raise RuntimeError(msg)
 
     def _build_recognizer(self, locale: str) -> SFSpeechRecognizer:
+        """Create a recognizer for `locale`, failing unless it can run on-device now."""
         ns_locale = self._apple.foundation.NSLocale.alloc().initWithLocaleIdentifier_(locale)
         recognizer: SFSpeechRecognizer | None = (
             self._apple.speech.SFSpeechRecognizer.alloc().initWithLocale_(ns_locale)
@@ -127,6 +138,7 @@ class AppleSpeechEvaluator(Evaluator):
         return recognizer
 
     def transcribe(self, audio: object) -> Transcription:
+        """Recognize one clip on-device via a temp WAV file; confidence is always None."""
         wav_bytes = prepare_wav_bytes(audio)
         fd, temp_path = tempfile.mkstemp(suffix=".wav", dir=self.temp_dir)
         try:
@@ -173,6 +185,7 @@ class AppleSpeechEvaluator(Evaluator):
                 Path(temp_path).unlink()
 
     def close(self) -> None:
+        """Delete the temp directory of WAV files; safe to call more than once."""
         temp_dir = getattr(self, "temp_dir", None)
         if temp_dir:
             shutil.rmtree(temp_dir, ignore_errors=True)

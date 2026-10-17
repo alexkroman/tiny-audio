@@ -84,6 +84,7 @@ def _print_rows(table: Table, rows: list[list[str]], col: int = 1, descending: b
 
 
 def _pct(value: float | None, digits: int = 2) -> str:
+    """Format a percentage to `digits` places, or "-" when there is no value."""
     return "-" if value is None else f"{value:.{digits}f}%"
 
 
@@ -173,12 +174,14 @@ def _support(
 
 
 def _miss_rate(stats: list[EntityStats]) -> float | None:
+    """Percent of reference entities not found, pooled over `stats`; None if there are none."""
     total = sum(e["total"] for e in stats)
     found = sum(e["found"] for e in stats)
     return (total - found) / total * 100 if total else None
 
 
-def _print_support_notes(support: Counter[str], shown: list[str], noun: str, kind: str):
+def _print_support_notes(support: Counter[str], shown: list[str], noun: str, kind: str) -> None:
+    """Print reference counts for the shown classes and list those hidden for low support."""
     hidden = sorted(
         (t for t in support if 0 < support[t] < MIN_CLASS_SUPPORT), key=lambda t: -support[t]
     )
@@ -238,6 +241,7 @@ def print_entity_table(model_metrics: Models) -> None:
 
 
 def _itn_row(name: str, stats: dict[str, dict[str, int]], classes: list[str]) -> list[str]:
+    """One ITN table row: overall exact and loose-only rates, count, then per-class exact."""
     total = sum(v["total"] for v in stats.values())
     exact = sum(v["exact"] for v in stats.values())
     loose = sum(v["loose"] for v in stats.values())

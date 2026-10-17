@@ -25,8 +25,8 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 
 from scripts.eval.speaker_metrics import serialize_turns
 
-app = typer.Typer(add_completion=False)
-console = Console()
+app: typer.Typer = typer.Typer(add_completion=False)
+console: Console = Console()
 
 # The pyannote AMI test split.
 MEETINGS = [
@@ -100,6 +100,7 @@ _RETRY_STATUS = {403, 429, 500, 502, 503, 504}
 
 
 def _is_transient(exc: BaseException) -> bool:
+    """True for a retryable HTTP status or a dropped connection."""
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code in _RETRY_STATUS
     return isinstance(exc, httpx.TransportError)

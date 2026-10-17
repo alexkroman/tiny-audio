@@ -101,6 +101,7 @@ def is_punct_scorable(reference: str) -> bool:
 
 
 def _strip_punct(word: str) -> str:
+    """Remove every punctuation character in PUNCT_CHARS from `word`."""
     return _PUNCT_RE.sub("", word)
 
 
