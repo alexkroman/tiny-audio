@@ -402,6 +402,18 @@ async def _read_body(request: Request) -> bytes | None:
         return None
 
 
+async def _authorized_body(request: Request, api_key: str | None) -> bytes | Response:
+    """The body of an authorized request, or the response to send instead.
+
+    401 when the bearer token is wrong; 499 (client closed request, nobody to
+    answer) when the client disconnected mid-upload.
+    """
+    if not _authorized(request, api_key):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    body = await _read_body(request)
+    return Response(status_code=499) if body is None else body
+
+
 RequestRunner = Callable[[bytes, str, dict[str, str]], tuple[int, bytes]]
 
 
@@ -450,11 +462,9 @@ def job_routes(jobs: JobStore, api_key: str | None) -> list[Route]:
 
     async def submit_job(request: Request) -> Response:
         """Queue the request body as a job; 202 with its id."""
-        if not _authorized(request, api_key):
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
-        body = await _read_body(request)
-        if body is None:
-            return Response(status_code=499)
+        body = await _authorized_body(request, api_key)
+        if isinstance(body, Response):
+            return body
         job_id = jobs.submit(
             body, request.headers.get("content-type", ""), dict(request.query_params)
         )
@@ -499,11 +509,9 @@ def create_app(pipe: ASRPipeline, batcher: ChunkBatcher, model_id: str) -> Starl
 
     async def transcribe(request: Request) -> Response:
         """Transcribe the request body synchronously on a request thread."""
-        if not _authorized(request, api_key):
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
-        body = await _read_body(request)
-        if body is None:
-            return Response(status_code=499)  # client closed request; nobody to answer
+        body = await _authorized_body(request, api_key)
+        if isinstance(body, Response):
+            return body
         status, content = await anyio.to_thread.run_sync(
             run_request,
             body,

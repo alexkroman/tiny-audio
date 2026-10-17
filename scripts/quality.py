@@ -92,14 +92,6 @@ def _save(path: Path, data: dict[str, Any]) -> None:
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
 
 
-def _tracked_python_files() -> list[str]:
-    """Every tracked `.py` file, relative to the repo root."""
-    out = subprocess.run(
-        ["git", "ls-files", "*.py"], cwd=ROOT, capture_output=True, text=True, check=True
-    )
-    return [f for f in out.stdout.splitlines() if f]
-
-
 # ------------------------------------------------------------------ file length
 
 
@@ -128,7 +120,7 @@ def file_length(
     update: Annotated[bool, typer.Option("--update", help=UPDATE_HELP)] = False,
 ) -> None:
     """Cap Python files at MAX_CODE_LINES; files already over it may not grow."""
-    lengths = {f: code_lines((ROOT / f).read_text()) for f in _tracked_python_files()}
+    lengths = {f: code_lines((ROOT / f).read_text()) for f in owning_imports.tracked("*.py")}
     if update:
         _save(FILE_LENGTH_BASELINE, {f: n for f, n in lengths.items() if n > MAX_CODE_LINES})
         typer.echo(f"Recorded {FILE_LENGTH_BASELINE.relative_to(ROOT)}")
@@ -274,7 +266,7 @@ def count_escape_hatches(source: str) -> dict[str, int]:
 def escape_hatch_counts() -> dict[str, dict[str, int]]:
     """`{kind: {file: count}}` over every tracked Python file."""
     out: dict[str, dict[str, int]] = {}
-    for path in _tracked_python_files():
+    for path in owning_imports.tracked("*.py"):
         for kind, n in count_escape_hatches((ROOT / path).read_text()).items():
             out.setdefault(kind, {})[path] = n
     return out
@@ -326,7 +318,7 @@ def _modules_in_scope() -> list[str]:
     """Dotted names of every non-`__init__` module under TESTED_PACKAGES."""
     return sorted(
         f.removesuffix(".py").replace("/", ".")
-        for f in _tracked_python_files()
+        for f in owning_imports.tracked("*.py")
         if f.split("/", 1)[0] in TESTED_PACKAGES and not f.endswith("__init__.py")
     )
 

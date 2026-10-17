@@ -2,7 +2,12 @@
 
 from pathlib import Path
 
-from scripts.utils import find_model_dirs, get_project_root
+from scripts.utils import extract_model_from_dir, find_model_dirs, get_project_root
+
+
+def test_extract_model_from_dir_leaves_a_short_name_whole() -> None:
+    """A name with fewer than three `_` fields has no model field to pick out."""
+    assert extract_model_from_dir("some_dir") == "some_dir"
 
 
 class TestFindModelDirs:

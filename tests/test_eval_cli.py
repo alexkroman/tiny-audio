@@ -7,7 +7,7 @@ from typing import cast
 import pytest
 import typer
 
-from scripts.eval.cli import _build_evaluator, save_results
+from scripts.eval.cli import _build_evaluator, _require_api_key, save_results
 from scripts.eval.constants import AssemblyAIModel
 from scripts.eval.evaluators.asr import AssemblyAIStreamsEvaluator
 from scripts.eval.evaluators.base import EvalResult, Metrics
@@ -370,3 +370,10 @@ class TestDiarizerUrl:
     def test_rejected_elsewhere(self, model: str, streaming: bool) -> None:
         with pytest.raises(typer.BadParameter, match="diarizer-url"):
             _build_with_diarizer(model, streaming=streaming)
+
+
+def test_missing_api_key_fails_like_a_missing_option() -> None:
+    """No key from the flag or the environment names both ways to supply one."""
+    assert _require_api_key("k", "--api-key", "KEY") == "k"
+    with pytest.raises(typer.BadParameter, match="set KEY or pass --api-key"):
+        _require_api_key(None, "--api-key", "KEY")

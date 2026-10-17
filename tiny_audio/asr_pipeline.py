@@ -605,21 +605,15 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                 "Call it with one clip per invocation."
             )
             raise ValueError(msg)
-        top1_logprobs: list[float] = []
-        top2_logprobs: list[float] = []
+        steps: list[list[float]] = []
         if scores:
             # One batched reduction over every step, then one device transfer.
             logits = torch.stack([step_logits[0] for step_logits in scores]).float()
-            steps: list[list[float]] = (
-                logits.log_softmax(dim=-1).topk(k=2, dim=-1).values.cpu().tolist()
-            )
-            for top1, top2 in steps:
-                top1_logprobs.append(top1)
-                top2_logprobs.append(top2)
+            steps = logits.log_softmax(dim=-1).topk(k=2, dim=-1).values.cpu().tolist()
         return {
             "tokens": sequences,
-            "top1_logprob": top1_logprobs,
-            "top2_logprob": top2_logprobs,
+            "top1_logprob": [step[0] for step in steps],
+            "top2_logprob": [step[1] for step in steps],
             "is_last": is_last,
         }
 
@@ -682,10 +676,9 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         # Pass through per-step logprobs when _forward captured them (i.e. caller
         # passed output_scores=True). Lets eval harnesses compute confidence
         # stats without re-running the model.
-        if "top1_logprob" in model_outputs:
-            out["top1_logprob"] = model_outputs["top1_logprob"]
-        if "top2_logprob" in model_outputs:
-            out["top2_logprob"] = model_outputs["top2_logprob"]
+        for key in ("top1_logprob", "top2_logprob"):
+            if key in model_outputs:
+                out[key] = model_outputs[key]
         return out
 
 

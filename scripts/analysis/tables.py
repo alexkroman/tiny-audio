@@ -74,11 +74,8 @@ def _new_table(title: str, columns: Iterable[str], bold_first: int = 0) -> Table
 
 def _print_rows(table: Table, rows: list[list[str]], col: int = 1, descending: bool = False):
     """Add `rows` best first by column `col`, missing ("-") values last."""
-    if descending:
-        rows = sorted(rows, key=lambda r: sort_key_desc(r[col]))
-    else:
-        rows = sorted(rows, key=lambda r: sort_key(r[col]))
-    for row in rows:
+    key = sort_key_desc if descending else sort_key
+    for row in sorted(rows, key=lambda r: key(r[col])):
         table.add_row(*row)
     console.print(table)
 

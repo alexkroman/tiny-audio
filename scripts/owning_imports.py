@@ -43,7 +43,7 @@ OWNED_PACKAGES = ("tiny_audio", "scripts")
 CHECKED_TREES = ("tiny_audio", "scripts", "tests", "demo", "docs")
 
 
-def _tracked(pattern: str) -> list[str]:
+def tracked(pattern: str) -> list[str]:
     """Tracked files matching `pattern`, relative to the repo root."""
     out = subprocess.run(
         ["git", "ls-files", pattern], cwd=ROOT, capture_output=True, text=True, check=True
@@ -61,7 +61,7 @@ def module_name(path: str) -> str:
 def repo_modules() -> dict[str, Path]:
     """Every module of OWNED_PACKAGES, by dotted name."""
     return {
-        module_name(f): ROOT / f for f in _tracked("*.py") if f.split("/", 1)[0] in OWNED_PACKAGES
+        module_name(f): ROOT / f for f in tracked("*.py") if f.split("/", 1)[0] in OWNED_PACKAGES
     }
 
 
@@ -186,7 +186,7 @@ def violations(source: str, where: str) -> list[str]:
 
 def check() -> None:
     """Repo names are reached through the module that defines them."""
-    files = [f for f in _tracked("*.py") if f.split("/", 1)[0] in CHECKED_TREES]
+    files = [f for f in tracked("*.py") if f.split("/", 1)[0] in CHECKED_TREES]
     problems = [p for f in files for p in violations((ROOT / f).read_text(), f)]
     for problem in sorted(problems):
         typer.echo(problem, err=True)

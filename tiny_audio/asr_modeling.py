@@ -47,7 +47,7 @@ if TYPE_CHECKING:
         resolve_attn_implementation,
         resolve_decoder_attn_implementation,
     )
-    from .asr_config import ASRConfig, compute_encoder_output_length
+    from .asr_config import GENERATION_DEFAULTS, ASRConfig, compute_encoder_output_length
     from .asr_layers import unfreeze_encoder_top_layers
     from .asr_processing import (
         DEFAULT_TRANSCRIBE_PROMPT,
@@ -75,7 +75,7 @@ else:
             resolve_attn_implementation,
             resolve_decoder_attn_implementation,
         )
-        from .asr_config import ASRConfig, compute_encoder_output_length
+        from .asr_config import GENERATION_DEFAULTS, ASRConfig, compute_encoder_output_length
         from .asr_layers import unfreeze_encoder_top_layers
         from .asr_processing import (
             DEFAULT_TRANSCRIBE_PROMPT,
@@ -91,7 +91,7 @@ else:
             resolve_attn_implementation,
             resolve_decoder_attn_implementation,
         )
-        from asr_config import ASRConfig, compute_encoder_output_length
+        from asr_config import GENERATION_DEFAULTS, ASRConfig, compute_encoder_output_length
         from asr_layers import unfreeze_encoder_top_layers
         from asr_processing import (
             DEFAULT_TRANSCRIBE_PROMPT,
@@ -480,13 +480,12 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         # Set up generation config with greedy decoding defaults
         self.generation_config: GenerationConfig = self.language_model.generation_config
-        self.generation_config.max_new_tokens = config.max_new_tokens
-        self.generation_config.use_cache = config.use_cache
         # `generate()` reads the GenerationConfig and nothing else, so every
-        # decoding knob ASRConfig owns has to be copied across here. Omitting
-        # this line left ASRConfig's 12-gram loop guard inert: the value was
+        # decoding knob ASRConfig owns has to be copied across here. A missing
+        # copy line once left ASRConfig's 12-gram loop guard inert: the value was
         # set on the config, serialized into config.json, and never consulted.
-        self.generation_config.no_repeat_ngram_size = config.no_repeat_ngram_size
+        for key in GENERATION_DEFAULTS:
+            setattr(self.generation_config, key, getattr(config, key))
         self.generation_config.eos_token_id = self._resolve_eos_token_ids()
         self.generation_config.pad_token_id = self.tokenizer.pad_token_id
 

@@ -2,7 +2,7 @@
 
 import shutil
 import tempfile
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -14,6 +14,8 @@ from datasets import (
     load_dataset,
     load_from_disk,
 )
+
+from scripts.utils import get_project_root
 
 
 @dataclass
@@ -242,7 +244,7 @@ def load_eval_dataset(
 
 
 # Where `CachedSamples` keeps the rows each eval stream has yielded (gitignored).
-SAMPLE_CACHE_DIR = Path(__file__).resolve().parents[2] / "datasets_cache" / "eval_samples"
+SAMPLE_CACHE_DIR = get_project_root() / "datasets_cache" / "eval_samples"
 
 
 class CachedSamples:
@@ -268,13 +270,16 @@ class CachedSamples:
         self.cache_dir: Path = cache_dir
         self.decoder: AudioDecoder = Audio(sampling_rate=16000)
 
-    def _cached_rows(self) -> list[dict[str, Any]]:
-        """Load the rows a previous run cached, or [] when there is no cache yet."""
+    def _cached_rows(self) -> Sequence[dict[str, Any]]:
+        """The rows a previous run cached, or [] when there is no cache yet.
+
+        Left as the memory-mapped Dataset rather than a list: a `-n 100` run
+        against a 39k-row cache would otherwise convert every cached clip up
+        front, then stop after the first hundred.
+        """
         if not self.cache_dir.exists():
             return []
-        rows = cast(
-            "list[dict[str, Any]]", list(cast(Dataset, load_from_disk(str(self.cache_dir))))
-        )
+        rows = cast("Sequence[dict[str, Any]]", load_from_disk(str(self.cache_dir)))
         print(f"  {len(rows)} samples cached at {self.cache_dir}")
         return rows
 
@@ -306,7 +311,7 @@ class CachedSamples:
         finally:
             # Runs when the evaluator stops reading (it breaks at max_samples).
             if new:
-                self._save(cached + new)
+                self._save([*cached, *new])
 
 
 def load_eval_samples(name: str, split: str, config_override: str | None = None) -> CachedSamples:

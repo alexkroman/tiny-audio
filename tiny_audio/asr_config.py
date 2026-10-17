@@ -24,6 +24,20 @@ DEFAULT_ENCODER_CONV_LAYERS: list[ConvLayerSpec] = [(1, 3, 1), (1, 3, 2)]
 # Full path: 100 Hz mel -> 2x FE stacking -> 4x encoder -> 12.5 Hz.
 GRANITE_ENCODER_CONV_LAYERS: list[ConvLayerSpec] = [(0, 2, 2), (0, 2, 2)]
 
+# The decoding knobs ASRConfig owns, with their defaults. ASRModel copies
+# exactly these onto its GenerationConfig, so a new knob is one entry here.
+# 12 is chosen to be inert on real speech: it blocks only exact 12-gram
+# repeats, and natural English -- including genuine stutters, list
+# recitation and "very very very" -- effectively never repeats a
+# 12-token span verbatim. Measured rate of runaway loops is 1 in 10,630
+# rows, so this should fire almost never; it bounds the tail rather
+# than changing normal output.
+GENERATION_DEFAULTS: dict[str, Any] = {
+    "max_new_tokens": 128,
+    "use_cache": True,
+    "no_repeat_ngram_size": 12,
+}
+
 # Encoders whose `input_features` are (batch, time, feature_dim) rather than
 # Whisper/GLM-ASR's (batch, n_mels, mel_len). Conformer-family checkpoints
 # (Granite Speech 5.0, Parakeet, Nemotron) are all time-major.
@@ -212,18 +226,6 @@ class ASRConfig(transformers.PretrainedConfig):
         # `_truncate_repetitions` postprocess missed it because its regex is
         # anchored to end-of-string and the loop was truncated mid-phrase.
         #
-        # 12 is chosen to be inert on real speech: it blocks only exact 12-gram
-        # repeats, and natural English -- including genuine stutters, list
-        # recitation and "very very very" -- effectively never repeats a
-        # 12-token span verbatim. Measured rate of runaway loops is 1 in 10,630
-        # rows, so this should fire almost never; it bounds the tail rather
-        # than changing normal output.
-        generation_defaults = {
-            "max_new_tokens": 128,
-            "use_cache": True,
-            "no_repeat_ngram_size": 12,
-        }
-
         self.audio_model_id = audio_model_id
         self.text_model_id = text_model_id
         self.attn_implementation = attn_implementation
@@ -272,7 +274,7 @@ class ASRConfig(transformers.PretrainedConfig):
             "use_cache": use_cache,
             "no_repeat_ngram_size": no_repeat_ngram_size,
         }
-        for key, default in generation_defaults.items():
+        for key, default in GENERATION_DEFAULTS.items():
             value = explicit_generation_args[key]
             setattr(self, key, value if value is not None else default)
 
