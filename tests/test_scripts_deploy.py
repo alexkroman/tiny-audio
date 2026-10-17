@@ -5,7 +5,7 @@ Focuses on behavior testing rather than existence checks.
 
 import importlib
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -73,13 +73,16 @@ class TestRunpodConnectionUtils:
 
 
 def _free_gib(value: float | None) -> Callable[..., float | None]:
-    def free_gib(conn: object, *a: object, **k: object) -> float | None:
+    """Stand-in for ``_remote_free_gib`` that always reports ``value`` GiB free."""
+
+    def free_gib(_conn: object, *_a: object, **_k: object) -> float | None:
         return value
 
     return free_gib
 
 
 def _plan_recommending_2500(*a: object, **k: object) -> object:
+    """Stand-in for ``build_plan``: a plan whose only field is a 2500 GiB disk recommendation."""
     return type("P", (), {"disk": {"recommended": 2500.0}})()
 
 
@@ -92,6 +95,7 @@ class TestRemoteDiskPreflight:
 
     @staticmethod
     def _conn(stdout: str, ok: bool = True) -> MagicMock:
+        """Mock connection whose ``run`` returns a result with ``ok`` and ``stdout``."""
         conn = MagicMock()
         conn.run.return_value = MagicMock(ok=ok, stdout=stdout)
         return conn
@@ -357,20 +361,28 @@ class TestDeployRetries:
 class TestBuildEvalScript:
     """build_eval_script turns eval options into the remote shell script."""
 
-    def _build(self, **overrides: object) -> str:
-        kwargs: dict[str, object] = {
-            "hf_token": "hf_x",
-            "model": "me/model",
-            "datasets": ["loquacious", "earnings22"],
-            "max_samples": 100,
-            "assemblyai_api_key": "aai_key",
-            "assemblyai_model": "best",
-            "num_workers": 4,
-            "streaming": True,
-            "extra_args": ["--foo", "bar"],
-        }
-        kwargs.update(overrides)
-        return build_eval_script(**kwargs)  # type: ignore[arg-type]
+    def _build(
+        self,
+        *,
+        datasets: Sequence[str] = ("loquacious", "earnings22"),
+        max_samples: int | None = 100,
+        assemblyai_api_key: str | None = "aai_key",
+        num_workers: int = 4,
+        streaming: bool = True,
+        extra_args: Sequence[str] | None = ("--foo", "bar"),
+    ) -> str:
+        """Build the eval script with every option set, each overridable by keyword."""
+        return build_eval_script(
+            hf_token="hf_x",
+            model="me/model",
+            datasets=list(datasets),
+            max_samples=max_samples,
+            assemblyai_api_key=assemblyai_api_key,
+            assemblyai_model="best",
+            num_workers=num_workers,
+            streaming=streaming,
+            extra_args=None if extra_args is None else list(extra_args),
+        )
 
     def test_all_options(self) -> None:
         script = self._build()
@@ -402,6 +414,8 @@ class TestBuildEvalScript:
 
 
 class TestServeScript:
+    """build_serve_script starts the public server on the pod and exports any API key."""
+
     def test_binds_all_interfaces_and_prints_url(self) -> None:
         script = build_serve_script("hf_x", "me/model", 8000, 48, "")
         assert "python -m scripts.serve" in script
@@ -426,7 +440,7 @@ def test_runpod_serve_starts_server_session(
     conn = MagicMock()
     conn.run.return_value = MagicMock(ok=True, stdout="abc123\n")
 
-    def fake_connect(host: str, port: int) -> MagicMock:
+    def fake_connect(_host: str, _port: int) -> MagicMock:
         return conn
 
     monkeypatch.setattr(runpod, "connect", fake_connect)

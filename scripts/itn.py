@@ -106,6 +106,7 @@ def _loose_tokens(text: str) -> list[str]:
 
 
 def contains_subsequence(haystack: list[str], needle: list[str]) -> bool:
+    """Whether `needle` occurs as a contiguous run in `haystack` (never, if it is empty)."""
     if not needle:
         return False
     for i in range(len(haystack) - len(needle) + 1):

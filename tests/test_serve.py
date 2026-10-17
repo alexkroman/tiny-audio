@@ -18,11 +18,14 @@ from starlette.applications import Starlette
 from starlette.types import Message
 
 from scripts import serve
-from scripts.serve import ChunkBatcher, RequestError, decode_request, parse_parameters
-from tiny_audio.asr_pipeline import ASRPipeline, PreparedChunk
+from scripts.serve import ChunkBatcher, RequestError, _Job, decode_request, parse_parameters
+from tiny_audio.asr_pipeline import ASRPipeline
+from tiny_audio.asr_types import PreparedChunk
+from tiny_audio.diarization import NemotronDiarizer
 
 
 def _chunk(frames: int) -> PreparedChunk:
+    """Build a zero-feature prepared chunk whose length is ``frames``."""
     return {
         "input_features": torch.zeros(1, frames, 4),
         "attention_mask": torch.ones(1, frames, dtype=torch.long),
@@ -30,10 +33,28 @@ def _chunk(frames: int) -> PreparedChunk:
 
 
 def _frames(prepared: list[PreparedChunk]) -> list[int]:
+    """Return the frame length of each chunk, so a test can see what a batch held."""
     return [int(p["attention_mask"].shape[-1]) for p in prepared]
 
 
+def _poll[T](fetch: Callable[[], T], done: Callable[[T], bool], what: str) -> T:
+    """`fetch()` every 10 ms until `done` accepts it (up to 5 s), and return that value.
+
+    It sleeps before each check rather than only when a check fails, so the same
+    lines run whatever the thread timing: the per-file coverage floor for this
+    file was flaky when a fast CI runner never reached the sleep.
+    """
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        time.sleep(0.01)
+        if done(value := fetch()):
+            return value
+    pytest.fail(f"never: {what}")
+
+
 class TestChunkBatcher:
+    """ChunkBatcher batches queued chunks, keeps per-request order and fans out errors."""
+
     def test_results_come_back_in_order(self) -> None:
         batcher = ChunkBatcher(lambda batch: [str(n) for n in _frames(batch)], max_batch_size=4)
         batcher.start()
@@ -67,10 +88,8 @@ class TestChunkBatcher:
             assert entered.wait(timeout=5)  # the GPU thread is inside the first batch
             for t in threads[1:]:
                 t.start()
-            deadline = time.monotonic() + 5
-            while batcher._inbox.qsize() < 4:  # blocked GPU thread can't drain them
-                assert time.monotonic() < deadline, "requests never queued"
-                time.sleep(0.01)
+            # The blocked GPU thread can't drain them, so all four stay queued.
+            _poll(batcher._inbox.qsize, lambda queued: queued >= 4, "four requests queued")
             release.set()
             for t in threads:
                 t.join(timeout=5)
@@ -84,14 +103,14 @@ class TestChunkBatcher:
         assert batcher.stats.largest_batch == 4
 
     def test_batch_is_oldest_plus_nearest_lengths(self) -> None:
-        batcher = ChunkBatcher(lambda batch: [], max_batch_size=3)
+        batcher = ChunkBatcher(lambda _batch: [], max_batch_size=3)
         pending = [serve._Job(_chunk(n)) for n in (100, 10, 95, 300, 104)]
         batch = batcher._take_batch(pending)
         assert [job.frames for job in batch] == [100, 104, 95]  # oldest first, then nearest
         assert [job.frames for job in pending] == [10, 300]
 
     def test_generate_error_reaches_every_waiter(self) -> None:
-        def boom(batch: list[PreparedChunk]) -> list[str]:
+        def boom(_batch: list[PreparedChunk]) -> list[str]:
             msg = "CUDA out of memory"
             raise RuntimeError(msg)
 
@@ -103,8 +122,20 @@ class TestChunkBatcher:
         finally:
             batcher.close()
 
+    def test_an_interrupt_reaches_every_waiter_and_keeps_unwinding(self) -> None:
+        def interrupted(_batch: list[PreparedChunk]) -> list[str]:
+            raise KeyboardInterrupt
+
+        batcher = ChunkBatcher(interrupted, max_batch_size=4)
+        jobs = [_Job(_chunk(1)), _Job(_chunk(2))]
+        with pytest.raises(KeyboardInterrupt):
+            batcher._execute(jobs)
+        assert all(isinstance(job.future.exception(), KeyboardInterrupt) for job in jobs)
+
 
 class TestParameters:
+    """parse_parameters accepts typed JSON, coerces query strings and rejects the rest."""
+
     def test_json_types_pass(self) -> None:
         params = parse_parameters({"return_speakers": True, "num_speakers": 2}, from_query=False)
         assert params == {"return_speakers": True, "num_speakers": 2}
@@ -129,6 +160,8 @@ class TestParameters:
 
 
 class TestDecodeRequest:
+    """decode_request splits a JSON or raw-audio body into audio bytes and parameters."""
+
     def test_json_body(self) -> None:
         body = b'{"inputs": "UklGRg==", "parameters": {"return_timestamps": true}}'
         audio, params = decode_request(body, "application/json", {})
@@ -158,10 +191,12 @@ class FakePipeline:
     """Records calls; answers like ASRPipeline (numpy values included)."""
 
     def __init__(self, error: Exception | None = None) -> None:
+        """Start with no calls; ``error``, if given, is raised by every call."""
         self.calls: list[tuple[bytes, dict[str, Any]]] = []
         self.error = error
 
     def __call__(self, audio: bytes, **params: Any) -> dict[str, Any]:
+        """Record the call, then raise the configured error or return a fixed transcript."""
         self.calls.append((audio, params))
         if self.error is not None:
             raise self.error
@@ -172,10 +207,14 @@ class Client:
     """Requests straight into the ASGI app, in-process (httpx's ASGI transport)."""
 
     def __init__(self, app: Starlette) -> None:
+        """Wrap ``app``; each request opens a fresh ASGI transport to it."""
         self.app = app
 
     def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        """Send one request to the app on a private event loop and return the response."""
+
         async def send() -> httpx.Response:
+            """Issue the request through an AsyncClient bound to the ASGI transport."""
             transport = httpx.ASGITransport(app=self.app)
             async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
                 return await client.request(method, url, **kwargs)
@@ -183,9 +222,11 @@ class Client:
         return asyncio.run(send())
 
     def post(self, url: str, **kwargs: Any) -> httpx.Response:
+        """POST to ``url``; ``kwargs`` go to httpx (json, content, headers)."""
         return self.request("POST", url, **kwargs)
 
     def get(self, url: str) -> httpx.Response:
+        """GET ``url``."""
         return self.request("GET", url)
 
 
@@ -194,6 +235,12 @@ MakeClient = Callable[..., tuple[Client, FakePipeline]]
 
 @pytest.fixture
 def make_client(monkeypatch: pytest.MonkeyPatch) -> MakeClient:
+    """Provide a factory for an in-process client over the app and its FakePipeline.
+
+    The factory sets or clears the API-key env var and stubs ``decode_audio`` to pass
+    bytes straight through, both undone by monkeypatch at teardown.
+    """
+
     def make(
         api_key: str | None = None, error: Exception | None = None
     ) -> tuple[Client, FakePipeline]:
@@ -207,7 +254,7 @@ def make_client(monkeypatch: pytest.MonkeyPatch) -> MakeClient:
             return audio
 
         monkeypatch.setattr(serve, "decode_audio", passthrough)
-        batcher = ChunkBatcher(lambda batch: [], max_batch_size=4)
+        batcher = ChunkBatcher(lambda _batch: [], max_batch_size=4)
         app = serve.create_app(cast(ASRPipeline, pipe), batcher, "me/model")
         return Client(app), pipe
 
@@ -215,6 +262,8 @@ def make_client(monkeypatch: pytest.MonkeyPatch) -> MakeClient:
 
 
 class TestApp:
+    """The HTTP app routes requests to the pipeline, maps errors to status codes and auths."""
+
     def test_json_request(self, make_client: MakeClient) -> None:
         client, pipe = make_client()
         response = client.post(
@@ -288,12 +337,12 @@ class TestJobs:
 
     @staticmethod
     def _wait(client: Client, job_id: str) -> httpx.Response:
-        for _ in range(500):
-            response = client.get(f"/jobs/{job_id}")
-            if response.status_code != 202:
-                return response
-            time.sleep(0.01)
-        pytest.fail("job never finished")
+        """Poll the job until it stops answering 202 (up to ~5 s) and return that response."""
+
+        def fetch() -> httpx.Response:
+            return client.get(f"/jobs/{job_id}")
+
+        return _poll(fetch, lambda response: response.status_code != 202, "job finished")
 
     def test_job_returns_what_a_request_would(self, make_client: MakeClient) -> None:
         client, pipe = make_client()
@@ -358,6 +407,7 @@ class TestDecodeAudio:
 
     @staticmethod
     def _wav(samples: npt.NDArray[np.float32], rate: int) -> bytes:
+        """Encode ``samples`` as 16-bit PCM WAV bytes at ``rate``."""
         buf = io.BytesIO()
         soundfile.write(buf, samples, rate, format="WAV", subtype="PCM_16")
         return buf.getvalue()
@@ -406,7 +456,7 @@ class TestDiarizeOnly:
             return activity
 
         monkeypatch.setattr(serve, "decode_audio", decode)
-        monkeypatch.setattr(serve.NemotronDiarizer, "activity", nemotron)
+        monkeypatch.setattr(NemotronDiarizer, "activity", nemotron)
         response = client.post(
             "/?diarize_only=true&max_speakers=2",
             content=b"RIFF",

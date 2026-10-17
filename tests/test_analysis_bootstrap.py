@@ -66,6 +66,8 @@ class TestPairing:
 
 
 class TestIntervalProperties:
+    """The interval brackets the point, narrows with n, is seeded, and is NaN when empty."""
+
     def test_interval_brackets_the_point_estimate(self):
         refs = [8] * 100
         a = [3 if i % 3 else 1 for i in range(100)]

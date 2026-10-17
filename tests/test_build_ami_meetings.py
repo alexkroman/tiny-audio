@@ -7,6 +7,7 @@ from scripts.eval.build_ami_meetings import MEETINGS, parse_words, reference_tex
 
 
 def _annotations(files: dict[str, str]) -> zipfile.ZipFile:
+    """In-memory annotations zip holding each ``name -> xml`` entry of ``files``."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
         for name, xml in files.items():
@@ -15,6 +16,7 @@ def _annotations(files: dict[str, str]) -> zipfile.ZipFile:
 
 
 def _w(text: str, start: float, **attrs: str) -> str:
+    """AMI ``<w>`` element for ``text`` lasting 0.2 s from ``start``, with extra attributes."""
     extra = "".join(f' {k}="{v}"' for k, v in attrs.items())
     return f'<w starttime="{start}" endtime="{start + 0.2}"{extra}>{text}</w>'
 

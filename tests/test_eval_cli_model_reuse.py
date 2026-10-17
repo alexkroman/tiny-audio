@@ -25,6 +25,7 @@ class RecordingEvaluator(Evaluator):
     builds = 0
 
     def __init__(self, **kwargs: Unpack[EvaluatorOptions]) -> None:
+        """Count this construction on the class and start an empty field log."""
         super().__init__(**kwargs)
         type(self).builds += 1
         self.seen: list[tuple[str, str]] = []
@@ -39,6 +40,7 @@ class RecordingEvaluator(Evaluator):
         speakers: bool = False,
         verbatim_scoring: bool = False,
     ) -> list[EvalResult]:
+        """Run the base evaluation, then log the audio/text fields it resolved."""
         results = super().evaluate(
             dataset,
             max_samples,
@@ -51,6 +53,7 @@ class RecordingEvaluator(Evaluator):
         return results
 
     def transcribe(self, audio: object) -> Transcription:
+        """Echo the audio value back as the transcript."""
         return str(audio), 0.01, None
 
 
@@ -67,7 +70,7 @@ def test_model_is_built_once_for_a_multi_dataset_sweep(
 
     # loquacious reads `wav`/`text`; earnings22 reads `audio`/`sentence`.
     # The rows carry both shapes so either field set resolves.
-    def fake_load(name: str, split: str, config: str | None = None) -> list[dict[str, str]]:
+    def fake_load(*_args: object) -> list[dict[str, str]]:
         return [{"wav": "a", "audio": "a", "text": "hi", "sentence": "hi"}]
 
     monkeypatch.setattr(eval_cli, "_build_evaluator", fake_build)

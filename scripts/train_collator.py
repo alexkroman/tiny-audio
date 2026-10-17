@@ -31,7 +31,7 @@ with warnings.catch_warnings():
     warnings.simplefilter("ignore", TRLExperimentalWarning)
     from trl.experimental.utils import DataCollatorForChatML
 
-logger = logging.getLogger(__name__)
+logger: logging.Logger = logging.getLogger(__name__)
 
 # Used for sources whose transcripts natively carry punctuation, selected per
 # row via the `text_punct` dataset field. Granite Speech 4.1 documents exactly
@@ -76,13 +76,18 @@ class DataCollator:
         encoder_conv_layers: Sequence[ConvLayerSpec] | None = None,
         audio_token: str = "<audio>",
     ) -> None:
+        """Keep the tokenizer, feature extractor and projector a batch is built from."""
         self.tokenizer = tokenizer
         # `SequenceFeatureExtractor` declares no `__call__`, but every concrete
         # one (Whisper, GLM-ASR) has it; no library type names that surface.
-        self.feature_extractor = cast(AudioFeatureExtractor, feature_extractor)
+        self.feature_extractor: AudioFeatureExtractor = cast(
+            AudioFeatureExtractor, feature_extractor
+        )
         self.sample_rate = sample_rate
         self.projector = projector
-        self.encoder_conv_layers = encoder_conv_layers or DEFAULT_ENCODER_CONV_LAYERS
+        self.encoder_conv_layers: Sequence[ConvLayerSpec] = (
+            encoder_conv_layers or DEFAULT_ENCODER_CONV_LAYERS
+        )
         # Must match ASRModel.audio_token -- the collator emits this string and
         # forward() locates the scatter positions by its token id.
         self.audio_token = audio_token
@@ -99,7 +104,9 @@ class DataCollator:
         # longest TEDLIUM / Earnings22 samples silently truncated the
         # assistant turn — model trained on partial labels. Qwen3-0.6B
         # supports 32K context so 4096 is well within capacity.
-        self.text_collator = DataCollatorForChatML(tokenizer=tokenizer, max_length=4096)
+        self.text_collator: DataCollatorForChatML = DataCollatorForChatML(
+            tokenizer=tokenizer, max_length=4096
+        )
 
     # Whisper's feature extractor pads/truncates to a fixed 30s window. Audio
     # longer than this is silently truncated while the label is kept whole,
@@ -221,6 +228,7 @@ class DataCollator:
         return self._make_messages(num_audio_tokens, prompt, text)
 
     def _make_messages(self, num_audio_tokens: int, prompt: str, response: str) -> ChatSample:
+        """A user turn of audio placeholders plus `prompt`, answered by `response`."""
         user_content = (self.audio_token * num_audio_tokens) + " " + prompt
         messages = [
             {"role": "user", "content": user_content},
@@ -229,6 +237,10 @@ class DataCollator:
         return {"messages": messages}
 
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
+        """Collate rows into mel features, chat-template token ids/labels and audio-token counts.
+
+        Rows whose audio is unusable (see `_extract_audio_arrays`) are dropped first.
+        """
         audio_arrays, valid_features = self._extract_audio_arrays(features)
 
         audio_out = self.feature_extractor(

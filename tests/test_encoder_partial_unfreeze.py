@@ -26,11 +26,15 @@ from tiny_audio.asr_modeling import ASRModel
 
 
 class FakeBlock(nn.Module):
+    """One encoder block: a single square linear layer."""
+
     def __init__(self, dim: int = 8) -> None:
+        """Build the block's `dim` x `dim` linear layer."""
         super().__init__()
         self.lin = nn.Linear(dim, dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply the linear layer."""
         return self.lin(x)
 
 
@@ -38,6 +42,7 @@ class FakeGraniteEncoder(nn.Module):
     """Mirrors GraniteSpeech5Encoder's children: input_linear, layers, out, out_mid."""
 
     def __init__(self, depth: int = 16, dim: int = 8) -> None:
+        """Build the input projection, `depth` blocks, and the two output projections."""
         super().__init__()
         self.input_linear = nn.Linear(dim, dim)
         self.layers = cast(Sequence[FakeBlock], nn.ModuleList(FakeBlock(dim) for _ in range(depth)))
@@ -45,6 +50,7 @@ class FakeGraniteEncoder(nn.Module):
         self.out_mid = nn.Linear(dim, dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run input_linear, every block in order, then out_mid and out."""
         x = self.input_linear(x)
         for layer in self.layers:
             x = layer(x)
@@ -53,12 +59,15 @@ class FakeGraniteEncoder(nn.Module):
 
 @pytest.fixture
 def frozen_encoder() -> FakeGraniteEncoder:
+    """Provide a fresh 16-block FakeGraniteEncoder with every parameter frozen."""
     enc = FakeGraniteEncoder()
     enc.requires_grad_(False)
     return enc
 
 
 class TestFindLayerStack:
+    """The block stack is found at top level or nested, and None when there is none."""
+
     def test_finds_granite_style_layers(self, frozen_encoder: FakeGraniteEncoder) -> None:
         found = find_encoder_layer_stack(frozen_encoder)
         assert found is not None
@@ -86,6 +95,8 @@ class TestFindLayerStack:
 
 
 class TestUnfreezeSelectsTheRightBlocks:
+    """Exactly the top N blocks and the output projections unfreeze; the input stays frozen."""
+
     @pytest.mark.parametrize("top_n", [1, 2, 4, 6, 16])
     def test_exactly_the_top_n_blocks_are_trainable(
         self, frozen_encoder: FakeGraniteEncoder, top_n: int
@@ -132,6 +143,8 @@ class TestUnfreezeSelectsTheRightBlocks:
 
 
 class TestFailsLoudly:
+    """Asking for more blocks than exist, or an unrecognised encoder, raises."""
+
     def test_too_many_layers_raises(self, frozen_encoder: FakeGraniteEncoder) -> None:
         with pytest.raises(ValueError, match="exceeds the encoder's 16 blocks"):
             unfreeze_encoder_top_layers(frozen_encoder, 17)
@@ -247,6 +260,7 @@ class TestPartialUnfreezeIsUsableEndToEnd:
     """
 
     def _config(self, base_asr_config: ASRConfig, **overrides: object) -> ASRConfig:
+        """Copy the base config as a frozen encoder with its top block unfrozen, plus overrides."""
         config = copy.deepcopy(base_asr_config)
         config.freeze_audio_encoder = True
         config.encoder_trainable_top_layers = 1
@@ -261,7 +275,8 @@ class TestPartialUnfreezeIsUsableEndToEnd:
         assert {p.dtype for p in model.audio_tower.parameters()} == {torch.float32}
         assert {p.dtype for p in model.language_model.parameters()} == {torch.bfloat16}
 
-    def test_encoder_dtype_defaults_to_model_dtype(self, base_asr_config: ASRConfig) -> None:
+    @pytest.mark.usefixtures("base_asr_config")
+    def test_encoder_dtype_defaults_to_model_dtype(self) -> None:
         assert ASRConfig(model_dtype="bfloat16").encoder_dtype == "bfloat16"
         assert ASRConfig(model_dtype="float32").encoder_dtype == "float32"
 
@@ -352,6 +367,7 @@ class TestEncoderIsNeverLeftInTrainMode:
     """
 
     def _model(self, base_asr_config: ASRConfig, top_n: int) -> ASRModel:
+        """Build an ASRModel with a frozen encoder whose top `top_n` blocks are unfrozen."""
         config = copy.deepcopy(base_asr_config)
         config.freeze_audio_encoder = True
         config.encoder_trainable_top_layers = top_n
@@ -383,6 +399,7 @@ class TestEncoderIsNeverLeftInTrainMode:
 
 @pytest.fixture(scope="module")
 def bn_probe_model(base_asr_config: ASRConfig) -> ASRModel:
+    """Provide a module-scoped, fully unfrozen ASRModel with a probe BatchNorm1d added."""
     # Shared by TestFullyUnfrozenEncoderStillPinsBatchNorm: each test calls
     # train() itself, and none changes weights or the pinned BN's running
     # statistics.

@@ -14,7 +14,7 @@ class TestAudioToWavBytes:
 
     def test_numpy_array_mono(self) -> None:
         """Test conversion of mono numpy array."""
-        audio = np.random.randn(16000).astype(np.float32)
+        audio = np.random.default_rng(0).standard_normal(16000).astype(np.float32)
         wav_bytes = audio_to_wav_bytes(audio, 16000)
 
         assert isinstance(wav_bytes, bytes)
@@ -27,7 +27,7 @@ class TestAudioToWavBytes:
 
     def test_numpy_array_stereo_squeezed(self) -> None:
         """Test that stereo arrays are squeezed to mono."""
-        audio = np.random.randn(1, 16000).astype(np.float32)
+        audio = np.random.default_rng(0).standard_normal((1, 16000)).astype(np.float32)
         wav_bytes = audio_to_wav_bytes(audio, 16000)
 
         audio_back, _sr = sf.read(io.BytesIO(wav_bytes))
@@ -35,8 +35,9 @@ class TestAudioToWavBytes:
 
     def test_different_sample_rates(self) -> None:
         """Test various sample rates."""
+        rng = np.random.default_rng(0)
         for sr in [8000, 16000, 22050, 44100]:
-            audio = np.random.randn(sr).astype(np.float32)
+            audio = rng.standard_normal(sr).astype(np.float32)
             wav_bytes = audio_to_wav_bytes(audio, sr)
             _audio_back, sr_back = sf.read(io.BytesIO(wav_bytes))
             assert sr_back == sr
@@ -48,7 +49,7 @@ class TestPrepareWavBytes:
     def test_dict_with_array_and_sampling_rate(self) -> None:
         """Test dict format with array and sampling_rate keys."""
         audio_dict = {
-            "array": np.random.randn(16000).astype(np.float32),
+            "array": np.random.default_rng(0).standard_normal(16000).astype(np.float32),
             "sampling_rate": 16000,
         }
         wav_bytes = prepare_wav_bytes(audio_dict)
@@ -57,7 +58,7 @@ class TestPrepareWavBytes:
     def test_dict_with_bytes(self) -> None:
         """Test dict format with bytes key."""
         # Create valid WAV bytes first
-        audio = np.random.randn(16000).astype(np.float32)
+        audio = np.random.default_rng(0).standard_normal(16000).astype(np.float32)
         original_bytes = audio_to_wav_bytes(audio, 16000)
 
         audio_dict = {"bytes": original_bytes}
@@ -69,7 +70,7 @@ class TestPrepareWavBytes:
 
         class AudioObject:
             def __init__(self) -> None:
-                self.array = np.random.randn(16000).astype(np.float32)
+                self.array = np.random.default_rng(0).standard_normal(16000).astype(np.float32)
                 self.sampling_rate = 16000
 
         wav_bytes = prepare_wav_bytes(AudioObject())

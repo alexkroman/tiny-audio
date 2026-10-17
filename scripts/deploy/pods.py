@@ -79,7 +79,7 @@ def create_first_available(
         try:
             pod = json.loads(blob[blob.index("{") :])
             pod_id: str = pod["id"]
-        except Exception:
+        except (ValueError, KeyError, TypeError):  # no JSON object, or no "id" in it
             print(f"unexpected response:\n{blob[:400]}")
             continue
         print(f"created {pod_id}")

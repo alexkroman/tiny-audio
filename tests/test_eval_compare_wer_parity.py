@@ -39,6 +39,7 @@ def _run(pairs: list[tuple[str, str]], tmp_path: Path, dataset: str = "earnings2
 
 
 def _both_wers(tmp_path: Path, dataset: str = "earnings22") -> tuple[float, float]:
+    """The saved WER and the one analysis recomputes from transcripts (NaN if absent)."""
     collected = collect_model_metrics("testmodel", tmp_path, [])
     ds = collected["datasets"][dataset]
     return ds.get("wer", float("nan")), ds.get("wer_calculated", float("nan"))

@@ -1,5 +1,6 @@
 """ASR pipeline for audio-to-text transcription with optional timestamps and diarization."""
 
+import logging
 import re
 from collections.abc import Callable, Iterator, MutableMapping, Sequence
 from pathlib import Path
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
         is_silent,
         prepend_lead_in,
     )
+    from .asr_text import truncate_repetitions
     from .asr_types import PreparedChunk
     from .diarization import NemotronDiarizer, StreamChunk, masked_audio, stream_chunks
 else:
@@ -36,6 +38,7 @@ else:
             is_silent,
             prepend_lead_in,
         )
+        from .asr_text import truncate_repetitions
         from .asr_types import PreparedChunk
         from .diarization import NemotronDiarizer, StreamChunk, masked_audio, stream_chunks
     except ImportError:  # flat layout on the Hub: sibling modules, no package
@@ -48,6 +51,7 @@ else:
             is_silent,
             prepend_lead_in,
         )
+        from asr_text import truncate_repetitions
         from asr_types import PreparedChunk
         from diarization import NemotronDiarizer, StreamChunk, masked_audio, stream_chunks
 
@@ -61,12 +65,9 @@ __all__ = [
 ]
 
 
+logger: logging.Logger = logging.getLogger(__name__)
+
 _THINK_TAG_RE = re.compile(r"<think>.*?</think>\s*", flags=re.DOTALL)
-_MIN_REPEATS = 3
-_LOOSE_MIN_REPEATS = 6
-_TRAILING_CHAR_RE = re.compile(rf"(.)\1{{{_MIN_REPEATS - 1},}}$")
-_TRAILING_WORD_RE = re.compile(rf"\b(\w+)(?:\s+\1){{{_MIN_REPEATS - 1},}}\s*$", re.IGNORECASE)
-_NON_WORD_RE = re.compile(r"\W+")
 
 
 class _RawAudio(TypedDict):
@@ -126,6 +127,20 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             tokenizer=tokenizer,  # pyright: ignore[reportArgumentType]
             **kwargs,
         )
+
+    def _sampling_rate(self) -> int:
+        """The feature extractor's sample rate (`__init__` always sets the extractor)."""
+        if self.feature_extractor is None:
+            msg = "ASRPipeline has no feature extractor"
+            raise RuntimeError(msg)
+        return self.feature_extractor.sampling_rate
+
+    def _tokenizer(self) -> "PreTrainedTokenizerBase":
+        """The tokenizer (`__init__` always sets it; the base class types it Optional)."""
+        if self.tokenizer is None:
+            msg = "ASRPipeline has no tokenizer"
+            raise RuntimeError(msg)
+        return self.tokenizer
 
     def _sanitize_parameters(
         self,
@@ -318,7 +333,9 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             audio_attention_mask=batch["attention_mask"].to(self.model.device),
             **generate_kwargs,
         )
-        assert torch.is_tensor(tokens)  # no output_scores: plain token ids
+        if not isinstance(tokens, torch.Tensor):  # no output_scores: plain token ids
+            msg = f"generate returned {type(tokens).__name__}, expected token ids"
+            raise TypeError(msg)
         return [self.postprocess({"tokens": row})["text"] for row in tokens.cpu()]
 
     def _transcribe_chunk(
@@ -376,7 +393,10 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                 for (s, _), chunk_words in zip(bounds, aligned, strict=True)
                 for w in chunk_words
             ]
-        except Exception as e:
+        except Exception as e:  # timestamps are optional: return the text without them
+            logger.warning(
+                "Word alignment failed; returning text without timestamps", exc_info=True
+            )
             result["words"] = []
             result["timestamp_error"] = str(e)
         return result
@@ -401,7 +421,8 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         try:
             activity = NemotronDiarizer.activity(array, sample_rate=sr)
             keep = NemotronDiarizer.top_speakers(activity, **diarization_params)
-        except Exception as e:
+        except Exception as e:  # speakers are optional: fall back to the unmasked transcript
+            logger.warning("Diarization failed; transcribing without speakers", exc_info=True)
             result = self._transcribe_aligned(array, sr, **kwargs)
             result["speaker_segments"] = []
             result["diarization_error"] = str(e)
@@ -448,7 +469,10 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
                 [(ch["audio"], text) for ch, text in zip(chunks, texts, strict=True)],
                 sample_rate=sr,
             )
-        except Exception as e:
+        except Exception as e:  # timestamps are optional: order chunks by start time instead
+            logger.warning(
+                "Word alignment failed; returning text without timestamps", exc_info=True
+            )
             order = sorted(range(len(chunks)), key=lambda k: chunks[k]["start"])
             text = " ".join(texts[k] for k in order if texts[k])
             return {"text": text, "words": [], "timestamp_error": str(e)}
@@ -486,11 +510,10 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         inputs = _single_input(args, preprocess_params, "inputs")
         # Handle dict with "array" key (from datasets)
         if isinstance(inputs, dict) and "array" in inputs:
-            assert self.feature_extractor is not None  # always set by __init__
             sample = inputs
             inputs = {
                 "raw": sample["array"],
-                "sampling_rate": sample.get("sampling_rate", self.feature_extractor.sampling_rate),
+                "sampling_rate": sample.get("sampling_rate", self._sampling_rate()),
             }
 
         # Inference-only lead-in silence. See prepend_lead_in for the
@@ -508,11 +531,10 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             else 0.0
         )
         if lead_in > 0 and isinstance(inputs, dict) and "raw" in inputs:
-            assert self.feature_extractor is not None  # always set by __init__
             padded: dict[str, Any] = dict(inputs)
             padded["raw"] = prepend_lead_in(
                 padded["raw"],
-                padded.get("sampling_rate", self.feature_extractor.sampling_rate),
+                padded.get("sampling_rate", self._sampling_rate()),
                 lead_in,
             )
             inputs = padded
@@ -648,14 +670,15 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             token_ids: list[int] = np.asarray(tokens).tolist()
             tokens = [t for t in token_ids if t not in eos_set]
 
-        assert self.tokenizer is not None  # always set by __init__
-        decoded = self.tokenizer.decode(tokens, skip_special_tokens=True)
-        assert isinstance(decoded, str)  # one sequence in, one string out
+        decoded = self._tokenizer().decode(tokens, skip_special_tokens=True)
+        if not isinstance(decoded, str):  # one sequence in, one string out
+            msg = f"tokenizer.decode returned {type(decoded).__name__}, expected str"
+            raise TypeError(msg)
         text = decoded.strip()
         # Strip <think>...</think> tags (Qwen3 doesn't respect /no_think prompt)
         if "<think>" in text:
             text = _THINK_TAG_RE.sub("", text).strip()
-        text = _truncate_repetitions(text)
+        text = truncate_repetitions(text)
         out: dict[str, Any] = {"text": text}
         # Pass through per-step logprobs when _forward captured them (i.e. caller
         # passed output_scores=True). Lets eval harnesses compute confidence
@@ -681,71 +704,3 @@ def _single_input(args: tuple[Any, ...], kwargs: dict[str, Any], name: str) -> A
         return kwargs.pop(name)
     msg = f"expected exactly one {name!r} argument, got {len(args)} positional"
     raise TypeError(msg)
-
-
-def _truncate_repetitions(text: str) -> str:
-    """Truncate repeated words/phrases/characters at end of text.
-
-    Detects patterns like:
-    - Repeated words: "the the the the" -> "the"
-    - Repeated phrases: "i am sorry i am sorry i am sorry" -> "i am sorry"
-    - Repeated characters: "444444" -> "4"
-
-    Words match ignoring case. A run of `_LOOSE_MIN_REPEATS` also matches
-    ignoring punctuation, since the model punctuates inside a loop ("Yeah Yeah
-    Yeah. Yeah. Yeah,"); shorter punctuated runs are real speech ("No, no,
-    no,"), and collapsing those cost 40 errors over 47 rows of the served eval.
-
-    Args:
-        text: Input text to process
-
-    Returns:
-        Text with trailing repetitions removed
-    """
-    if not text:
-        return text
-
-    text = _TRAILING_CHAR_RE.sub(r"\1", text)
-    while _TRAILING_WORD_RE.search(text):
-        text = _TRAILING_WORD_RE.sub(r"\1", text)
-
-    # 3. Truncate repeated phrases (2-20 words) at end
-    # e.g., "i am sorry i am sorry i am sorry" -> "i am sorry"
-    words = text.split()
-    if len(words) < _MIN_REPEATS * 2:
-        return text
-
-    # Cheap pre-check: trailing window must contain duplicates for any phrase repeat
-    # to be possible. set(window) == window means all unique → no repetition.
-    window = words[-_MIN_REPEATS * 2 :]
-    if len(set(window)) == len(window):
-        return _truncate_punctuated_loop(text)
-
-    for phrase_len in range(2, min(21, len(words) // _MIN_REPEATS + 1)):
-        phrase_escaped = re.escape(" ".join(words[-phrase_len:]))
-        phrase_pattern = re.compile(
-            rf"(^|.*?\s)({phrase_escaped})(?:\s+{phrase_escaped}){{{_MIN_REPEATS - 1},}}\s*$",
-            re.IGNORECASE,
-        )
-        match = phrase_pattern.match(text)
-        if match:
-            text = (match.group(1) + match.group(2)).strip()
-            break
-
-    return _truncate_punctuated_loop(text)
-
-
-def _truncate_punctuated_loop(text: str) -> str:
-    """Collapse a trailing 1-20 word phrase run `_LOOSE_MIN_REPEATS`+ times, punctuation ignored."""
-    words = text.split()
-    keys = [_NON_WORD_RE.sub("", w).lower() for w in words]
-    end = len(words)
-    # Shortest phrase first, so "Yeah Yeah. Yeah," stops at "Yeah".
-    for n in range(1, min(21, end // _LOOSE_MIN_REPEATS + 1)):
-        phrase = keys[end - n : end]
-        reps = 1
-        while end - (reps + 1) * n >= 0 and keys[end - (reps + 1) * n : end - reps * n] == phrase:
-            reps += 1
-        if reps >= _LOOSE_MIN_REPEATS:
-            return " ".join(words[: end - (reps - 1) * n])
-    return text

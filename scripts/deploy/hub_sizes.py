@@ -137,6 +137,7 @@ def repo_weight_bytes(repo_id: str, repo_type: str = "model", name: str | None =
 
 
 def hidden_dim(cfg_obj: object) -> int | None:
+    """A model config's width: `hidden_size`, else `d_model`, else None."""
     for attr in ("hidden_size", "d_model"):
         if getattr(cfg_obj, attr, None):
             dim: int = getattr(cfg_obj, attr)

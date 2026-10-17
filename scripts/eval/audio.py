@@ -31,21 +31,28 @@ class DecodedAudioSamples(Protocol):
 class LazyAudioDecoder(Protocol):
     """torchcodec.AudioDecoder: decodes on `get_all_samples()`."""
 
-    def get_all_samples(self) -> DecodedAudioSamples: ...
+    def get_all_samples(self) -> DecodedAudioSamples:
+        """Decode the whole file into one `DecodedAudioSamples`."""
+        raise NotImplementedError
 
 
 @runtime_checkable
 class _ArrayAudio(Protocol):
+    """An object carrying a decoded waveform and its sample rate as attributes."""
+
     array: AudioArray
     sampling_rate: int
 
 
 @runtime_checkable
 class _PathAudio(Protocol):
+    """An object pointing at an audio file on disk (`path` may be None)."""
+
     path: str | None
 
 
 def is_str_dict(value: object) -> TypeGuard[dict[str, Any]]:
+    """Narrow `value` to a string-keyed dict (keys are assumed, not checked)."""
     return isinstance(value, dict)
 
 
@@ -83,6 +90,7 @@ def audio_to_wav_bytes(
 
 
 def _read_path_to_wav(path: str) -> bytes:
+    """Read an audio file from disk and re-encode it as mono 16-bit WAV bytes."""
     audio_array, sample_rate = sf.read(path)
     return audio_to_wav_bytes(audio_array, sample_rate, channel_axis=1)
 
@@ -169,6 +177,7 @@ class TextNormalizer:
     """
 
     def __init__(self) -> None:
+        """Share the process-wide cached Whisper English normalizer."""
         self._normalizer = _english_normalizer()
 
     _SPELLING_FIXES: ClassVar[dict[str, str]] = {
@@ -223,6 +232,7 @@ class VerbatimTextNormalizer:
     _KEEP_FILLERS = r"(?!)"
 
     def __init__(self) -> None:
+        """Build a private copy of the Whisper normalizer whose filler pattern matches nothing."""
         # A copy: the cached normalizer is shared with every `TextNormalizer`.
         self._normalizer = copy.copy(_english_normalizer())
         self._normalizer.ignore_patterns = self._KEEP_FILLERS

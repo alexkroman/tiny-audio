@@ -16,11 +16,13 @@ class FakeProcessor:
     """Times each word as [i, i + 0.5) seconds and records the batches it saw."""
 
     def __init__(self) -> None:
+        """Start with no recorded batches."""
         self.batches: list[tuple[list[npt.NDArray[np.float32]], list[str]]] = []
 
     def prepare_forced_aligner_inputs(
         self, audios: list[npt.NDArray[np.float32]], texts: list[str], **_: Any
     ) -> tuple[dict[str, torch.Tensor], list[list[str]]]:
+        """Record the batch; return zero features and each text split into words."""
         self.batches.append((audios, texts))
         features = {
             "input_ids": torch.zeros(len(audios), 3, dtype=torch.long),
@@ -29,8 +31,9 @@ class FakeProcessor:
         return features, [t.split() for t in texts]
 
     def decode_forced_alignment(
-        self, logits: Any, input_ids: Any, word_lists: list[list[str]], timestamp_id: int
+        self, _logits: Any, _input_ids: Any, word_lists: list[list[str]], _timestamp_id: int
     ) -> list[list[dict[str, float]]]:
+        """Give word i of each list the span [i, i + 0.5) seconds."""
         return [
             [{"start_time": float(i), "end_time": i + 0.5} for i in range(len(words))]
             for words in word_lists
@@ -39,6 +42,7 @@ class FakeProcessor:
 
 @pytest.fixture
 def fake_pair(monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, FakeProcessor]:
+    """Make `get_instance` return a mock CPU float32 model and a FakeProcessor."""
     model = MagicMock()
     model.device = torch.device("cpu")
     model.dtype = torch.float32
@@ -53,6 +57,8 @@ def fake_pair(monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, FakeProcessor
 
 
 class TestTo16k:
+    """`to_16k` flattens arrays or tensors to float32 mono and resamples to 16 kHz."""
+
     def test_flattens_and_casts(self) -> None:
         out = alignment.to_16k(np.ones((2, 8), dtype=np.float64), 16000)
         assert out.dtype == np.float32
@@ -65,6 +71,8 @@ class TestTo16k:
 
 
 class TestAlignChunks:
+    """Chunk alignment keeps original words, batches in order, and skips empty text."""
+
     def test_keeps_original_words_and_skips_punctuation_only(
         self, fake_pair: tuple[MagicMock, FakeProcessor]
     ) -> None:
@@ -97,7 +105,8 @@ class TestAlignChunks:
             [],
         ]
 
-    def test_too_long_chunk_raises(self, fake_pair: tuple[MagicMock, FakeProcessor]) -> None:
+    @pytest.mark.usefixtures("fake_pair")
+    def test_too_long_chunk_raises(self) -> None:
         too_long = np.zeros(int(16000 * (QwenForcedAligner.MAX_SECONDS + 1)), dtype=np.float32)
         with pytest.raises(ValueError, match="at most 300 s"):
             QwenForcedAligner.align_chunks([(np.zeros(10), "ok"), (too_long, "too long")])
@@ -120,8 +129,11 @@ class TestAlignChunks:
 
 
 class TestGetInstance:
+    """The aligner loads once per process, with attention chosen for the device."""
+
     @pytest.fixture(autouse=True)
     def reset_cache(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Clear the cached model and processor for each test, restoring them after."""
         monkeypatch.setattr(QwenForcedAligner, "_model", None)
         monkeypatch.setattr(QwenForcedAligner, "_processor", None)
 

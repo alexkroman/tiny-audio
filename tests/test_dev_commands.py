@@ -37,6 +37,7 @@ def recorded_runs(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, ...]]:
 
 @pytest.fixture
 def pyproject() -> dict[str, Any]:
+    """The repository's parsed pyproject.toml."""
     return tomllib.loads((get_project_root() / "pyproject.toml").read_text())
 
 
@@ -50,7 +51,7 @@ class TestRunHelpers:
             seen["args"] = args
             return 7
 
-        monkeypatch.setattr("scripts.dev.subprocess.call", fake_call)
+        monkeypatch.setattr("subprocess.call", fake_call)
         assert dev.run("echo", "hi") == 7
         assert seen["args"] == ("echo", "hi")
 
@@ -65,6 +66,26 @@ class TestRunHelpers:
         monkeypatch.setattr(dev, "run", fake_run)
         assert dev.run_all(["a"], ["b"], ["c"]) == 3
         assert executed == [("a",), ("b",)]
+
+    def test_run_each_runs_everything_and_returns_the_first_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        codes = iter([0, 3, 4])
+        executed: list[tuple[str, ...]] = []
+
+        def fake_run(*args: str) -> int:
+            executed.append(args)
+            return next(codes)
+
+        monkeypatch.setattr(dev, "run", fake_run)
+        assert dev.run_each(["a"], ["b"], ["c"]) == 3
+        assert executed == [("a",), ("b",), ("c",)]
+
+    def test_run_each_succeeds_when_everything_passes(
+        self, recorded_runs: list[tuple[str, ...]]
+    ) -> None:
+        assert dev.run_each(["a"], ["b"]) == 0
+        assert recorded_runs == [("a",), ("b",)]
 
     def test_run_all_succeeds_when_everything_passes(
         self, recorded_runs: list[tuple[str, ...]]
@@ -93,8 +114,7 @@ class TestCommandWiring:
         assert runner.invoke(dev.app, ["test"]).exit_code == 0
         cmd, floors = recorded_runs
         assert cmd[0] == "pytest"
-        assert "--cov=tiny_audio" in cmd
-        assert "--cov=scripts" in cmd
+        assert {"--cov=tiny_audio", "--cov=scripts", "--cov=tests"} <= set(cmd)
         assert "--cov-report=xml" in cmd
         # The per-file floors read the JSON report the test run just wrote.
         assert "--cov-report=json" in cmd
@@ -164,6 +184,85 @@ class TestCommandWiring:
         monkeypatch.setattr(dev, "run", failing_run)
         assert runner.invoke(dev.app, ["lint"]).exit_code == 5
 
+    def test_check_reports_every_failure_not_just_the_first(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[str, ...]] = []
+
+        def failing_run(*args: str) -> int:
+            calls.append(args)
+            return 1
+
+        monkeypatch.setattr(dev, "run", failing_run)
+        result = runner.invoke(dev.app, ["check"])
+        assert result.exit_code == 1
+        assert len(calls) == len(dev.check_commands())
+        assert f"{len(calls)} of {len(calls)} checks failed" in result.output
+
+    def test_precommit_stops_before_tests_when_a_check_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[str, ...]] = []
+
+        def failing_run(*args: str) -> int:
+            calls.append(args)
+            return 1
+
+        monkeypatch.setattr(dev, "run", failing_run)
+        monkeypatch.setattr(dev, "format_code", lambda: None)
+        assert runner.invoke(dev.app, ["precommit"]).exit_code == 1
+        assert tuple(dev.TEST_COMMAND) not in calls
+
+
+class TestPrepush:
+    """`ta dev prepush`: refuse main, a stale branch, or one that conflicts with main."""
+
+    @staticmethod
+    def fake_git(
+        monkeypatch: pytest.MonkeyPatch, branch: str = "feature", **codes: int
+    ) -> list[tuple[str, ...]]:
+        """Stub `dev.git`: report `branch`, and exit with `codes[subcommand]` (default 0)."""
+        calls: list[tuple[str, ...]] = []
+
+        def git(*args: str) -> SimpleNamespace:
+            calls.append(args)
+            stdout = f"{branch}\n" if args[0] == "rev-parse" else ""
+            return SimpleNamespace(
+                returncode=codes.get(args[0].replace("-", "_"), 0), stdout=stdout
+            )
+
+        monkeypatch.setattr(dev, "git", git)
+        return calls
+
+    def test_up_to_date_branch_passes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.fake_git(monkeypatch)
+        assert dev.prepush_problems() == []
+        assert runner.invoke(dev.app, ["prepush"]).exit_code == 0
+
+    def test_main_is_refused_without_fetching(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls = self.fake_git(monkeypatch, branch="main")
+        (problem,) = dev.prepush_problems()
+        assert "main" in problem
+        assert all(call[0] != "fetch" for call in calls)
+
+    def test_behind_main_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.fake_git(monkeypatch, merge_base=1)
+        (problem,) = dev.prepush_problems()
+        assert "behind origin/main" in problem
+        assert runner.invoke(dev.app, ["prepush"]).exit_code == 1
+
+    def test_conflicts_are_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.fake_git(monkeypatch, merge_tree=1, merge_base=1)
+        (problem,) = dev.prepush_problems()
+        assert "conflicts" in problem
+
+    def test_offline_push_is_not_blocked(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.fake_git(monkeypatch, fetch=128, merge_base=1)
+        assert dev.prepush_problems() == []
+
+    def test_git_runs_git(self) -> None:
+        assert dev.git("--version").stdout.startswith("git version")
+
 
 class TestFormatCode:
     """`ta dev format` rewrites every tracked Markdown and JSON file."""
@@ -174,12 +273,13 @@ class TestFormatCode:
     }
 
     def _fake_ls_files(self, cmd: list[str], **_kw: object) -> SimpleNamespace:
+        """`git ls-files <pattern>` answered from LISTINGS."""
         return SimpleNamespace(stdout=self.LISTINGS[cmd[-1]])
 
     def test_every_tracked_markdown_and_json_file_is_formatted(
         self, recorded_runs: list[tuple[str, ...]], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr("scripts.dev.subprocess.run", self._fake_ls_files)
+        monkeypatch.setattr("subprocess.run", self._fake_ls_files)
         dev.format_code()
         assert ("mdformat", "README.md", "MODEL_CARD.md", "demo/README.md") in recorded_runs
         assert ("pretty-format-json", "--autofix", "quality/file_length.json") in recorded_runs
@@ -192,7 +292,7 @@ class TestFormatCode:
         def empty_ls_files(*_a: object, **_kw: object) -> SimpleNamespace:
             return SimpleNamespace(stdout="")
 
-        monkeypatch.setattr("scripts.dev.subprocess.run", empty_ls_files)
+        monkeypatch.setattr("subprocess.run", empty_ls_files)
         dev.format_code()
         assert all(c[0] not in {"mdformat", "pretty-format-json"} for c in recorded_runs)
 
@@ -203,6 +303,16 @@ class TestQualityGateContents:
     def test_lint_refuses_unformatted_code(self) -> None:
         assert ["ruff", "format", "--check", *dev.CODE_PATHS] in dev.LINT_COMMANDS
         assert ["black", "--check", *dev.CODE_PATHS] in dev.LINT_COMMANDS
+
+    def test_lint_checks_tracked_shell_scripts(self) -> None:
+        shellcheck = next(cmd for cmd in dev.lint_commands() if cmd[0] == "shellcheck")
+        assert ".claude/hooks/session-start.sh" in shellcheck
+
+    def test_no_shell_scripts_means_no_shellcheck_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(dev, "shell_files", list)
+        assert all(cmd[0] != "shellcheck" for cmd in dev.lint_commands())
 
     def test_lint_checks_all_tracked_markdown(self) -> None:
         commands = {cmd[0]: cmd for cmd in dev.lint_commands()}
@@ -226,20 +336,31 @@ class TestQualityGateContents:
         assert dev.DUPLICATION_COMMAND in dev.check_commands()
         assert dev.FILE_LENGTH_COMMAND in dev.check_commands()
         assert dev.TEST_ASSERTIONS_COMMAND in dev.check_commands()
+        assert dev.ESCAPE_HATCHES_COMMAND in dev.check_commands()
+        assert dev.MODULE_TESTS_COMMAND in dev.check_commands()
+        assert dev.TYPE_COMPLETENESS_COMMAND in dev.check_commands()
+        assert dev.TRACKED_IGNORED_COMMAND in dev.check_commands()
+        assert dev.INVARIANTS_COMMAND in dev.check_commands()
+        assert dev.OWNING_IMPORTS_COMMAND in dev.check_commands()
         for cmd in dev.DOCSTRINGS_COMMANDS:
             assert cmd in dev.check_commands()
 
-    def test_check_covers_both_packages_with_interrogate(self) -> None:
-        targets = {cmd[1] for cmd in dev.DOCSTRINGS_COMMANDS}
-        assert targets == {"tiny_audio", "scripts"}
+    def test_every_gate_covers_scripts_and_tests_like_the_package(self) -> None:
+        """tiny_audio/, scripts/ and tests/ go through the same gates, with the same floors."""
+        trees = set(dev.QUALITY_PATHS)
+        assert trees == {"tiny_audio", "scripts", "tests"}
+        assert {cmd[1] for cmd in dev.DOCSTRINGS_COMMANDS} == trees
+        assert len({tuple(cmd[2:]) for cmd in dev.DOCSTRINGS_COMMANDS}) == 1  # one rule
+        for cmd in (dev.SECURITY_COMMAND, dev.DEAD_CODE_COMMAND, dev.DUPLICATION_COMMAND):
+            assert trees <= set(cmd), cmd[0]
+        assert {f"--cov={tree}" for tree in trees} <= set(dev.TEST_COMMAND)
 
 
 class TestRatchetFloors:
     """Thresholds may go up, never down."""
 
     def test_docstring_floors(self) -> None:
-        assert int(dev.DOCSTRING_MIN_LIB) >= 95
-        assert int(dev.DOCSTRING_MIN_SCRIPTS) >= 65
+        assert int(dev.DOCSTRING_MIN) >= 95
 
     def test_dead_code_confidence_floor(self) -> None:
         assert int(dev.DEAD_CODE_MIN_CONFIDENCE) <= 80
@@ -263,6 +384,21 @@ class TestRatchetFloors:
     def test_ruff_rule_families_are_not_dropped(self, pyproject: dict[str, Any]) -> None:
         selected = set(pyproject["tool"]["ruff"]["lint"]["select"])
         assert {"E", "F", "I", "B", "UP", "SIM", "PT", "RUF", "PLW", "PLE", "TRY"} <= selected
+        idioms = {
+            "S101",
+            "BLE",
+            "ARG",
+            "SLF",
+            "ERA",
+            "NPY",
+            "PLR0402",
+            "PYI",
+            "EM",
+            "ICN",
+            "ASYNC",
+            "T20",
+        }
+        assert idioms <= selected
 
 
 class TestPrecommitHookIsTheGate:
@@ -271,6 +407,11 @@ class TestPrecommitHookIsTheGate:
     def test_hook_calls_ta_dev_precommit(self) -> None:
         hook = (get_project_root() / ".pre-commit-config.yaml").read_text()
         assert "ta dev precommit" in hook
+
+    def test_pre_push_hook_is_installed_by_default(self) -> None:
+        hook = (get_project_root() / ".pre-commit-config.yaml").read_text()
+        assert "ta dev prepush" in hook
+        assert "default_install_hook_types: [pre-commit, pre-push]" in hook
 
     def test_ci_runs_check_and_test(self) -> None:
         ci = (get_project_root() / ".github" / "workflows" / "ci.yml").read_text()

@@ -9,7 +9,7 @@ import typer
 
 from scripts.eval.cli import _build_evaluator, save_results
 from scripts.eval.constants import AssemblyAIModel
-from scripts.eval.evaluators import AssemblyAIStreamsEvaluator
+from scripts.eval.evaluators.asr import AssemblyAIStreamsEvaluator
 from scripts.eval.evaluators.base import EvalResult, Metrics
 from scripts.utils import extract_model_from_dir, find_model_dirs
 
@@ -111,7 +111,7 @@ class TestSaveResults:
                 metrics=sample_metrics,
                 output_dir=tmpdir,
             )
-            # Format: timestamp_model_dataset
+            # The name is the timestamp, model and dataset joined by underscores.
             dir_name = result_dir.name
             parts = dir_name.split("_")
             assert len(parts) >= 3
@@ -336,6 +336,7 @@ class TestResultsContent:
 
 
 def _build_with_diarizer(model: str, streaming: bool = False) -> tuple[str, object]:
+    """Build an evaluator for `model` with `--diarizer-url` set and dummy API keys."""
     return _build_evaluator(
         model=model,
         endpoint=False,

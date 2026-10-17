@@ -15,6 +15,7 @@ import torch
 
 from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
+from tiny_audio.asr_pipeline import ASRPipeline
 
 # Disable tokenizers parallelism to avoid fork warnings in tests
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -116,6 +117,22 @@ def base_asr_model(base_asr_config: ASRConfig) -> ASRModel:
     return ASRModel(base_asr_config)
 
 
+@pytest.fixture
+def cpu_pipeline(base_asr_model: ASRModel) -> ASRPipeline:
+    """An ASRPipeline over the session model, pinned to the CPU.
+
+    With no device, transformers' Pipeline moves the model to the default
+    accelerator IN PLACE; base_asr_model is session-scoped, so on a Mac every
+    later test would get an MPS model fed CPU tensors.
+    """
+    return ASRPipeline(
+        model=base_asr_model,
+        feature_extractor=base_asr_model.feature_extractor,
+        tokenizer=base_asr_model.tokenizer,
+        device="cpu",
+    )
+
+
 @pytest.fixture(scope="session")
 def lora_asr_config() -> ASRConfig:
     """Session-scoped LoRA ASR config - loaded once per test session."""
@@ -151,6 +168,7 @@ class MockProjectorConfig:
     """
 
     def __init__(self, **kwargs: int) -> None:
+        """Set every projector config attribute, taking each from kwargs when given."""
         # Core dimensions
         self.encoder_dim = kwargs.get("encoder_dim", 256)
         self.llm_dim = kwargs.get("llm_dim", 512)

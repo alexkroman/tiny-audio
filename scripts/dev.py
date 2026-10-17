@@ -8,29 +8,33 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
-from scripts import quality
+from scripts import mutate, quality
 
-app = typer.Typer(
+app: typer.Typer = typer.Typer(
     name="dev",
     help="Run the project's lint, format, test and build tasks.",
     no_args_is_help=True,
     add_completion=False,
 )
 app.add_typer(quality.app)
-console = Console()
+app.command("mutate")(mutate.main)
+console: Console = Console()
 
 # Every Python tree in the repo: the package, its CLI, the tests, the Space
 # demo and the course examples. Linters and type checkers all run over this.
 CODE_PATHS = ["tiny_audio", "scripts", "tests", "demo", "docs", "typings"]
 LIB_PATH = "tiny_audio"
+# The three trees every quality gate covers alike: the published package, the
+# CLI and training code that builds and ships it, and the tests that vouch
+# for both. demo/, docs/ and typings/ get the linters and pyright only.
+QUALITY_PATHS = [LIB_PATH, "scripts", "tests"]
 TOML_FILES = ["pyproject.toml", ".mdformat.toml"]
 
 # Every threshold below is a ratchet: raise it when the codebase clears the
 # next rung, never lower it to get a red build green. Coverage's floor lives in
 # `[tool.coverage.report] fail_under` (pyproject.toml) and is enforced by
 # TEST_COMMAND via pytest-cov.
-DOCSTRING_MIN_LIB = "95"  # tiny_audio/: the published model code
-DOCSTRING_MIN_SCRIPTS = "65"  # scripts/: CLI + training; probes drag it down
+DOCSTRING_MIN = "95"  # each of QUALITY_PATHS on its own, not pooled
 DEAD_CODE_MIN_CONFIDENCE = "80"
 
 LINT_COMMANDS = [
@@ -57,7 +61,7 @@ TYPE_CHECK_COMMANDS = [
     # Paths come from `[tool.pyright] include`.
     ["pyright"],
 ]
-SECURITY_COMMAND = ["bandit", "-c", "pyproject.toml", "-r", "tiny_audio", "scripts", "-ll"]
+SECURITY_COMMAND = ["bandit", "-c", "pyproject.toml", "-r", *QUALITY_PATHS, "-ll"]
 # Unused, missing, transitive-only and misplaced dependencies; configured in
 # `[tool.deptry]` (pyproject.toml).
 DEPS_COMMAND = ["deptry", "."]
@@ -65,46 +69,50 @@ DEPS_COMMAND = ["deptry", "."]
 QUALITY = [sys.executable, "-m", "scripts.quality"]
 FILE_LENGTH_COMMAND = [*QUALITY, "file-length"]
 TEST_ASSERTIONS_COMMAND = [*QUALITY, "test-assertions"]
+ESCAPE_HATCHES_COMMAND = [*QUALITY, "escape-hatches"]
+MODULE_TESTS_COMMAND = [*QUALITY, "module-tests"]
+TYPE_COMPLETENESS_COMMAND = [*QUALITY, "type-completeness"]
+TRACKED_IGNORED_COMMAND = [*QUALITY, "tracked-ignored"]
+INVARIANTS_COMMAND = [*QUALITY, "invariants"]
+OWNING_IMPORTS_COMMAND = [*QUALITY, "owning-imports"]
 # Reads the coverage.json TEST_COMMAND writes, so it runs after the tests.
 COVERAGE_FLOORS_COMMAND = [*QUALITY, "coverage-floors"]
-# Copy-pasted blocks of 4+ lines across tiny_audio/ and scripts/ (comments,
-# docstrings, imports and signatures ignored). demo/ is left out: it deploys
-# to the Space on its own and cannot share code with scripts/.
+# Copy-pasted blocks of 4+ lines across QUALITY_PATHS, within and between
+# them (comments, docstrings, imports and signatures ignored). demo/ is left
+# out: it deploys to the Space on its own and cannot share code with scripts/.
 DUPLICATION_COMMAND = [
     "pylint",
     "--disable=all",
     "--enable=duplicate-code",
     "--min-similarity-lines=4",
     "--score=n",
-    LIB_PATH,
-    "scripts",
+    *QUALITY_PATHS,
 ]
 DEAD_CODE_COMMAND = [
     "vulture",
-    "tiny_audio",
-    "scripts",
+    *QUALITY_PATHS,
     # Protocol / type-stub parameter names; see the file's docstring.
     "quality/vulture_whitelist.py",
     "--min-confidence",
     DEAD_CODE_MIN_CONFIDENCE,
 ]
-# `@overload` stubs are type signatures for the documented implementation
-# below them, not separate functions, so they are not counted.
+# The same rule for each tree, checked separately so one tree's surplus
+# cannot cover another's gap. Not counted: `@overload` stubs (signatures for
+# the documented implementation below them), nested functions (closures and
+# test fakes, documented by the function that holds them), and `test_*`
+# functions, whose names are their documentation.
 DOCSTRINGS_COMMANDS = [
     [
         "interrogate",
-        LIB_PATH,
+        path,
         "--ignore-overloaded-functions",
+        "--ignore-nested-functions",
+        "--ignore-regex",
+        "^test_",
         "--fail-under",
-        DOCSTRING_MIN_LIB,
-    ],
-    [
-        "interrogate",
-        "scripts",
-        "--ignore-overloaded-functions",
-        "--fail-under",
-        DOCSTRING_MIN_SCRIPTS,
-    ],
+        DOCSTRING_MIN,
+    ]
+    for path in QUALITY_PATHS
 ]
 # Everything `ta dev check` runs after the linters; see `check_commands()`.
 ANALYSIS_COMMANDS = [
@@ -114,6 +122,12 @@ ANALYSIS_COMMANDS = [
     DUPLICATION_COMMAND,
     FILE_LENGTH_COMMAND,
     TEST_ASSERTIONS_COMMAND,
+    ESCAPE_HATCHES_COMMAND,
+    MODULE_TESTS_COMMAND,
+    TYPE_COMPLETENESS_COMMAND,
+    TRACKED_IGNORED_COMMAND,
+    INVARIANTS_COMMAND,
+    OWNING_IMPORTS_COMMAND,
     DEPS_COMMAND,
     *DOCSTRINGS_COMMANDS,
 ]
@@ -122,8 +136,7 @@ ANALYSIS_COMMANDS = [
 TEST_COMMAND = [
     "pytest",
     "-v",
-    f"--cov={LIB_PATH}",
-    "--cov=scripts",
+    *(f"--cov={path}" for path in QUALITY_PATHS),
     "--cov-report=term-missing",
     "--cov-report=xml",
     "--cov-report=json",
@@ -182,6 +195,11 @@ def markdown_files() -> list[str]:
     return tracked_files("*.md")
 
 
+def shell_files() -> list[str]:
+    """Tracked shell scripts that `ta dev lint` checks with shellcheck."""
+    return tracked_files("*.sh")
+
+
 def json_files() -> list[str]:
     """Tracked JSON (the quality/ baselines) that `ta dev lint` checks.
 
@@ -203,6 +221,8 @@ def lint_commands() -> list[list[str]]:
         ["mdformat", "--check", *markdown],
         ["pymarkdown", "scan", *markdown],
         ["pretty-format-json", *json_files()],
+        # Optional checks are switched on in .shellcheckrc.
+        *([["shellcheck", *shell]] if (shell := shell_files()) else []),
     ]
 
 
@@ -226,10 +246,49 @@ def run_all(*commands: list[str]) -> int:
     return 0
 
 
+def run_each(*commands: list[str]) -> int:
+    """Run every command, then list the failures; returns the first failing exit code.
+
+    For independent read-only checks: stopping at the first failure hides
+    what the rest would say, so their findings arrive one red run at a time.
+    """
+    failed = [(cmd, code) for cmd in commands if (code := run(*cmd)) != 0]
+    if failed:
+        console.print(f"[red]{len(failed)} of {len(commands)} checks failed:[/red]")
+        for cmd, code in failed:
+            console.print(f"[red]  exit {code}: {' '.join(cmd)}[/red]")
+    return failed[0][1] if failed else 0
+
+
+def git(*args: str) -> subprocess.CompletedProcess[str]:
+    """Run git quietly; the caller reads the exit code and output."""
+    return subprocess.run(["git", *args], capture_output=True, text=True, check=False)
+
+
+def prepush_problems() -> list[str]:
+    """Why this push would fail review: on main, behind main, or conflicting with it.
+
+    Fails open (no problem) when origin/main cannot be fetched, so an offline
+    push is not blocked on a check it cannot run.
+    """
+    branch = git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    if branch in {"main", "master"}:
+        return [f"direct pushes to {branch} are not allowed; push a branch and open a PR"]
+    if git("fetch", "--quiet", "origin", "main").returncode != 0:
+        console.print("[yellow]could not fetch origin/main; skipping the freshness checks[/yellow]")
+        return []
+    # `merge-tree --write-tree` (git >= 2.38) merges in memory: exit 1 means conflicts.
+    if git("merge-tree", "--write-tree", "HEAD", "origin/main").returncode == 1:
+        return ["this branch conflicts with origin/main; merge it and resolve the conflicts"]
+    if git("merge-base", "--is-ancestor", "origin/main", "HEAD").returncode != 0:
+        return ["this branch is behind origin/main; run `git merge origin/main` and re-check"]
+    return []
+
+
 @app.command()
 def lint() -> None:
     """Run linters (Poetry + Python + YAML + TOML + GitHub Actions + Markdown + JSON)."""
-    raise typer.Exit(run_all(*lint_commands()))
+    raise typer.Exit(run_each(*lint_commands()))
 
 
 @app.command("format")
@@ -268,8 +327,11 @@ def coverage() -> None:
 
 @app.command()
 def check() -> None:
-    """Run all checks (lint, types, security, dead code, duplication, ratchets, deps, docs)."""
-    raise typer.Exit(run_all(*check_commands()))
+    """Run all checks (lint, types, security, dead code, duplication, ratchets, deps, docs).
+
+    Every check runs even after one fails; the failures are listed at the end.
+    """
+    raise typer.Exit(run_each(*check_commands()))
 
 
 @app.command()
@@ -283,13 +345,24 @@ def precommit() -> None:
     """Pre-commit quality gate (format, check, test with coverage floor, build)."""
     format_code()
     raise typer.Exit(
-        run_all(*check_commands(), TEST_COMMAND, COVERAGE_FLOORS_COMMAND) or build_and_check()
+        run_each(*check_commands())
+        or run_all(TEST_COMMAND, COVERAGE_FLOORS_COMMAND)
+        or build_and_check()
     )
+
+
+@app.command()
+def prepush() -> None:
+    """Pre-push gate: not on main, up to date with origin/main, no conflicts with it."""
+    problems = prepush_problems()
+    for problem in problems:
+        console.print(f"[red]{problem}[/red]")
+    raise typer.Exit(1 if problems else 0)
 
 
 @app.command("install-hooks")
 def install_hooks() -> None:
-    """Install pre-commit hooks."""
+    """Install the git hooks (`default_install_hook_types`: pre-commit and pre-push)."""
     raise typer.Exit(run("pre-commit", "install"))
 
 

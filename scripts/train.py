@@ -10,8 +10,10 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, NamedTuple
 
+import datasets
 import hydra
 import torch
+import torch._dynamo.config as dynamo_config
 import wandb
 from datasets import (
     Audio,
@@ -46,6 +48,7 @@ from tiny_audio.asr_modeling import ASRModel
 # training falls back to stock kernels and unfused cross-entropy.
 _liger_transformers: ModuleType | None
 _liger_import_error: ImportError | None
+exc: ImportError
 try:
     from liger_kernel import transformers as liger_transformers
 except ImportError as exc:
@@ -58,7 +61,7 @@ else:
 for _noisy in ("httpx", "httpcore", "urllib3", "huggingface_hub.file_download"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 
-logger = logging.getLogger(__name__)
+logger: logging.Logger = logging.getLogger(__name__)
 
 # Register the `base_config` structured-config schema that configs/config.yaml
 # lists first in its defaults (scripts/train_config.py). Must happen before
@@ -92,6 +95,13 @@ def _resolve_transcribe_prompt(
     return None
 
 
+def _add_constant_column(ds: Dataset, name: str, value: object) -> Dataset:
+    """`ds` with a column holding `value` on every row."""
+    # @fingerprint_transform computes `new_fingerprint` when it is omitted,
+    # though `add_column` annotates it as a required argument.
+    return ds.add_column(name, [value] * len(ds))  # pyright: ignore[reportCallIssue]
+
+
 def _add_source_policy_columns(ds: Dataset, dataset_cfg: DictConfig, dataset_path: str) -> Dataset:
     """Attach the source's declared `_text_case` / `_text_punct` as constant columns."""
     # text_case: declares whether this source's transcripts already carry
@@ -107,9 +117,7 @@ def _add_source_policy_columns(ds: Dataset, dataset_cfg: DictConfig, dataset_pat
                 f"got {text_case!r} for {dataset_path}"
             )
             raise ValueError(msg)
-        # @fingerprint_transform computes `new_fingerprint` when it is omitted,
-        # though `add_column` annotates it as a required argument.
-        ds = ds.add_column("_text_case", [text_case] * len(ds))  # pyright: ignore[reportCallIssue]
+        ds = _add_constant_column(ds, "_text_case", text_case)
 
     # text_punct: declares whether this source's transcripts carry
     # punctuation. Deliberately separate from text_case -- they are not the
@@ -121,11 +129,7 @@ def _add_source_policy_columns(ds: Dataset, dataset_cfg: DictConfig, dataset_pat
         if not isinstance(text_punct, bool):
             msg = f"text_punct must be a bool, got {text_punct!r} for {dataset_path}"
             raise ValueError(msg)
-        # @fingerprint_transform computes `new_fingerprint` when it is omitted,
-        # though `add_column` annotates it as a required argument.
-        ds = ds.add_column(  # pyright: ignore[reportCallIssue]
-            "_text_punct", [text_punct] * len(ds)
-        )
+        ds = _add_constant_column(ds, "_text_punct", text_punct)
     return ds
 
 
@@ -197,14 +201,15 @@ class DatasetLoader:
     """
 
     def __init__(self, config: DictConfig):
-        self.config = config.data
-        self.sample_rate = self.config.sample_rate
-        self.cache_dir = self.config.dataset_cache_dir
-        self.seed = config.training.get("seed", 42)
-        self.num_proc = self.config.get("num_proc", 16)
-        self.num_train_epochs = config.training.get("num_train_epochs", 1)
+        """Read the `data` block, plus the seed and epoch count from `training`."""
+        self.config: DictConfig = config.data
+        self.sample_rate: int = self.config.sample_rate
+        self.cache_dir: str | None = self.config.dataset_cache_dir
+        self.seed: int = config.training.get("seed", 42)
+        self.num_proc: int = self.config.get("num_proc", 16)
+        self.num_train_epochs: float = config.training.get("num_train_epochs", 1)
         # See _expand_epochs / load() for what this does and why it exists.
-        self.epoch_expansion = int(self.config.get("epoch_expansion", 1) or 1)
+        self.epoch_expansion: int = int(self.config.get("epoch_expansion", 1) or 1)
 
     def _prepare_split(self, dataset_cfg: DictConfig, split: str) -> Dataset:
         """Load one split of one source and reduce it to the columns training reads."""
@@ -223,7 +228,9 @@ class DatasetLoader:
         )
         # A concrete `split` without streaming always yields a single Dataset
         # (not a DatasetDict / IterableDataset).
-        assert isinstance(ds, Dataset)
+        if not isinstance(ds, Dataset):
+            msg = f"load_dataset returned {type(ds).__name__} for {dataset_path}, expected Dataset"
+            raise TypeError(msg)
 
         # Constant per-source provenance columns. These MUST be added here,
         # before any filter() below, and not down next to the other column
@@ -238,8 +245,8 @@ class DatasetLoader:
         ds = self._filter_common_voice_down_votes(ds, dataset_path)
 
         # Declarative row filter on a source-metadata column, e.g.
-        #   exclude_where: {column: source, values: [audiobook]}
-        #   exclude_where: {column: audio_duration, above: 19.0}
+        # `exclude_where: {column: source, values: [audiobook]}` or
+        # `exclude_where: {column: audio_duration, above: 19.0}`.
         # It must run HERE, before _select_training_columns drops every
         # column that is not audio/text/_text_case/_text_punct -- by then the
         # column you want to filter on no longer exists.
@@ -432,7 +439,8 @@ class DatasetLoader:
             return ds
         return ds.repeat(times)
 
-    def load(self) -> tuple[Dataset | None, Dataset | None]:
+    def load(self) -> tuple[datasets.Dataset | None, datasets.Dataset | None]:
+        """Build the shuffled training set and the capped eval set (None if no splits)."""
         train_datasets: list[Dataset] = []
         val_datasets: list[Dataset] = []
 
@@ -657,6 +665,8 @@ def optimizer_param_groups(
 class ASRTrainer(Trainer):
     """Trainer subclass for ASR models."""
 
+    optimizer: torch.optim.Optimizer | None
+
     def __init__(
         self,
         *args: Any,
@@ -666,6 +676,7 @@ class ASRTrainer(Trainer):
         encoder_weight_decay: float | None = None,
         **kwargs: Any,
     ) -> None:
+        """Pass `args`/`kwargs` to Trainer; keep per-group LR/decay overrides (None = global)."""
         super().__init__(*args, **kwargs)
         self.decoder_learning_rate = decoder_learning_rate
         self.projector_weight_decay = projector_weight_decay
@@ -721,8 +732,11 @@ class ASRTrainer(Trainer):
         optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(
             self.args, opt_model if isinstance(opt_model, PreTrainedModel) else None
         )
-        self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
-        return self.optimizer
+        optimizer: torch.optim.Optimizer = optimizer_cls(
+            optimizer_grouped_parameters, **optimizer_kwargs
+        )
+        self.optimizer = optimizer
+        return optimizer
 
 
 class PushToHubCallback(TrainerCallback):
@@ -735,6 +749,7 @@ class PushToHubCallback(TrainerCallback):
         control: TrainerControl,
         **kwargs: Any,
     ) -> None:
+        """Push the current model to `hub_model_id`; push failures never stop training."""
         # Returning None leaves `control` as is: CallbackHandler only replaces
         # it when a callback returns a new one.
         del control
@@ -857,12 +872,19 @@ def _require_fused_cross_entropy(model: ASRModel, cfg: DictConfig) -> None:
     raise RuntimeError(msg)
 
 
+def _resolved_dict(node: DictConfig, what: str) -> dict[str, Any]:
+    """`node` resolved to a plain dict with string keys (config keys are field names)."""
+    container = OmegaConf.to_container(node, resolve=True)
+    if not isinstance(container, dict):
+        msg = f"{what} config must be a mapping, got {type(container).__name__}"
+        raise TypeError(msg)
+    return {str(k): v for k, v in container.items()}
+
+
 def _init_wandb(cfg: DictConfig) -> None:
     """Start the wandb run with the resolved config and the current git state."""
-    cfg_container = OmegaConf.to_container(cfg, resolve=True)
-    assert isinstance(cfg_container, dict)
     # The root config's keys are the group names (model/data/training).
-    wandb_config = {str(k): v for k, v in cfg_container.items()}
+    wandb_config = _resolved_dict(cfg, "root")
     git_commit, git_dirty = _git_state()
     if git_commit:
         # Surface the commit in the run config so it's queryable/filterable
@@ -906,28 +928,28 @@ def _apply_liger_kernels(cfg: DictConfig) -> None:
             cfg.model.get("text_model_id"),
         )
         return
-    try:
-        if _liger_transformers is None:
-            assert _liger_import_error is not None
-            raise _liger_import_error
-        getattr(_liger_transformers, patcher_name)()
-        logger.info("Applied liger kernels via %s()", patcher_name)
-    except (ImportError, AttributeError) as e:
-        logger.warning(
-            "liger-kernel unavailable or missing %s (%s) — falling back to "
-            "stock kernels. Install with `poetry install` on Linux and pin a "
-            "version that exports it to enable fused linear CE.",
-            patcher_name,
-            e,
-        )
+    reason: BaseException | str | None = _liger_import_error
+    if _liger_transformers is not None:
+        try:
+            getattr(_liger_transformers, patcher_name)()
+        except (ImportError, AttributeError) as e:
+            reason = e
+        else:
+            logger.info("Applied liger kernels via %s()", patcher_name)
+            return
+    logger.warning(
+        "liger-kernel unavailable or missing %s (%s) — falling back to "
+        "stock kernels. Install with `poetry install` on Linux and pin a "
+        "version that exports it to enable fused linear CE.",
+        patcher_name,
+        reason or "liger_kernel.transformers did not import",
+    )
 
 
 def build_asr_config(cfg: DictConfig) -> ASRConfig:
     """Merge `model:` with the TRAINING_MODEL_PARAMS set under `training:` into an ASRConfig."""
-    model_container = OmegaConf.to_container(cfg.model, resolve=True)
-    assert isinstance(model_container, dict), "model config must be a dict"
-    # Keys are ModelConfig field names (scripts/train_config.py), i.e. strings.
-    model_config_dict = {str(k): v for k, v in model_container.items()}
+    # Keys are ModelConfig field names (scripts/train_config.py).
+    model_config_dict = _resolved_dict(cfg.model, "model")
     for param in TRAINING_MODEL_PARAMS:
         val = cfg.training.get(param)
         if val is None:
@@ -977,6 +999,7 @@ def disable_chat_template_thinking(model: ASRModel) -> None:
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig) -> None:
+    """Train an ASR model from the composed Hydra config (`ta train` / python -m scripts.train)."""
     push_to_hub = cfg.training.get("push_to_hub") and cfg.training.get("hub_model_id")
     # Fail before model load and data prep: Trainer's own repo creation would
     # only raise after both, and PushToHubCallback swallows push errors, so
@@ -1029,10 +1052,8 @@ def main(cfg: DictConfig) -> None:
     if push_to_hub:
         callbacks.append(PushToHubCallback())
 
-    training_container = OmegaConf.to_container(cfg.training, resolve=True)
-    assert isinstance(training_container, dict)
-    # Keys are TrainingConfig field names (scripts/train_config.py), i.e. strings.
-    training_config = {str(k): v for k, v in training_container.items()}
+    # Keys are TrainingConfig field names (scripts/train_config.py).
+    training_config = _resolved_dict(cfg.training, "training")
     decoder_learning_rate = training_config.pop("decoder_learning_rate", None)
     projector_weight_decay = training_config.pop("projector_weight_decay", None)
     encoder_learning_rate = training_config.pop("encoder_learning_rate", None)
@@ -1049,7 +1070,6 @@ def main(cfg: DictConfig) -> None:
     # the first scalar-producing op (e.g. token_counts.max().item() in
     # _gather_audio_embeds).
     # torch exposes these knobs only under torch._dynamo.
-    dynamo_config = torch._dynamo.config  # pyright: ignore[reportPrivateUsage]
     dynamo_config.cache_size_limit = 256
     dynamo_config.capture_scalar_outputs = True
     trainer = ASRTrainer(

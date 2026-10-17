@@ -26,6 +26,7 @@ from scripts.analysis.metrics import (
 
 
 def _verdict(lo: float, hi: float) -> str:
+    """Label a delta's confidence interval `[lo, hi]` by whether it excludes zero."""
     if lo > 0:
         return "[green]separated[/green]"
     if hi < 0:
@@ -40,12 +41,14 @@ CorpusSeries = tuple[float, list[int], list[int]]
 
 
 def _wer_series(m: ModelMetrics) -> CorpusSeries | None:
+    """The model's corpus WER series, or None when it has no per-utterance counts."""
     if "corpus_wer" not in m or not m.get("corpus_utt_errors"):
         return None
     return m["corpus_wer"], m.get("corpus_utt_errors", []), m.get("corpus_utt_ref_words", [])
 
 
 def _cpwer_series(m: ModelMetrics) -> CorpusSeries | None:
+    """The model's corpus cpWER series, or None when it scored no speaker datasets."""
     if "corpus_cpwer" not in m:
         return None
     errors = m.get("corpus_cp_utt_errors", [])

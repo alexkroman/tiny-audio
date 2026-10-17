@@ -17,9 +17,11 @@ class FakeHfApi:
     commits: ClassVar[list[dict[str, Any]]] = []
 
     def __init__(self, token: str | None = None) -> None:
+        """Record the token the client was constructed with."""
         FakeHfApi.tokens.append(token)
 
     def create_commit(self, **kwargs: Any) -> None:
+        """Record the commit's keyword arguments instead of uploading."""
         FakeHfApi.commits.append(kwargs)
 
 
@@ -39,6 +41,7 @@ def repo_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _uploaded(commit: dict[str, Any]) -> dict[str, str | bytes]:
+    """Map each repo path in a recorded commit to the local path or bytes it uploads."""
     ops: list[CommitOperationAdd] = commit["operations"]
     out: dict[str, str | bytes] = {}
     for op in ops:

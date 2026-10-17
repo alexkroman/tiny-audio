@@ -7,7 +7,7 @@ This module contains all projector architectures:
 from typing import overload
 
 import torch
-import torch.nn as nn
+from torch import nn
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
 # =============================================================================
@@ -108,10 +108,10 @@ class MLPAudioProjector(nn.Module):
         in_dim = encoder_dim * self.k
         # Hidden dim defaults to llm_dim, can be overridden via config
         hidden_dim: int = getattr(config, "projector_hidden_dim", None) or llm_dim
-        self.input_norm = LlamaRMSNorm(in_dim, eps=1e-6)
-        self.linear_1 = nn.Linear(in_dim, hidden_dim)
-        self.act = nn.GELU()
-        self.linear_2 = nn.Linear(hidden_dim, llm_dim)
+        self.input_norm: LlamaRMSNorm = LlamaRMSNorm(in_dim, eps=1e-6)
+        self.linear_1: nn.Linear = nn.Linear(in_dim, hidden_dim)
+        self.act: nn.GELU = nn.GELU()
+        self.linear_2: nn.Linear = nn.Linear(hidden_dim, llm_dim)
 
     @overload
     def get_output_length(self, input_length: int) -> int: ...

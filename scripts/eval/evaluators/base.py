@@ -1,6 +1,7 @@
 """Base evaluator classes and shared utilities."""
 
 import itertools
+import logging
 import os
 from collections.abc import Iterable, Iterator, Mapping
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
@@ -22,7 +23,8 @@ from scripts.eval.speaker_metrics import (
 )
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-console = Console()
+console: Console = Console()
+logger: logging.Logger = logging.getLogger(__name__)
 
 Metrics = dict[str, float]
 DatasetRow = Mapping[str, Any]
@@ -111,14 +113,15 @@ class Evaluator:
     """Base evaluator with common evaluation loop logic."""
 
     def __init__(self, audio_field: str = "audio", text_field: str = "text", num_workers: int = 1):
-        self.audio_field = audio_field
-        self.text_field = text_field
-        self.num_workers = num_workers
+        """Set the dataset column names and how many samples to transcribe concurrently."""
+        self.audio_field: str = audio_field
+        self.text_field: str = text_field
+        self.num_workers: int = num_workers
         # Set per `evaluate` call: the dataset's references are `<SPK_n>`
         # speaker-attributed, so evaluators that can should emit speakers too.
-        self.speakers = False
-        self.verbatim_scoring = False
-        self.normalizer = TextNormalizer()
+        self.speakers: bool = False
+        self.verbatim_scoring: bool = False
+        self.normalizer: TextNormalizer = TextNormalizer()
         self.results: list[EvalResult] = []
 
     def transcribe(self, audio: object) -> Transcription:
@@ -138,8 +141,8 @@ class Evaluator:
         confidence: Confidence | None = None
         try:
             prediction, inference_time, confidence = self.transcribe(audio)
-        except Exception as e:
-            print(f"Error on sample {idx}: {e}")
+        except Exception:  # one bad sample scores as an empty prediction, not a dead run
+            logger.warning("Error on sample %d", idx, exc_info=True)
             prediction, inference_time = "", 0.0
 
         norm_pred = self.normalizer.normalize(scoring_text(prediction))
@@ -219,6 +222,7 @@ class Evaluator:
             yield {"audio": sample[self.audio_field], "reference": reference}
 
     def _print_sample_log(self, prefix: str, idx: int, result: EvalResult) -> None:
+        """Print one sample's WER, latency, and normalized reference/prediction."""
         print(f"{prefix}Sample {idx}: WER={result.wer:.1f}%, Time={result.time:.2f}s")
         print(f"  Ref:  {result.norm_reference}")
         print(f"  Pred: {result.norm_prediction}")

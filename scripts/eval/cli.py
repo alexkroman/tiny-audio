@@ -13,30 +13,27 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from scripts.eval.constants import DEFAULT_DATASET, get_model_name
+from scripts.eval.constants import DEFAULT_DATASET, AssemblyAIModel, get_model_name
 from scripts.eval.datasets import (
     DATASET_REGISTRY,
     load_eval_samples,
 )
-from scripts.eval.evaluators import (
-    AppleSpeechEvaluator,
+from scripts.eval.evaluators.apple_speech import AppleSpeechEvaluator
+from scripts.eval.evaluators.asr import (
     AssemblyAIEvaluator,
-    AssemblyAIModel,
     AssemblyAIStreamingEvaluator,
     AssemblyAIStreamsEvaluator,
     DeepgramEvaluator,
     ElevenLabsEvaluator,
     EndpointEvaluator,
-    EvalResult,
-    Evaluator,
     LocalEvaluator,
     LocalStreamingEvaluator,
     SmallestEvaluator,
 )
-from scripts.eval.evaluators.base import Metrics
+from scripts.eval.evaluators.base import EvalResult, Evaluator, Metrics
 
-app = typer.Typer(add_completion=False)
-console = Console()
+app: typer.Typer = typer.Typer(add_completion=False)
+console: Console = Console()
 
 
 # `--datasets` choices, built from the registry so Click validates them and the

@@ -119,7 +119,7 @@ def current_normalizer() -> TextNormalizer | None:
     """
     try:
         return TextNormalizer()
-    except Exception as exc:  # any failure means "score as stored"
+    except (OSError, ValueError, ImportError) as exc:  # e.g. tokenizer unavailable offline
         console.print(
             f"[yellow]Could not build the eval normalizer ({exc}); scoring the stored "
             "normalized text instead. Sweeps made under different normalizer versions "
@@ -198,6 +198,7 @@ def set_error_rates(ds: DatasetMetrics, n: int | None = None) -> None:
 
 
 def _raw_pair(sample: ResultSample) -> tuple[str, str] | None:
+    """The row's raw (reference, prediction), or None if results.txt lacks either."""
     gt, pred = sample["ground_truth_raw"], sample["prediction_raw"]
     return None if gt is None or pred is None else (gt, pred)
 
@@ -252,6 +253,7 @@ def _add_sample(sample: ResultSample, ds: DatasetMetrics, by_length: dict[int, l
 
 
 def _collect_dataset(dir_path: Path, by_length: dict[int, list[float]]) -> DatasetMetrics:
+    """Score one run directory: its metrics.txt floats plus every results.txt row."""
     ds: DatasetMetrics = {"refs": [], "preds": [], "raw_pairs": [], "speaker_rows": []}
     metrics_file = dir_path / "metrics.txt"
     if metrics_file.exists():
@@ -267,6 +269,7 @@ def _collect_dataset(dir_path: Path, by_length: dict[int, list[float]]) -> Datas
 
 
 def _add_avg_latency(metrics: ModelMetrics) -> None:
+    """Set `avg_latency` to the mean of the datasets' `avg_time`, when any report one."""
     latencies = [ds["avg_time"] for ds in metrics["datasets"].values() if "avg_time" in ds]
     if latencies:
         metrics["avg_latency"] = sum(latencies) / len(latencies)
@@ -410,6 +413,7 @@ def _rescore_formatting(
 
 
 def _set_corpus_wer(m: ModelMetrics, refs: list[str], preds: list[str]) -> None:
+    """Recompute corpus WER, insertion rate and per-utterance counts from `refs`/`preds`."""
     m.pop("corpus_wer", None)
     m.pop("corpus_ins_rate", None)
     if not refs:

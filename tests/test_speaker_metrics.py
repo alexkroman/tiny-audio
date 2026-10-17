@@ -82,9 +82,10 @@ class _LowercaseNormalizer(TextNormalizer):
     """Lowercasing only; skips building Whisper's normalizer."""
 
     def __init__(self) -> None:
-        pass
+        """Skip the base constructor so no Whisper normalizer is built."""
 
     def normalize(self, text: str) -> str:
+        """Lowercase the text and nothing else."""
         return text.lower()
 
 
@@ -93,8 +94,13 @@ class _FixedEvaluator:
 
     @staticmethod
     def make(predictions: list[str]) -> Evaluator:
+        """Build an evaluator that returns `predictions[audio]`, with a lowercase normalizer."""
+
         class Fixed(Evaluator):
+            """Treats each sample's audio as an index into `predictions`."""
+
             def transcribe(self, audio: object) -> Transcription:
+                """Return the prediction at index `audio`."""
                 return predictions[cast(int, audio)], 0.0, None
 
         evaluator = Fixed()

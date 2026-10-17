@@ -24,6 +24,7 @@ def _stream(n: int) -> IterableDataset:
 
 
 def _read(samples: CachedSamples, n: int) -> list[dict[str, object]]:
+    """Take the first ``n`` rows from a fresh iteration of ``samples``."""
     return list(itertools.islice(iter(samples), n))
 
 
@@ -55,7 +56,7 @@ def test_fully_cached_run_never_streams(tmp_path: Path) -> None:
     class Exploding:
         features = None
 
-        def skip(self, n: int) -> NoReturn:
+        def skip(self, _n: int) -> NoReturn:
             msg = "streamed despite a full cache"
             raise AssertionError(msg)
 

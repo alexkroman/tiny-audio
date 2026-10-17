@@ -15,6 +15,7 @@ from scripts import bench_serve
 
 @pytest.fixture
 def wav(tmp_path: Path) -> Path:
+    """Provide a 2 s silent 16 kHz WAV file under tmp_path."""
     path = tmp_path / "clip.wav"
     soundfile.write(str(path), np.zeros(16000 * 2, dtype=np.float32), 16000)
     return path
@@ -46,7 +47,7 @@ def _fake_server(
         assert kwargs.get("trust_env") is False  # never through a local HTTPS_PROXY
         return real_client(transport=httpx.MockTransport(handler), **kwargs)
 
-    monkeypatch.setattr(bench_serve.httpx, "AsyncClient", client)
+    monkeypatch.setattr(httpx, "AsyncClient", client)
     return posted
 
 

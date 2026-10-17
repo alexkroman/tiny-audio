@@ -10,22 +10,25 @@ from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
+import torch._dynamo.config as dynamo_config
 from peft import PeftModel
 from peft.tuners.tuners_utils import BaseTuner
+from torch import nn
 from transformers import AttentionInterface, AttentionMaskInterface, StaticCache
 from transformers.integrations.sdpa_attention import sdpa_attention_forward
 from transformers.masking_utils import sdpa_mask
 
 from tiny_audio.alignment import QwenForcedAligner
 from tiny_audio.asr_modeling import ASRModel
-from tiny_audio.asr_pipeline import ASRPipeline, PreparedChunk, collate_chunks
-from tiny_audio.asr_processing import CHUNK_MAX_S
+from tiny_audio.asr_pipeline import ASRPipeline
+from tiny_audio.asr_processing import CHUNK_MAX_S, collate_chunks
+from tiny_audio.asr_types import PreparedChunk
 from tiny_audio.diarization import NemotronDiarizer
 
 if TYPE_CHECKING:
     from tiny_audio.asr_types import GenerativeDecoder
 
-logger = logging.getLogger(__name__)
+logger: logging.Logger = logging.getLogger(__name__)
 
 # Packages behind the fast path of Qwen3.5's gated-delta-rule layers (18 of its
 # 24). Without them transformers silently runs a torch reference
@@ -171,8 +174,8 @@ def gated_delta_step_(
     triton kernel aliased pointers directly made the compiled graph drop it.
     """
     # CUDA-only dependencies, installed on the pod by `ta runpod deploy`.
-    import triton  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
-    from fla.ops.gated_delta_rule.fused_recurrent import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
+    import triton  # noqa: PLC0415
+    from fla.ops.gated_delta_rule.fused_recurrent import (  # noqa: PLC0415
         fused_recurrent_gated_delta_rule_fwd_kernel,
     )
 
@@ -226,6 +229,8 @@ def _(
     scale: float,
     use_qk_l2norm: bool,
 ) -> torch.Tensor:
+    """Shape-only stand-in for `gated_delta_step_` under tracing: output matches `v`."""
+    del q, k, g, beta, state, scale, use_qk_l2norm  # the op's signature; only `v` shapes the output
     return torch.empty_like(v)
 
 
@@ -414,7 +419,7 @@ def load_serving_pipeline(
     model = ASRModel.from_pretrained(model_id)
     merge_lora_adapters(model)
     # PreTrainedModel.to is functools.wraps'd, which pyright cannot bind as a method.
-    model.to(device)  # pyright: ignore[reportArgumentType]
+    cast(nn.Module, model).to(device)
     model.eval()
     contiguous_lm_head_input(model)
     if device.type == "mps":
@@ -455,24 +460,24 @@ class GraphedDecoder:
     """
 
     def __init__(self, pipe: ASRPipeline, max_batch_size: int) -> None:
+        """Pick the batch buckets and size both cache tiers for `pipe`'s model."""
         self.pipe = pipe
         top = max(1, max_batch_size)
         sizes = [1 << i for i in range(top.bit_length())]
         sizes += [3 * s // 2 for s in sizes if s >= 4]
-        self.buckets = sorted({*(b for b in sizes if b < top), top})
+        self.buckets: list[int] = sorted({*(b for b in sizes if b < top), top})
         # Every bucket is a recompile of the one decode frame, short tier and
         # full, and dynamo's default limit of 8 would quietly run the rest
         # eagerly (no CUDA graph, correct but several times slower).
-        dynamo_config = torch._dynamo.config  # pyright: ignore[reportPrivateUsage]
         dynamo_config.recompile_limit = max(
             dynamo_config.recompile_limit, 2 * len(self.buckets) + 4
         )
         model = pipe.model
-        self.eos_ids = set(_as_list(model.generation_config.eos_token_id))
+        self.eos_ids: set[int] = set(_as_list(model.generation_config.eos_token_id))
         # Full tier: every token generate may add, plus the longest prompt (an
         # 18 s chunk with lead-in is ~253 tokens) with headroom.
-        self.full_budget = int(model.generation_config.max_new_tokens)
-        self.full_cache_len = self.full_budget + 384
+        self.full_budget: int = int(model.generation_config.max_new_tokens)
+        self.full_cache_len: int = self.full_budget + 384
         # Short tier, the default: attention over the static cache costs per
         # slot, filled or not, so a 416-slot cache decodes a batch-32 step in
         # 10.6 ms against 640's 12.1. Its 128-token budget covers 11,999 of the
@@ -481,16 +486,17 @@ class GraphedDecoder:
         # Calibrated on the longest chunk the pipeline cuts (prompt length
         # grows with audio), so any chunk up to that length fits.
         longest = pipe.prepare_chunk(np.zeros(int(CHUNK_MAX_S * 16000), np.float32), 16000)
-        self.short_max_frames = int(longest["attention_mask"].shape[-1])
-        self.short_enabled = prompt_tokens(pipe, longest) + SHORT_BUDGET <= SHORT_CACHE_LEN
+        self.short_max_frames: int = int(longest["attention_mask"].shape[-1])
+        self.short_enabled: bool = prompt_tokens(pipe, longest) + SHORT_BUDGET <= SHORT_CACHE_LEN
         self._caches: dict[tuple[int, int], StaticCache] = {}
-        self.redone = 0  # rows re-decoded on the full tier (for /stats-style logging)
+        self.redone: int = 0  # rows re-decoded on the full tier (for /stats-style logging)
 
     def bucket(self, n: int) -> int:
         """The smallest bucket that holds `n` chunks."""
         return next(b for b in self.buckets if b >= n)
 
     def _cache(self, size: int, length: int) -> StaticCache:
+        """The cache for a (bucket, length) pair, reset if reused so its graph stays valid."""
         cache = self._caches.get((size, length))
         if cache is None:
             config = self.pipe.model.language_model.config
@@ -513,7 +519,9 @@ class GraphedDecoder:
             past_key_values=self._cache(size, cache_len),
             max_new_tokens=budget,
         )
-        assert torch.is_tensor(tokens)  # no output_scores: plain token ids
+        if not isinstance(tokens, torch.Tensor):  # no output_scores: plain token ids
+            msg = f"generate returned {type(tokens).__name__}, expected token ids"
+            raise TypeError(msg)
         rows = tokens[: len(prepared)].cpu()
         texts = [self.pipe.postprocess({"tokens": row})["text"] for row in rows]
         cut = [row.shape[-1] >= budget and not self.eos_ids & set(row.tolist()) for row in rows]
@@ -523,6 +531,7 @@ class GraphedDecoder:
     # in-place reset of an inference tensor must happen under it too.
     @torch.inference_mode()
     def __call__(self, prepared: list[PreparedChunk]) -> list[str]:
+        """Transcribe chunks on the short tier, redoing any row it cut off on the full tier."""
         longest = max(int(p["attention_mask"].shape[-1]) for p in prepared)
         if not self.short_enabled or longest > self.short_max_frames:
             return self._decode(prepared, self.full_cache_len, self.full_budget)[0]
@@ -551,6 +560,7 @@ class GraphedDecoder:
 
 
 def _as_list(ids: int | list[int] | None) -> list[int]:
+    """Normalize a generation config's `eos_token_id` (int, list, or unset) to a list."""
     if ids is None:
         return []
     return [ids] if isinstance(ids, int) else list(ids)
@@ -561,7 +571,7 @@ def prompt_tokens(pipe: ASRPipeline, prepared: PreparedChunk) -> int:
     batch = collate_chunks([prepared])
     model = pipe.model
     with torch.inference_mode():
-        input_ids, _, _ = model._prepare_audio_inputs(  # pyright: ignore[reportPrivateUsage]
+        input_ids, _, _ = model.prepare_audio_inputs(
             batch["input_features"].to(model.device), batch["attention_mask"].to(model.device)
         )
     return int(input_ids.shape[1])

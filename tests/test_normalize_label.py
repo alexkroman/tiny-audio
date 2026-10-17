@@ -23,6 +23,8 @@ from scripts.labels import (
 
 
 class TestGigaspeechPunctTags:
+    """Gigaspeech punct-tag restoration leaves contractions intact."""
+
     def test_apostrophe_preserved_with_punct_tags(self) -> None:
         # Gigaspeech preserves contractions; tag restoration shouldn't disturb them.
         result = normalize_label("THEY'RE LEAVING <COMMA> AREN'T THEY <QUESTIONMARK>")
@@ -58,6 +60,8 @@ class TestNonSpeechTags:
 
 
 class TestConditionalTruecase:
+    """Mono-case labels long enough to judge are truecased; cased ones are left alone."""
+
     def test_all_uppercase_gets_recased(self) -> None:
         # Gigaspeech / AMI style — should be lifted to proper case.
         result = normalize_label("THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG")
@@ -91,6 +95,8 @@ class TestConditionalTruecase:
 
 
 class TestResidualMarkers:
+    """Leftover angle-bracket markers such as <laugh> and <inaudible> are stripped."""
+
     def test_switchboard_laugh_stripped(self) -> None:
         assert "<LAUGH>" not in normalize_label("yeah <LAUGH> you know to death")
         assert "<laugh>" not in normalize_label("yeah <laugh> you know to death")
@@ -139,6 +145,8 @@ class TestUnicodeCleanup:
 
 
 class TestEdgeCases:
+    """None and marker-only labels normalize to the empty string."""
+
     def test_none_input(self) -> None:
         assert normalize_label(None) == ""
 

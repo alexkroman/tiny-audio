@@ -2,6 +2,7 @@
 """Unified CLI for RunPod operations."""
 
 import io
+import logging
 import shlex
 import subprocess
 import sys
@@ -10,8 +11,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
+import fabric
 import typer
-from fabric import Connection
 from invoke.exceptions import UnexpectedExit
 from rich.prompt import Prompt
 from tenacity import RetryError, retry, stop_after_attempt, wait_fixed
@@ -22,7 +23,11 @@ from scripts.deploy.pods import SERVE_PORT
 from scripts.eval.constants import DEFAULT_DATASET, AssemblyAIModel, get_model_name
 from scripts.utils import get_project_root
 
-app = typer.Typer(help="Train and evaluate on remote RunPod pods.", add_completion=False)
+app: typer.Typer = typer.Typer(
+    help="Train and evaluate on remote RunPod pods.", add_completion=False
+)
+
+logger: logging.Logger = logging.getLogger(__name__)
 
 SSH_KEY_PATH = "~/.ssh/id_ed25519"
 SSH_CONNECT_ATTEMPTS = 3
@@ -46,11 +51,12 @@ DEFAULT_IMAGE = "runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404"
 
 
 def _auto_session_name(prefix: str) -> str:
+    """Name a tmux session `<prefix>_<UTC YYYYmmdd_HHMM>` so repeated launches don't collide."""
     timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M")
     return f"{prefix}_{timestamp}"
 
 
-def _put_text(conn: Connection, text: str, remote: str) -> None:
+def _put_text(conn: fabric.Connection, text: str, remote: str) -> None:
     """Upload a string to `remote` over SFTP.
 
     Encode to bytes ourselves rather than handing `put` an `io.StringIO`.
@@ -64,7 +70,7 @@ def _put_text(conn: Connection, text: str, remote: str) -> None:
     conn.put(io.BytesIO(text.encode("utf-8")), remote=remote)
 
 
-def _prepare_session(conn: Connection, session_name: str, force: bool, hf_token: str) -> str:
+def _prepare_session(conn: fabric.Connection, session_name: str, force: bool, hf_token: str) -> str:
     """Shared launch preamble: optionally kill a same-named session, warn on no token."""
     if force:
         print(f"Killing existing session '{session_name}' if present...")
@@ -75,7 +81,7 @@ def _prepare_session(conn: Connection, session_name: str, force: bool, hf_token:
 
 
 def _start_remote_tmux_script(
-    conn: Connection,
+    conn: fabric.Connection,
     host: str,
     port: int,
     session_name: str,
@@ -101,9 +107,9 @@ def _start_remote_tmux_script(
         attach_tmux_session(host, port, session_name)
 
 
-def get_connection(host: str, port: int) -> Connection:
+def get_connection(host: str, port: int) -> fabric.Connection:
     """Create a Fabric connection with standard SSH settings."""
-    return Connection(
+    return fabric.Connection(
         host=host,
         user="root",
         port=port,
@@ -116,7 +122,7 @@ def get_connection(host: str, port: int) -> Connection:
     )
 
 
-def test_connection(conn: Connection) -> bool:
+def test_connection(conn: fabric.Connection) -> bool:
     """Test SSH connection to the remote host."""
     print(f"Testing SSH connection to {conn.host}:{conn.port}...")
 
@@ -135,7 +141,7 @@ def test_connection(conn: Connection) -> bool:
     return True
 
 
-def connect(host: str, port: int) -> Connection:
+def connect(host: str, port: int) -> fabric.Connection:
     """Open and verify the SSH connection every pod command starts with."""
     conn = get_connection(host, port)
     if not test_connection(conn):
@@ -143,7 +149,7 @@ def connect(host: str, port: int) -> Connection:
     return conn
 
 
-def list_tmux_sessions(conn: Connection) -> list[str]:
+def list_tmux_sessions(conn: fabric.Connection) -> list[str]:
     """Get list of tmux session names on remote host."""
     result = conn.run('tmux list-sessions -F "#S" 2>/dev/null', hide=True, warn=True)
     if result.ok and result.stdout.strip():
@@ -151,13 +157,13 @@ def list_tmux_sessions(conn: Connection) -> list[str]:
     return []
 
 
-def kill_tmux_session(conn: Connection, session_name: str) -> bool:
+def kill_tmux_session(conn: fabric.Connection, session_name: str) -> bool:
     """Kill a tmux session by name. Returns True if killed, False if not found."""
     result = conn.run(f"tmux kill-session -t {shlex.quote(session_name)}", hide=True, warn=True)
     return result.ok
 
 
-def get_tmux_logs(conn: Connection, session_name: str, lines: int = 100) -> str | None:
+def get_tmux_logs(conn: fabric.Connection, session_name: str, lines: int = 100) -> str | None:
     """Capture recent output from a tmux session."""
     result = conn.run(
         f"tmux capture-pane -t {shlex.quote(session_name)} -p -S -{lines}",
@@ -225,7 +231,7 @@ def _gitignore_aware_file_list(project_root: Path) -> str:
     return "\n".join(lines) + ("\n" if lines else "")
 
 
-def setup_remote_environment(conn: Connection) -> None:
+def setup_remote_environment(conn: fabric.Connection) -> None:
     """Install system dependencies the base RunPod image is missing.
 
     apt-get install is idempotent, so this is a no-op when packages are already
@@ -240,7 +246,7 @@ def setup_remote_environment(conn: Connection) -> None:
     print("Remote environment setup complete!")
 
 
-def sync_project(conn: Connection, project_root: Path) -> None:
+def sync_project(conn: fabric.Connection, project_root: Path) -> None:
     """Sync project files to the RunPod instance using rsync.
 
     File set comes from git so gitignore is honored exactly. ``--delete`` is
@@ -279,7 +285,7 @@ def sync_project(conn: Connection, project_root: Path) -> None:
     print("Project synced successfully!")
 
 
-def install_dependencies(conn: Connection) -> None:
+def install_dependencies(conn: fabric.Connection) -> None:
     """Install Python dependencies on top of the base RunPod image.
 
     Trusts the base image to provide a CUDA-enabled PyTorch and Python; we only
@@ -425,7 +431,7 @@ def deploy(
     print(f"To connect: ssh -i ~/.ssh/id_ed25519 -p {port} root@{host}")
 
 
-def _remote_free_gib(conn: Connection, path: str = "/workspace") -> float | None:
+def _remote_free_gib(conn: fabric.Connection, path: str = "/workspace") -> float | None:
     """Free space on the filesystem backing `path`, in GiB (None if unreadable)."""
     result = conn.run(f"df -Pk {path} | tail -1", hide=True, warn=True)
     if not result.ok:
@@ -444,7 +450,7 @@ def _remote_free_gib(conn: Connection, path: str = "/workspace") -> float | None
 _REMOTE_CACHE_DIRS = ("/workspace/datasets", "/workspace/.cache/huggingface")
 
 
-def _remote_used_gib(conn: Connection, paths: tuple[str, ...]) -> float:
+def _remote_used_gib(conn: fabric.Connection, paths: tuple[str, ...]) -> float:
     """GiB already materialized under `paths` on the pod (0 if unreadable).
 
     `du` walks metadata, and /workspace is often a network volume holding a
@@ -464,7 +470,9 @@ def _remote_used_gib(conn: Connection, paths: tuple[str, ...]) -> float:
     return total_kb / (1024**2)
 
 
-def _check_remote_disk(conn: Connection, experiment: str | None, overrides: list[str]) -> None:
+def _check_remote_disk(
+    conn: fabric.Connection, experiment: str | None, overrides: list[str]
+) -> None:
     """Refuse to start a run that /workspace cannot physically hold.
 
     ENOSPC does not surface at launch. It surfaces hours later as an xet
@@ -482,8 +490,9 @@ def _check_remote_disk(conn: Connection, experiment: str | None, overrides: list
         return
     try:
         need = deploy_plan.build_plan(experiment, overrides, 512).disk["recommended"]
-    except Exception as exc:  # unresolvable config, gated repo, Hub outage
+    except Exception as exc:  # best effort: a preflight never blocks the deploy
         print(f"Disk preflight skipped ({type(exc).__name__}: {exc}).")
+        logger.debug("Disk preflight failed", exc_info=True)
         return
 
     # `need` is the size of a run starting from an empty pod. Re-running an

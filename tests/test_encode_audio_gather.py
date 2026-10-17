@@ -25,6 +25,8 @@ def _gather_reference(audio_embeds: torch.Tensor, token_counts: torch.Tensor) ->
 
 
 class TestGatherAudioEmbeds:
+    """_gather_audio_embeds matches the per-sample loop, including zero and overlong counts."""
+
     def test_matches_reference_balanced_batch(self) -> None:
         torch.manual_seed(0)
         embeds = torch.randn(4, 10, 8)

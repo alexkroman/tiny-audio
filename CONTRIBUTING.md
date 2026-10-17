@@ -138,6 +138,7 @@ tiny-audio/
 │   ├── asr_modeling.py      # ASRModel: encoder + projector + decoder
 │   ├── asr_layers.py        # MPS-safe embeddings, encoder top-layer unfreezing
 │   ├── asr_attention.py     # attn_implementation choice (FA2 / sdpa / eager)
+│   ├── asr_text.py          # Transcript cleanup (repetition loops)
 │   ├── asr_types.py         # Typing aliases, protocols and TypedDicts
 │   ├── asr_config.py        # ASRConfig: all model settings
 │   ├── asr_pipeline.py      # HuggingFace pipeline for inference
@@ -175,27 +176,77 @@ poetry run pytest -k "test_forward" -v    # By name pattern
 ### Code Quality
 
 ```bash
-poetry run ta dev format      # Format code (black, ruff, mdformat)
-poetry run ta dev lint        # Lint + format check (poetry check --lock, ruff, black, yamllint, taplo,
-                              #   actionlint, zizmor, mdformat --check)
-poetry run ta dev type-check  # Type check (pyright, strict)
-poetry run ta dev check       # Lint + type-check + security + dead code + duplication + ratchets
-                              #   + deptry + docstrings
-poetry run ta dev precommit   # Full quality gate
+poetry run ta dev format       # Format code (black, ruff, mdformat)
+poetry run ta dev lint         # Lint + format check (poetry check --lock, ruff, black, yamllint, taplo,
+                               #   actionlint, zizmor, mdformat --check, shellcheck)
+poetry run ta dev type-check   # Type check (pyright, strict)
+poetry run ta dev check        # Lint + type-check + security + dead code + duplication + ratchets
+                               #   + invariants + deptry + docstrings
+poetry run ta dev precommit    # Full quality gate
+poetry run ta dev install-hooks  # Install the pre-commit and pre-push git hooks
 ```
 
-`ta dev check` and `ta dev test` also run three ratchets (`scripts/quality.py`), each against a
-baseline committed under `quality/` that may only improve:
+`ta dev check` runs every check even after one fails and lists the failures at the end, so one run
+reports everything.
+
+`tiny_audio/`, `scripts/` and `tests/` go through the same gates with the same thresholds: ruff,
+black and strict pyright, bandit, vulture, duplication (within and across the three), 95% docstring
+coverage for each tree on its own, coverage with per-file floors, and the ratchets below. Docstrings
+are not required on nested functions or on `test_*` functions, whose names say what they check.
+
+`ta dev check` and `ta dev test` also run ratchets (`scripts/quality.py`), each against a baseline
+committed under `quality/` that may only improve:
 
 - **File length:** Python files are capped at 600 code lines; files already over it may not grow.
 - **Per-file coverage:** each file keeps its recorded line coverage, and new files need 50%. Runs
   after the tests, from `coverage.json`.
 - **Test assertions:** every test must assert something (an `assert`, `pytest.raises`, a mock
   `assert_*`, or a call to a guard such as `_require_*`).
+- **Escape hatches:** each file has a budget of `# noqa`, `# pyright: ignore`, `# type: ignore`,
+  `# nosec` and `# pragma: no cover` comments that may only shrink.
+- **Module tests:** every module under `tiny_audio/` and `scripts/` is imported (or named, for a
+  `monkeypatch` target) by a test; coverage reached through another module's test does not count.
+- **Type completeness:** the share of `tiny_audio`'s and `scripts`' public API with fully known
+  types (`pyright --verifytypes`) may only rise.
+- **Tracked-ignored:** no tracked file may match a `.gitignore` rule.
+- **Owning imports:** repo code imports each name from the module that defines it, not from one that
+  happens to import it, and monkeypatch targets name the owner (`subprocess.run`, not
+  `scripts.dev.subprocess.run`). A target that ends at the consumer's own binding
+  (`tiny_audio.asr_pipeline.ffmpeg_read`) is how you patch where a name is used, and is allowed.
 
-After an intended improvement, refresh a baseline with `ta dev quality file-length --update` or
-`ta dev quality coverage-floors --update` (record coverage floors from a run with Hub access) and
-commit the diff.
+Ruff also enforces Python idioms beyond style: no `assert` outside tests (it vanishes under
+`python -O`), no blind `except Exception` unless the handler logs the traceback, `_name` for
+arguments a signature forces on you, `@pytest.mark.usefixtures` for fixtures used only for their
+side effect, no commented-out code, seeded `np.random.default_rng`, and no `print` in `tiny_audio/`.
+
+After an intended improvement, refresh a baseline with `ta dev quality <check> --update` (record
+coverage floors from a run with Hub access) and commit the diff. `--update` for escape hatches and
+module tests only records improvements; raising a budget is a hand edit, visible in review.
+
+`ta dev quality invariants` (`scripts/invariants.py`) checks facts restated in several files (the
+transformers commit, the torch and Poetry versions) and settled decisions recorded in
+`pyproject.toml` comments (the liger-kernel floor, the nltk ceiling, the optional hybrid-attention
+kernels). If a decision changes, change its rule in the same diff. The docs' code blocks (README,
+model card, this file, `docs/`) are compiled and their `ta` commands parsed by
+`tests/test_course_code.py`, the same as the course's.
+
+The pre-push hook (`ta dev prepush`) refuses a push from `main`, from a branch behind `origin/main`,
+or from one that conflicts with it.
+
+For modules already near full coverage, mutation testing shows which lines run without their result
+being checked. It is opt-in and slow:
+
+```bash
+poetry run ta dev mutate tiny_audio/projectors.py --max 40
+```
+
+Each surviving mutant is a behaviour change no test noticed; some are equivalent (they cannot change
+behaviour), so treat the list as a to-do list, not a gate.
+
+Claude Code sessions load `.claude/CLAUDE.md` and the `project-guardrails` skill, and
+`.claude/settings.json` runs two hooks: edits to `poetry.lock` and `quality/*.json` are refused, and
+each edited Python file is formatted and linted with ruff. The `guardrails-reviewer` agent reviews a
+diff against the settled decisions.
 
 ### Adding a New Projector
 

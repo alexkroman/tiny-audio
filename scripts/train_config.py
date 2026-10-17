@@ -59,6 +59,8 @@ class DatasetConfig:
 
 @dataclass
 class DataConfig:
+    """The `data:` block: which sources to load and how DatasetLoader prepares them."""
+
     datasets: list[DatasetConfig] = field(default_factory=list[DatasetConfig])
     sample_rate: int = 16000
     dataset_cache_dir: str | None = None
@@ -108,6 +110,8 @@ class ModelConfig:
 
 @dataclass
 class TrainingConfig:
+    """The `training:` block: train.py's own knobs plus HF `TrainingArguments` fields."""
+
     # ---- read by scripts/train.py itself, not by TrainingArguments --------
     use_liger: bool = True
     allow_unfused_ce: bool = False
@@ -192,12 +196,15 @@ class TrainingConfig:
 
 @dataclass
 class Config:
+    """The root schema, registered as `base_config`: `model`, `data` and `training`."""
+
     model: ModelConfig = field(default_factory=ModelConfig)
     data: DataConfig = field(default_factory=DataConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
 
 
 def register_configs() -> None:
+    """Store `Config` in Hydra's ConfigStore as `base_config` for configs/config.yaml."""
     ConfigStore.instance().store(name="base_config", node=Config)
 
 

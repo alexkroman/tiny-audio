@@ -36,17 +36,21 @@ class FakeHfApi:
     space_calls: ClassVar[list[tuple[object, ...]]] = []
 
     def create_repo(self, **kwargs: object) -> None:
+        """Record the create_repo keyword arguments."""
         FakeHfApi.create_repo_calls.append(kwargs)
 
     def add_space_variable(self, repo_id: str, key: str, value: str) -> None:
+        """Record a Space variable as ``("variable", repo_id, key, value)``."""
         FakeHfApi.space_calls.append(("variable", repo_id, key, value))
 
     def request_space_hardware(self, repo_id: str, hardware: SpaceHardware) -> None:
+        """Record a hardware request as ``("hardware", repo_id, hardware)``."""
         FakeHfApi.space_calls.append(("hardware", repo_id, hardware))
 
 
 @pytest.fixture
 def demo_dir(tmp_path: Path) -> Path:
+    """Provide a tmp demo directory holding placeholder app.py, requirements.txt and README."""
     for name in ("app.py", "requirements.txt", "README.md"):
         (tmp_path / name).write_text(name)
     return tmp_path
@@ -54,6 +58,10 @@ def demo_dir(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def uploads(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    """Swap in FakeHfApi and a fake upload_folder; return the list of upload kwargs.
+
+    Also resets FakeHfApi's class-level call logs so each test starts empty.
+    """
     FakeHfApi.create_repo_calls = []
     FakeHfApi.space_calls = []
     calls: list[dict[str, object]] = []
@@ -102,9 +110,8 @@ def test_deploy_creates_space_and_uploads(
     assert FakeHfApi.space_calls == []
 
 
-def test_deploy_with_endpoint_points_space_at_it(
-    demo_dir: Path, uploads: list[dict[str, object]]
-) -> None:
+@pytest.mark.usefixtures("uploads")
+def test_deploy_with_endpoint_points_space_at_it(demo_dir: Path) -> None:
     """--endpoint-url sets the Space's ENDPOINT_URL and drops it to CPU hardware."""
     url = "https://abc123-8000.proxy.runpod.net"
     hf_space.deploy(repo_id="me/demo", demo_dir=demo_dir, endpoint_url=url)

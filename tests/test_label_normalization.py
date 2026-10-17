@@ -93,6 +93,8 @@ class TestNonSpeechTagStripping:
 
 
 class TestGigaspeechEdgeCases:
+    """A punct tag at the very start, and any unknown <...> token, are handled."""
+
     def test_punct_tag_at_start_no_leading_space(self) -> None:
         # `\s*` in the regex matches zero-width at string start.
         # Resulting `.Boost` is unusual but a literal consequence of the
@@ -109,6 +111,8 @@ class TestGigaspeechEdgeCases:
 
 
 class TestCombinedNormalization:
+    """Percent handling and Gigaspeech punct tags compose, with truecasing still applied."""
+
     def test_percent_and_gigaspeech_marker(self) -> None:
         # Now that `%` survives, no lowercase "percent" is appended, so the
         # text stays ALL-CAPS → upper_frac > 0.9 → truecase FIRES. Under the
@@ -121,6 +125,8 @@ class TestCombinedNormalization:
 
 
 class TestHygiene:
+    """Whitespace is trimmed and collapsed; empty and already-cased input pass cleanly."""
+
     def test_strips_leading_trailing_whitespace(self) -> None:
         assert normalize_label("   hello world   ") == "Hello world"
 

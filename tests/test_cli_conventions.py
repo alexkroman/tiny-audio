@@ -67,12 +67,14 @@ _LEAF_IDS = [" ".join(path) for path, _ in _LEAVES]
 
 
 def _options(command: _click.Command) -> Iterator[typer.core.TyperOption]:
+    """Yield the command's own options, skipping built-ins such as `--help`."""
     for param in command.params:
         if param.param_type_name == "option" and not set(param.opts) & _BUILTIN_OPTIONS:
             yield cast(typer.core.TyperOption, param)
 
 
 def _arguments(command: _click.Command) -> list[typer.core.TyperArgument]:
+    """Return the command's positional arguments."""
     return [
         cast(typer.core.TyperArgument, p) for p in command.params if p.param_type_name == "argument"
     ]

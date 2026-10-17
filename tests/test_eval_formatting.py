@@ -21,6 +21,8 @@ from scripts.eval.formatting import (
 
 
 class TestScorability:
+    """A reference is case-scorable only if mixed case, punct-scorable only if punctuated."""
+
     @pytest.mark.parametrize(
         ("text", "expected"),
         [
@@ -48,6 +50,8 @@ class TestScorability:
 
 
 class TestLightNormalize:
+    """`light_normalize` collapses whitespace but keeps case and punctuation attached."""
+
     def test_preserves_case_and_punctuation(self) -> None:
         assert light_normalize("  Hello,   World!  ") == "Hello, World!"
 
@@ -61,6 +65,8 @@ class TestLightNormalize:
 
 
 class TestAlignment:
+    """Word pairing ignores punctuation-only tokens and follows Levenshtein alignment."""
+
     def test_leading_punctuation_only_token_does_not_shift_pairs(self) -> None:
         """Regression: jiwer dropped the empty key of `...` on split, so every
         later pair was off by one (`'Hello'` paired with `'world.'`)."""
@@ -86,6 +92,8 @@ class TestAlignment:
 
 
 class TestCaseScoring:
+    """`score_case` counts case-only differences on correctly recognized words."""
+
     def test_perfect_casing(self) -> None:
         assert score_case("Hello World", "Hello World") == (0, 2)
 
@@ -111,6 +119,8 @@ class TestCaseScoring:
 
 
 class TestPunctScoring:
+    """`score_punct` returns (true positives, predicted, actual) punctuation mark counts."""
+
     def test_exact_match(self) -> None:
         tp, pred, act = score_punct("Hello, world.", "Hello, world.")
         assert (tp, pred, act) == (2, 2, 2)
@@ -130,8 +140,11 @@ class TestPunctScoring:
 
 
 class TestAggregate:
+    """Corpus metrics are reported only over enough scorable references, else omitted."""
+
     @staticmethod
     def _pairs(n: int, ref: str, hyp: str) -> list[tuple[str, str]]:
+        """Repeat one (reference, hypothesis) pair `n` times."""
         return [(ref, hyp)] * n
 
     def test_monocase_corpus_reports_no_casing_number(self) -> None:

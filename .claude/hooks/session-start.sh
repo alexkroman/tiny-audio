@@ -23,7 +23,10 @@ if command -v python3.12 >/dev/null 2>&1; then
 else
   command -v uv >/dev/null 2>&1 || python3 -m pip install --quiet --user uv
   uv python install 3.12
-  poetry env use "$(uv python find 3.12)"
+  # Its own statement: inside an argument, a failing `uv python find` would
+  # not stop `set -e`, and poetry would be handed an empty path.
+  python312="$(uv python find 3.12)"
+  poetry env use "${python312}"
 fi
 
 poetry install --with dev --no-interaction

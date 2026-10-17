@@ -16,6 +16,7 @@ from scripts.deploy.hub_sizes import (
 
 
 def _tensor(dtype: str, shape: tuple[int, ...]) -> SimpleNamespace:
+    """Fake a safetensors tensor-info entry with its parameter count."""
     count = 1
     for dim in shape:
         count *= dim
@@ -62,17 +63,20 @@ def test_safetensors_params_counts_every_float_tensor(fake_metadata: list[str]) 
     assert fake_metadata == ["org/decoder"]
 
 
-def test_safetensors_params_drops_unloaded_towers(fake_metadata: list[str]) -> None:
+@pytest.mark.usefixtures("fake_metadata")
+def test_safetensors_params_drops_unloaded_towers() -> None:
     total, _ = safetensors_params("org/decoder", NON_LM_TOWER_PREFIXES)
     assert total == 800 + 64 + 128 + 8 + 800
 
 
-def test_lora_all_linear_adapts_body_linears_only(fake_metadata: list[str]) -> None:
+@pytest.mark.usefixtures("fake_metadata")
+def test_lora_all_linear_adapts_body_linears_only() -> None:
     # q_proj (8x8) and up_proj (16x8); not embed, lm_head, norms or the vision tower.
     assert lora_trainable_params("org/decoder", 4, "all-linear") == 4 * (8 + 8) + 4 * (16 + 8)
 
 
-def test_lora_named_targets_match_module_suffix(fake_metadata: list[str]) -> None:
+@pytest.mark.usefixtures("fake_metadata")
+def test_lora_named_targets_match_module_suffix() -> None:
     assert lora_trainable_params("org/decoder", 2, ["q_proj"]) == 2 * (8 + 8)
     assert lora_trainable_params("org/decoder", 2, None) == 0
 
@@ -84,6 +88,7 @@ def test_vocab_table_params_reports_only_present_tables() -> None:
 
 
 def _info(*files: tuple[str, int | None]) -> SimpleNamespace:
+    """Fake a `model_info` result whose siblings are the given (filename, size) pairs."""
     return SimpleNamespace(
         siblings=[SimpleNamespace(rfilename=name, size=size) for name, size in files]
     )
@@ -102,7 +107,7 @@ def test_repo_weight_bytes_sums_model_files(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_repo_weight_bytes_scopes_dataset_to_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    def dataset_info(repo_id: str, files_metadata: bool) -> SimpleNamespace:
+    def dataset_info(*_args: object, **_kwargs: object) -> SimpleNamespace:
         return _info(("small/0.parquet", 3), ("Large/0.parquet", 100), ("Large/1.parquet", 50))
 
     monkeypatch.setattr(hub_sizes, "dataset_info", dataset_info)

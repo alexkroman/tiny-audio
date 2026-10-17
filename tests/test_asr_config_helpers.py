@@ -135,15 +135,10 @@ class TestASRConfigDefaults:
         assert cfg.model_dtype == "bfloat16"
 
     def test_lora_targets_default_to_all_linear_layers(self) -> None:
-        assert make_config().lora_target_modules == [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-            "o_proj",
-            "gate_proj",
-            "up_proj",
-            "down_proj",
-        ]
+        attention = {f"{x}_proj" for x in "qkvo"}
+        mlp = {"gate_proj", "up_proj", "down_proj"}
+        targets = make_config().lora_target_modules
+        assert sorted(targets) == sorted(attention | mlp)
 
     def test_custom_lora_targets_kept(self) -> None:
         assert make_config(lora_target_modules=["q_proj"]).lora_target_modules == ["q_proj"]

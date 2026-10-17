@@ -12,12 +12,21 @@ import logging
 from typing import Any
 
 import torch
-from transformers import AutoConfig
+from transformers import AutoConfig, PretrainedConfig
 
-logger = logging.getLogger(__name__)
+logger: logging.Logger = logging.getLogger(__name__)
 
 # FlashAttention's kernels are compiled for head dimensions up to 256.
 FLASH_ATTENTION_MAX_HEAD_DIM = 256
+
+
+def active_attn_implementation(config: PretrainedConfig) -> object:
+    """The attention kernel a loaded model runs (e.g. "sdpa"), read from its config.
+
+    transformers exposes it only as the private `_attn_implementation` field,
+    so this is the one place that reads it.
+    """
+    return config._attn_implementation  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
 
 
 def _max_attention_head_dim(text_config: object) -> int | None:
@@ -35,8 +44,9 @@ def _max_attention_head_dim(text_config: object) -> int | None:
     else:
         try:
             dims = [getattr(text_config, "head_dim", None)]
-        except Exception:
-            # Raised by the heterogeneity guard; treated as "unknown".
+        except RuntimeError:
+            # transformers' AmbiguousGlobalPerLayerAttributeError (a RuntimeError)
+            # from the heterogeneity guard; treated as "unknown".
             dims = []
     usable = [d for d in dims if isinstance(d, int) and d > 0]
     return max(usable) if usable else None
@@ -72,6 +82,7 @@ def _has_sliding_window_attention(model_id: str) -> bool:
             "Could not read the config for %s to check for sliding-window "
             "attention; assuming it has some and using eager attention on MPS.",
             model_id,
+            exc_info=True,
         )
         return True
 

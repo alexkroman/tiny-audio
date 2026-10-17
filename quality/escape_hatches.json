@@ -1,0 +1,25 @@
+{
+  "noqa": {
+    "demo/app.py": 2,
+    "docs/site/course_code.py": 5,
+    "scripts/inference.py": 2,
+    "tests/conftest.py": 1,
+    "tests/offline_assets.py": 2,
+    "tests/test_inference.py": 1,
+    "tiny_audio/asr_attention.py": 1
+  },
+  "nosec": {
+    "scripts/eval/build_ami_meetings.py": 1,
+    "scripts/eval/evaluators/asr.py": 1
+  },
+  "pyright: ignore": {
+    "demo/app.py": 3,
+    "scripts/train.py": 1,
+    "tests/conftest.py": 1,
+    "tests/test_asr_modeling_helpers.py": 1,
+    "tiny_audio/alignment.py": 1,
+    "tiny_audio/asr_attention.py": 1,
+    "tiny_audio/asr_modeling.py": 2,
+    "tiny_audio/asr_pipeline.py": 1
+  }
+}

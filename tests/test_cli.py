@@ -21,6 +21,7 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def _clean(text: str) -> str:
+    """Strip ANSI color codes from ``text``."""
     return _ANSI_RE.sub("", text)
 
 

@@ -1,4 +1,4 @@
-"""The course's code examples, checked by docs/site/course_code.py."""
+"""The course's and the docs' code examples, checked by docs/site/course_code.py."""
 
 from pathlib import Path
 
@@ -8,11 +8,14 @@ from docs.site import course_code
 
 
 def _block(lang: str, code: str) -> course_code.CodeBlock:
+    """Wrap `code` as a block on line 1 of a fake course page."""
     page = course_code.ROOT / "docs" / "course" / "example.md"
     return course_code.CodeBlock(page, 1, lang, code)
 
 
 class TestCourseExamples:
+    """Every code block in docs/course covers each checked language and passes its check."""
+
     BLOCKS = course_code.course_blocks()
 
     def test_course_has_examples_of_every_checked_language(self) -> None:
@@ -23,7 +26,24 @@ class TestCourseExamples:
         assert course_code.check_block(block) == []
 
 
+class TestDocExamples:
+    """README, MODEL_CARD, CONTRIBUTING, docs/*.md and the agent guides, same checks."""
+
+    BLOCKS = course_code.doc_blocks()
+
+    def test_covers_the_top_level_pages_and_skips_the_course(self) -> None:
+        pages = {block.path.relative_to(course_code.ROOT).as_posix() for block in self.BLOCKS}
+        assert {"README.md", "MODEL_CARD.md", "CONTRIBUTING.md"} <= pages
+        assert not any(page.startswith("docs/course/") for page in pages)
+
+    @pytest.mark.parametrize("block", BLOCKS, ids=lambda block: block.where)
+    def test_block_compiles(self, block: course_code.CodeBlock) -> None:
+        assert course_code.check_block(block) == []
+
+
 class TestExtractBlocks:
+    """Fenced blocks are found inside lists and blockquotes, with markers stripped."""
+
     def test_strips_list_indent_and_blockquote_markers(self, tmp_path: Path) -> None:
         page = tmp_path / "page.md"
         page.write_text(
@@ -40,6 +60,8 @@ class TestExtractBlocks:
 
 
 class TestShellCommands:
+    """Shell snippets are split into argv lists ready to check against the CLI."""
+
     def test_joins_continuations_fills_placeholders_and_drops_comments(self) -> None:
         code = "# note\nta runpod attach <HOST> <PORT> \\\n    --logs  # recent\n"
         assert course_code.shell_commands(code) == [
@@ -48,6 +70,8 @@ class TestShellCommands:
 
 
 class TestCheckBlock:
+    """`check_block` names each kind of broken example and passes valid or untagged ones."""
+
     @pytest.mark.parametrize(
         ("lang", "code", "problem"),
         [

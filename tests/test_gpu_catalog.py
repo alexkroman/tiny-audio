@@ -13,12 +13,14 @@ from scripts.deploy import gpu_catalog
 
 @pytest.fixture(autouse=True)
 def clear_catalog_cache() -> Iterator[None]:
+    """Clear the lru-cached datacenter catalog before and after every test (autouse)."""
     gpu_catalog.datacenter_catalog.cache_clear()
     yield
     gpu_catalog.datacenter_catalog.cache_clear()
 
 
 def _stub_runpodctl(monkeypatch: pytest.MonkeyPatch, stdout: str) -> list[list[str]]:
+    """Stub subprocess.run to print ``stdout``; returns the list of commands it was given."""
     calls: list[list[str]] = []
 
     def fake_run(cmd: list[str], **_: Any) -> SimpleNamespace:
@@ -30,6 +32,8 @@ def _stub_runpodctl(monkeypatch: pytest.MonkeyPatch, stdout: str) -> list[list[s
 
 
 class TestRunpodctlJson:
+    """runpodctl_json runs runpodctl with JSON output and returns its stdout."""
+
     def test_appends_json_output_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
         calls = _stub_runpodctl(monkeypatch, "[]")
         assert gpu_catalog.runpodctl_json("gpu", "list") == "[]"
@@ -37,6 +41,8 @@ class TestRunpodctlJson:
 
 
 class TestAvailableGpus:
+    """available_gpus lists available GPUs with enough VRAM, sorted and deduplicated."""
+
     def test_filters_unavailable_and_small_then_sorts_and_dedupes(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -54,6 +60,8 @@ class TestAvailableGpus:
 
 
 class TestDatacenterCatalog:
+    """datacenter_catalog parses and caches the CLI output, and degrades to empty."""
+
     def test_parses_and_caches(self, monkeypatch: pytest.MonkeyPatch) -> None:
         calls = _stub_runpodctl(monkeypatch, json.dumps([{"id": "US-TX-3"}]))
         assert gpu_catalog.datacenter_catalog() == ({"id": "US-TX-3"},)
@@ -66,13 +74,16 @@ class TestDatacenterCatalog:
 
     def test_missing_cli_is_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def boom(*_: Any, **__: Any) -> None:
-            raise FileNotFoundError("runpodctl")
+            msg = "runpodctl"
+            raise FileNotFoundError(msg)
 
         monkeypatch.setattr(subprocess, "run", boom)
         assert gpu_catalog.datacenter_catalog() == ()
 
 
 class TestDatacentersForGpu:
+    """datacenters_for_gpu lists datacenters stocking a GPU, best stock first."""
+
     CATALOG = (
         {
             "id": "AP-IN-1",  # no network volume support
@@ -98,6 +109,7 @@ class TestDatacentersForGpu:
 
     @pytest.fixture(autouse=True)
     def catalog(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Serve CATALOG from datacenter_catalog for every test in the class (autouse)."""
         monkeypatch.setattr(gpu_catalog, "datacenter_catalog", lambda: self.CATALOG)
 
     def test_orders_by_stock_then_id(self) -> None:

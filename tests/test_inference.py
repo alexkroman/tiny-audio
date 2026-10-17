@@ -6,6 +6,10 @@ from typing import Any, cast
 
 import pytest
 import torch
+import torch._dynamo.config as dynamo_config
+from torch._subclasses.fake_tensor import FakeTensorMode
+from transformers.integrations.hub_kernels import use_kernel_func_from_hub_with_fallback
+from transformers.integrations.sdpa_attention import sdpa_attention_forward
 
 from scripts import inference
 from scripts.inference import (
@@ -17,10 +21,12 @@ from scripts.inference import (
     use_fast_kernels_under_compile,
 )
 from tiny_audio.asr_modeling import ASRModel
-from tiny_audio.asr_pipeline import ASRPipeline, PreparedChunk
+from tiny_audio.asr_pipeline import ASRPipeline
+from tiny_audio.asr_types import PreparedChunk
 
 
 def _chunk(frames: int) -> PreparedChunk:
+    """Build a prepared chunk of `frames` frames; FakeModel echoes the count as a token."""
     return {
         "input_features": torch.zeros(1, frames, 4),
         "attention_mask": torch.ones(1, frames, dtype=torch.long),
@@ -31,10 +37,13 @@ class FakeCache:
     """Stands in for StaticCache: records its length and resets."""
 
     def __init__(self, config: object, max_cache_len: int) -> None:
+        """Keep the cache length and start the reset count at zero."""
+        del config
         self.max_cache_len = max_cache_len
         self.resets = 0
 
     def reset(self) -> None:
+        """Count a reset."""
         self.resets += 1
 
 
@@ -46,12 +55,14 @@ class FakeModel:
     """generate() returns, per row: the row's frame count, then EOS (or no EOS for LONG)."""
 
     def __init__(self) -> None:
+        """Set a 256-token generation budget and start with no recorded calls."""
         self.generation_config = SimpleNamespace(max_new_tokens=256, eos_token_id=[EOS, 98])
         self.language_model = SimpleNamespace(config=object())
         self.device = torch.device("cpu")
         self.calls: list[dict[str, Any]] = []
 
     def generate(self, **kwargs: Any) -> torch.Tensor:
+        """Record the call and return budget-length rows of frame count plus EOS."""
         frames = kwargs["audio_attention_mask"].sum(dim=-1).tolist()
         budget = kwargs["max_new_tokens"]
         self.calls.append({"frames": frames, **kwargs})
@@ -61,9 +72,13 @@ class FakeModel:
 
 @pytest.fixture
 def decoder(monkeypatch: pytest.MonkeyPatch) -> tuple[GraphedDecoder, FakeModel]:
+    """Provide a GraphedDecoder over a FakeModel with FakeCache and a 253-token prompt.
+
+    The pipeline's longest chunk is 40 frames, which calibrates the short tier.
+    """
     monkeypatch.setattr(inference, "StaticCache", FakeCache)
 
-    def prompt_253(pipe: object, prepared: object) -> int:
+    def prompt_253(_pipe: object, _prepared: object) -> int:
         return 253
 
     monkeypatch.setattr(inference, "prompt_tokens", prompt_253)
@@ -72,7 +87,7 @@ def decoder(monkeypatch: pytest.MonkeyPatch) -> tuple[GraphedDecoder, FakeModel]
     def postprocess(outputs: dict[str, torch.Tensor]) -> dict[str, str]:
         return {"text": f"f{int(outputs['tokens'][0])}"}
 
-    def prepare_chunk(chunk: Any, sample_rate: int) -> PreparedChunk:
+    def prepare_chunk(_audio: Any, _sample_rate: int) -> PreparedChunk:
         return _chunk(40)  # the longest chunk the pipeline cuts is 40 frames here
 
     pipe = SimpleNamespace(model=model, postprocess=postprocess, prepare_chunk=prepare_chunk)
@@ -80,12 +95,13 @@ def decoder(monkeypatch: pytest.MonkeyPatch) -> tuple[GraphedDecoder, FakeModel]
 
 
 class TestGraphedDecoder:
+    """Batches pad to buckets on a short tier; rows that run out are redone on the full tier."""
+
     def test_buckets_and_tiers(self, decoder: tuple[GraphedDecoder, FakeModel]) -> None:
         dec, _ = decoder
         assert dec.buckets == [1, 2, 4, 6, 8, 12, 16, 24]
         assert [dec.bucket(n) for n in (1, 3, 5, 9, 13, 17, 24)] == [1, 4, 6, 12, 16, 24, 24]
         # Room for every bucket on both tiers, or the rest would run eagerly.
-        dynamo_config = torch._dynamo.config  # pyright: ignore[reportPrivateUsage]
         assert dynamo_config.recompile_limit >= 2 * len(dec.buckets)
         assert dec.short_enabled  # 253 prompt + 128 budget fits 416 slots
         assert dec.short_max_frames == 40
@@ -141,7 +157,7 @@ class TestGraphedDecoder:
     ) -> None:
         dec, model = decoder
 
-        def prompt_300(pipe: object, prepared: object) -> int:
+        def prompt_300(_pipe: object, _prepared: object) -> int:
             return 300
 
         monkeypatch.setattr(inference, "prompt_tokens", prompt_300)
@@ -150,14 +166,28 @@ class TestGraphedDecoder:
         dec2([_chunk(5)])
         assert model.calls[-1]["max_new_tokens"] == 256
 
+    def test_generate_must_return_token_ids(
+        self, decoder: tuple[GraphedDecoder, FakeModel], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dec, model = decoder
+
+        def scored(**_kwargs: Any) -> tuple[str, str]:
+            return ("sequences", "scores")
+
+        monkeypatch.setattr(model, "generate", scored)
+        with pytest.raises(TypeError, match="expected token ids"):
+            dec._decode([_chunk(1)], cache_len=64, budget=8)
+
 
 class TestMpsSafeSdpa:
     """Fully-masked query rows (left padding) come out finite; real rows are unchanged."""
 
     @staticmethod
     def _qkv() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return seeded random query, key and value tensors of shape (1, 2, 4, 8)."""
         gen = torch.Generator().manual_seed(0)
-        return tuple(torch.randn(1, 2, 4, 8, generator=gen) for _ in range(3))  # type: ignore[return-value]
+        q, k, v = (torch.randn(1, 2, 4, 8, generator=gen) for _ in range(3))
+        return q, k, v
 
     @pytest.mark.parametrize("boolean", [True, False])
     def test_padded_rows_finite_real_rows_exact(self, boolean: bool) -> None:
@@ -187,7 +217,7 @@ def test_missing_fast_kernels_reports_pip_names(monkeypatch: pytest.MonkeyPatch)
     def no_spec(_name: str) -> None:
         return None
 
-    monkeypatch.setattr(inference.importlib.util, "find_spec", no_spec)
+    monkeypatch.setattr(importlib.util, "find_spec", no_spec)
     assert missing_fast_kernels() == ["causal-conv1d", "flash-linear-attention"]
 
 
@@ -196,6 +226,7 @@ class TestGqaDecodeSdpa:
 
     @staticmethod
     def _module() -> torch.nn.Module:
+        """Fake an eval-mode attention module with four query heads per KV head."""
         # 8 query heads over 2 KV heads, as in Qwen3.5-2B.
         module = SimpleNamespace(training=False, num_key_value_groups=4, is_causal=True)
         return cast(torch.nn.Module, module)
@@ -215,7 +246,7 @@ class TestGqaDecodeSdpa:
         }[mask_kind]
         module = self._module()
         out, _ = _gqa_decode_sdpa(module, q, k, v, mask, scaling=0.25)
-        expected, _ = inference.sdpa_attention_forward(module, q, k, v, mask, scaling=0.25)
+        expected, _ = sdpa_attention_forward(module, q, k, v, mask, scaling=0.25)
         assert out.shape == (3, q_len, 8, 16)
         torch.testing.assert_close(out, expected)
 
@@ -226,17 +257,14 @@ def _fake_modeling(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     `operator.neg` stands in for the kernel; dynamo's `is_exporting` answer
     inside torch.compile is simulated by patching it True.
     """
-    from transformers.integrations.hub_kernels import (  # noqa: PLC0415
-        use_kernel_func_from_hub_with_fallback,
-    )
 
     @use_kernel_func_from_hub_with_fallback("neg", "operator")
     def neg(a: int) -> str:
+        del a
         return "reference"
 
     module = ModuleType("fake_modeling")
-    module.neg = neg  # pyright: ignore[reportAttributeAccessIssue]
-    module.helper = lambda: "untouched"  # pyright: ignore[reportAttributeAccessIssue]
+    vars(module).update(neg=neg, helper=lambda: "untouched")
     monkeypatch.setattr(torch.compiler, "is_exporting", lambda: True)
     return module
 
@@ -268,7 +296,7 @@ def test_lm_head_gets_a_contiguous_input() -> None:
     reason="needs CUDA and flash-linear-attention",
 )
 def test_in_place_delta_step_matches_fla() -> None:
-    from fla.ops.gated_delta_rule import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
+    from fla.ops.gated_delta_rule import (  # noqa: PLC0415
         fused_recurrent_gated_delta_rule,
     )
 
@@ -288,9 +316,20 @@ def test_in_place_delta_step_matches_fla() -> None:
     expected_out, expected_state = fused_recurrent_gated_delta_rule(
         q, k, v, initial_state=state.clone(), use_qk_l2norm_in_kernel=True, **kwargs
     )
-    out, new_state = inference._in_place_recurrent_step(  # pyright: ignore[reportPrivateUsage]
+    out, new_state = inference._in_place_recurrent_step(
         q, k, v, initial_state=state, use_qk_l2norm_in_kernel=True, fallback=None, **kwargs
     )
     assert new_state is state  # updated in place: the cache's copy becomes a no-op
     assert torch.equal(out, expected_out)
     assert torch.equal(state, expected_state)
+
+
+def test_gated_delta_step_fake_gives_tracing_the_output_shape() -> None:
+    """torch.compile traces the custom op through its fake, which must shape the output like v."""
+    with FakeTensorMode():
+        q = k = torch.empty(2, 1, 4, 8)
+        v = torch.empty(2, 1, 6, 16)
+        g = beta = torch.empty(2, 1, 6)
+        state = torch.empty(2, 6, 8, 16)
+        out = inference.gated_delta_step_(q, k, v, g, beta, state, 0.25, True)
+    assert out.shape == v.shape

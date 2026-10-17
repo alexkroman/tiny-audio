@@ -36,6 +36,7 @@ def joint_asr_model() -> ASRModel:
 def optimizer(
     joint_asr_model: ASRModel, tmp_path_factory: pytest.TempPathFactory
 ) -> torch.optim.Optimizer:
+    """Provide the optimizer ASRTrainer builds for the joint model (module-scoped)."""
     args = TrainingArguments(
         output_dir=str(tmp_path_factory.mktemp("optimizer_groups")),
         learning_rate=1e-3,
@@ -68,6 +69,7 @@ def _group_of(optimizer: torch.optim.Optimizer, tensor: torch.Tensor) -> dict[st
 def _named_param(
     model: torch.nn.Module, predicate: Callable[[str], bool]
 ) -> tuple[str, torch.nn.Parameter]:
+    """The first trainable parameter whose name satisfies ``predicate``, with its name."""
     for name, param in model.named_parameters():
         if param.requires_grad and predicate(name):
             return name, param

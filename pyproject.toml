@@ -65,8 +65,8 @@ torch = "~2.8.0"
 soundfile = ">=0.12.1"
 librosa = ">=0.10.0"
 # transformers main after 5.17: Nemotron-3-Diarization (nemotron3_diarization)
-# is not in a release yet. Same commit as requirements.txt and
-# demo/requirements.txt, the one the diarization pipeline was verified on.
+# is not in a release yet. Same commit as requirements.txt (enforced by
+# `ta dev quality invariants`), the one the diarization pipeline was verified on.
 transformers = { git = "https://github.com/huggingface/transformers.git", rev = "91ea1192a00e0ebb684400434375fbd2345c8449" }
 datasets = { extras = ["audio"], version = ">=3.0.0,<4.0.0" }
 jiwer = "*"
@@ -188,11 +188,11 @@ pyobjc-framework-Speech = { version = "*", markers = "sys_platform == 'darwin'" 
 #   poetry install --with hybrid-kernels
 types-tqdm = "^4.70.0.20260906"
 scipy-stubs = "^1.18.1.1"
-matplotlib = "^3.11.2"
 mdformat-frontmatter = "^2.1.2"
 pre-commit-hooks = "^6.0.0"
 pymarkdownlnt = "^0.9.40"
 mdformat-gfm = "^1.0.0"
+shellcheck-py = "^0.11.0.1"     # `shellcheck` for tracked .sh files (`ta dev lint`)
 [tool.poetry.group.hybrid-kernels]
 optional = true
 
@@ -328,7 +328,32 @@ select = [
   "PLW",  # pylint warnings
   "FURB", # refurb (modernization)
   "RUF",  # ruff-specific rules
+  # Idioms below: each one flags Python that works but is not how Python is
+  # written. Exemptions, where an idiom differs by tree, are in per-file-ignores.
+  "S101",    # assert outside tests: stripped under `python -O`, so not a check
+  "BLE",     # blind `except Exception`: catch what you can handle
+  "ARG",     # unused arguments: `_name` for one a signature forces on you
+  "SLF",     # reaching into another object's `_private` members
+  "ERA",     # commented-out code: delete it, git keeps it
+  "NPY",     # legacy numpy idioms (`np.random.seed`, global RNG state)
+  "PLR0402", # `import a.b as b` instead of `from a import b`
+  "PYI",     # stub-file conventions for typings/
+  "EM",      # build the exception message first (`msg = ...; raise X(msg)`)
+  "ICN",     # conventional import aliases (`import numpy as np`)
+  "ASYNC",   # blocking calls inside `async def`
+  "T20",     # print in library code: tiny_audio logs, CLIs print (see below)
 ]
+
+[tool.ruff.lint.per-file-ignores]
+# pytest's idiom is the bare assert, and unit tests exercise private helpers
+# directly (pyright's reportPrivateUsage is off for tests/ for the same reason).
+"tests/**" = ["S101", "SLF001"]
+# Printing is what a CLI, a demo and the docs build helpers are for.
+"{scripts,demo,docs}/**" = ["T20"]
+
+[tool.ruff.lint.flake8-unused-arguments]
+# `*args, **kwargs` on a fake or callback accept a signature, not values.
+ignore-variadic-names = true
 
 [tool.ruff.lint.isort]
 # A local `wandb/` run directory at the repo root makes ruff classify `wandb`
@@ -336,7 +361,7 @@ select = [
 known-third-party = ["wandb"]
 
 [tool.deptry]
-# The course example plots with matplotlib; it is not part of the package.
+# docs/ holds the course site's build helpers (docs/site/requirements.txt), not the package.
 extend_exclude = ["docs"]
 
 [tool.deptry.package_module_name_map]
@@ -368,7 +393,7 @@ DEP004 = ["elevenlabs", "fla"]
 
 [tool.coverage.run]
 branch = true
-source = ["tiny_audio", "scripts"]
+source = ["tiny_audio", "scripts", "tests"]
 
 [tool.coverage.report]
 # Ratchet: `ta dev test` fails below this. Raise it as coverage grows; never

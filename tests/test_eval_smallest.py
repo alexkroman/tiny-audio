@@ -15,6 +15,7 @@ pytestmark = pytest.mark.usefixtures("no_retry_backoff")
 
 
 def _response(payload: dict[str, str]) -> MagicMock:
+    """Fake a `urlopen` context manager whose body is `payload` as JSON."""
     resp = MagicMock()
     resp.read.return_value = json.dumps(payload).encode()
     resp.__enter__.return_value = resp
@@ -22,15 +23,19 @@ def _response(payload: dict[str, str]) -> MagicMock:
 
 
 def _http_error(code: int) -> urllib.error.HTTPError:
+    """Build an HTTPError with the given status code."""
     return urllib.error.HTTPError("url", code, "err", Message(), io.BytesIO(b"rate limited"))
 
 
 @pytest.fixture
 def audio() -> dict[str, object]:
+    """Provide one second of 16 kHz silence as a dataset audio dict."""
     return {"array": np.zeros(16000, dtype=np.float32), "sampling_rate": 16000}
 
 
 class TestSmallestEvaluator:
+    """Requests send WAV with auth, retry 429/5xx only, and reject non-success payloads."""
+
     def test_returns_transcription_and_sends_wav(
         self, monkeypatch: pytest.MonkeyPatch, audio: dict[str, object]
     ) -> None:

@@ -2,10 +2,10 @@
 
 import shutil
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from datasets import (
     Audio,
@@ -177,13 +177,37 @@ SHUFFLE_BUFFER_SIZE = 10_000
 SHUFFLE_SEED = 42
 
 
+# `datasets` ships no type information (no `py.typed`), so its classes are
+# unknown to anyone type-checking against this package. These protocols name the
+# parts of `IterableDataset` and `Audio` this module's public API hands out.
+class RowStream(Protocol):
+    """The part of a streaming `datasets.IterableDataset` that `CachedSamples` reads."""
+
+    @property
+    def features(self) -> Any:
+        """The stream's `datasets.Features` (or None), reused to write the cache."""
+        raise NotImplementedError
+
+    def skip(self, n: int) -> Iterable[dict[str, Any]]:
+        """Return the stream without its first `n` rows."""
+        raise NotImplementedError
+
+
+class AudioDecoder(Protocol):
+    """A `datasets.Audio` feature, used only to decode encoded audio cells."""
+
+    def decode_example(self, value: dict[str, Any]) -> Any:
+        """Decode an encoded `{"bytes", "path"}` cell into `{"array", "sampling_rate", ...}`."""
+        raise NotImplementedError
+
+
 def load_eval_dataset(
     name: str,
     split: str,
     config_override: str | None = None,
     shuffle: bool = True,
     decode_audio: bool = True,
-) -> IterableDataset:
+) -> RowStream:
     """Load any dataset by name with unified interface.
 
     Args:
@@ -237,13 +261,15 @@ class CachedSamples:
     SAMPLE_CACHE_DIR to pick up an upstream dataset change.
     """
 
-    def __init__(self, raw: IterableDataset, audio_field: str, cache_dir: Path) -> None:
-        self.raw = raw
-        self.audio_field = audio_field
-        self.cache_dir = cache_dir
-        self.decoder = Audio(sampling_rate=16000)
+    def __init__(self, raw: RowStream, audio_field: str, cache_dir: Path) -> None:
+        """Wrap the undecoded stream `raw`, caching its rows under `cache_dir`."""
+        self.raw: RowStream = raw
+        self.audio_field: str = audio_field
+        self.cache_dir: Path = cache_dir
+        self.decoder: AudioDecoder = Audio(sampling_rate=16000)
 
     def _cached_rows(self) -> list[dict[str, Any]]:
+        """Load the rows a previous run cached, or [] when there is no cache yet."""
         if not self.cache_dir.exists():
             return []
         rows = cast(
@@ -253,6 +279,7 @@ class CachedSamples:
         return rows
 
     def _save(self, rows: list[dict[str, Any]]) -> None:
+        """Replace the cache with `rows`, still in their encoded form."""
         self.cache_dir.parent.mkdir(parents=True, exist_ok=True)
         # Write beside the target, then swap in, so a concurrent reader never
         # sees a half-written cache.
@@ -263,9 +290,11 @@ class CachedSamples:
         shutil.rmtree(staging, ignore_errors=True)
 
     def _decoded(self, row: dict[str, Any]) -> dict[str, Any]:
+        """Return a copy of `row` with its audio cell decoded at 16 kHz."""
         return {**row, self.audio_field: self.decoder.decode_example(row[self.audio_field])}
 
     def __iter__(self) -> Iterator[dict[str, Any]]:
+        """Yield cached rows, then stream the rest; save newly streamed rows on exit."""
         cached = self._cached_rows()
         new: list[dict[str, Any]] = []
         try:

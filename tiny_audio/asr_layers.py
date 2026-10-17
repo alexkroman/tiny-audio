@@ -4,7 +4,7 @@
 transformer-block list and switch its top blocks back to trainable.
 """
 
-import torch.nn as nn
+from torch import nn
 
 
 def find_encoder_layer_stack(encoder: nn.Module) -> tuple[str, nn.ModuleList] | None:

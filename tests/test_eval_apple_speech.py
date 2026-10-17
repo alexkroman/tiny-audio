@@ -18,16 +18,20 @@ _DENIED = 1
 
 
 class _FakeFrameworks(TypedDict):
+    """What fake_speech_frameworks hands a test: the fakes and the reloaded module."""
+
     Speech: MagicMock
     recognizer: MagicMock
     apple_speech: ModuleType
 
 
 def _grant(cb: Callable[[int], None]) -> None:
+    """Fake requestAuthorization_ that answers the callback with "authorized"."""
     cb(_AUTHORIZED)
 
 
 def _deny(cb: Callable[[int], None]) -> None:
+    """Fake requestAuthorization_ that answers the callback with "denied"."""
     cb(_DENIED)
 
 
@@ -61,6 +65,8 @@ def fake_speech_frameworks(monkeypatch: pytest.MonkeyPatch) -> _FakeFrameworks:
 def _stage_transcription(
     recognizer: MagicMock, *, text: str = "hello world", error: str | None = None
 ) -> None:
+    """Make the recognizer's next recognition task finish with ``text``, or fail with ``error``."""
+
     def fake_task(
         _request: object, handler: Callable[[MagicMock | None, str | None], None]
     ) -> MagicMock:
@@ -79,6 +85,8 @@ def _stage_transcription(
 
 
 class TestAppleSpeechEvaluator:
+    """AppleSpeechEvaluator setup checks, transcription results and temp-file cleanup."""
+
     def test_init_authorizes_and_builds_recognizer(
         self, fake_speech_frameworks: _FakeFrameworks
     ) -> None:

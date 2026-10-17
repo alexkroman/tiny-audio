@@ -1,4 +1,6 @@
 ---
+# `ta dev install-hooks` (pre-commit install) installs both hook types.
+default_install_hook_types: [pre-commit, pre-push]
 repos:
   - repo: local
     hooks:
@@ -8,3 +10,10 @@ repos:
         language: system
         pass_filenames: false
         stages: [pre-commit]
+      - id: prepush
+        name: not main, up to date with origin/main, no conflicts
+        entry: poetry run ta dev prepush
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]

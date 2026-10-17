@@ -1,7 +1,6 @@
-"""Stub for the parts of fabric's `Connection` that scripts/deploy/runpod.py uses.
-
-fabric ships no type information; analysed from source, every call is untyped.
-"""
+# Stub for the parts of fabric's `Connection` that scripts/deploy/runpod.py uses.
+#
+# fabric ships no type information; analysed from source, every call is untyped.
 
 from typing import IO, Any, Protocol
 

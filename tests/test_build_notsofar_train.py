@@ -13,6 +13,7 @@ from scripts import build_notsofar_train as b
 
 
 def _seg(speaker: str, start: float, end: float, text: str, timing: Any = None) -> dict[str, Any]:
+    """Build one NOTSOFAR transcript segment dict, with optional word timings."""
     return {
         "speaker_id": speaker,
         "start_time": start,

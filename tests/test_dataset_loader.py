@@ -19,6 +19,7 @@ def _make_cfg(
     epoch_expansion: int | None = None,
     epochs: int = 1,
 ) -> DictConfig:
+    """Build a minimal train config: ``data`` for ``datasets`` plus seed and epoch count."""
     data: dict[str, Any] = {
         "datasets": datasets,
         "sample_rate": sample_rate,
@@ -31,6 +32,7 @@ def _make_cfg(
 
 
 def _fake_dataset(audio_seconds: float, **extra_cols: object) -> Dataset:
+    """One-row dataset of silent 16 kHz audio plus a column per ``extra_cols`` item."""
     n = int(audio_seconds * 16000)
     rows: dict[str, list[Any]] = {
         "audio": [{"array": np.zeros(n, dtype=np.float32), "sampling_rate": 16000}],
@@ -40,11 +42,14 @@ def _fake_dataset(audio_seconds: float, **extra_cols: object) -> Dataset:
 
 
 def _prepare(loader: DatasetLoader, dataset_cfg: dict[str, Any], fake: Dataset) -> Dataset:
+    """Run ``_prepare_split`` on the train split with ``load_dataset`` returning ``fake``."""
     with patch("scripts.train.load_dataset", return_value=fake):
         return loader._prepare_split(OmegaConf.create(dataset_cfg), "train")
 
 
 class TestColumnPruning:
+    """_prepare_split keeps only the columns training needs, in their source order."""
+
     def test_source_columns_outside_audio_text_are_dropped(self) -> None:
         fake = _fake_dataset(audio_seconds=1.0, text="hi", duration=1.0, speaker="spk1")
         cfg = {"path": "fake/dataset", "audio_column": "audio", "text_column": "text"}
@@ -196,6 +201,7 @@ class TestExcludeWhere:
 
     @staticmethod
     def _cfg(values: Sequence[str] = ("audiobook",)) -> dict[str, Any]:
+        """Dataset entry that excludes rows whose ``source`` is one of ``values``."""
         return {
             "path": "fake/gigaspeech",
             "audio_column": "audio",
@@ -296,6 +302,7 @@ class TestEpochExpansion:
 
     @staticmethod
     def _rows(n: int, prefix: str = "r") -> Dataset:
+        """``n`` rows of 1 s silence with unique texts ``{prefix}0`` .. ``{prefix}{n-1}``."""
         return Dataset.from_dict(
             {
                 "audio": [{"array": np.zeros(16000, dtype=np.float32), "sampling_rate": 16000}] * n,
@@ -306,6 +313,7 @@ class TestEpochExpansion:
     def _load(
         self, fake: Dataset, cfg_entry: dict[str, Any], expansion: int | None, epochs: int = 1
     ) -> Dataset:
+        """Run DatasetLoader.load over ``fake`` and return the (non-None) train split."""
         cfg = _make_cfg([cfg_entry], epoch_expansion=expansion, epochs=epochs)
         loader = DatasetLoader(cfg)
         with patch("scripts.train.load_dataset", return_value=fake):
@@ -443,6 +451,7 @@ class TestNoFullRewrite:
 
     @staticmethod
     def _rows(durations: Sequence[float]) -> Dataset:
+        """One silent row per entry, with ``audio_duration`` set from ``durations``."""
         n = 16000
         return Dataset.from_dict(
             {
