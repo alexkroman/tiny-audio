@@ -368,7 +368,7 @@ DEP004 = ["elevenlabs", "fla"]
 
 [tool.coverage.run]
 branch = true
-source = ["tiny_audio", "scripts"]
+source = ["tiny_audio", "scripts", "tests"]
 
 [tool.coverage.report]
 # Ratchet: `ta dev test` fails below this. Raise it as coverage grows; never

@@ -175,16 +175,9 @@ class TestPipelineCall:
     """ASRPipeline.__call__ orchestrates transcription, alignment, diarization."""
 
     @pytest.fixture
-    def pipeline(self, base_asr_model: ASRModel) -> ASRPipeline:
-        # device="cpu": with no device, transformers' Pipeline moves the model to
-        # the default accelerator IN PLACE. base_asr_model is session-scoped, so
-        # on a Mac every later test got an MPS model fed CPU tensors.
-        return ASRPipeline(
-            model=base_asr_model,
-            feature_extractor=base_asr_model.feature_extractor,
-            tokenizer=base_asr_model.tokenizer,
-            device="cpu",
-        )
+    def pipeline(self, cpu_pipeline: ASRPipeline) -> ASRPipeline:
+        """The shared CPU pipeline (conftest.cpu_pipeline)."""
+        return cpu_pipeline
 
     def test_shared_model_stays_on_cpu(
         self, pipeline: ASRPipeline, base_asr_model: ASRModel

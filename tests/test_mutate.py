@@ -32,6 +32,8 @@ if __name__ == "__main__":
 
 
 class TestMutants:
+    """Which mutants a source admits, and applying one at a time."""
+
     def test_enumerates_every_site_outside_main(self) -> None:
         descriptions = sorted(m.description for m in mutate.mutants(SOURCE))
         assert descriptions == sorted(
@@ -50,6 +52,8 @@ class TestMutants:
 
 
 class TestRun:
+    """The run loop records survivors and always restores the target file."""
+
     def test_restores_the_file_and_reports_survivors(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -90,9 +94,12 @@ class TestRun:
 
 
 class TestCommand:
+    """`ta dev mutate`: refuses a failing baseline, fails on survivors."""
+
     runner = CliRunner()
 
     def app(self) -> typer.Typer:
+        """A one-command Typer app around `mutate.main`."""
         app = typer.Typer()
         app.command()(mutate.main)
         return app

@@ -13,12 +13,16 @@ runner = CliRunner()
 
 
 class TestCodeLines:
+    """`code_lines` counts only lines that hold code."""
+
     def test_blank_and_comment_only_lines_do_not_count(self) -> None:
         text = "import os\n\n# comment\n    # indented comment\nx = 1  # trailing\n"
         assert quality.code_lines(text) == 2
 
 
 class TestFileLengthViolations:
+    """New files are capped; grandfathered files may shrink but never grow."""
+
     CAP = quality.MAX_CODE_LINES
 
     def test_new_file_over_the_cap_fails(self) -> None:
@@ -41,8 +45,11 @@ class TestFileLengthViolations:
 
 
 class TestCoverage:
+    """Per-file coverage floors from coverage.py's JSON report."""
+
     @staticmethod
     def report(**files: tuple[int, int]) -> dict[str, dict[str, dict[str, dict[str, int]]]]:
+        """A coverage.py JSON report with `(covered, total)` lines per file."""
         return {
             "files": {
                 path: {"summary": {"num_statements": total, "covered_lines": covered}}
@@ -86,6 +93,8 @@ class TestCoverage:
 
 
 class TestTestsWithoutAssertions:
+    """Tests that run code but check nothing are reported."""
+
     @pytest.mark.parametrize(
         "body",
         [
@@ -118,6 +127,8 @@ class TestTestsWithoutAssertions:
 
 
 class TestEscapeHatches:
+    """Per-file budgets for checker-silencing comments, which only go down."""
+
     def test_only_real_comments_count(self) -> None:
         source = (
             "import os  # noqa: F401\n"
@@ -167,6 +178,8 @@ class TestEscapeHatches:
 
 
 class TestModuleTests:
+    """Every module must be named by some test; the grandfathered list only shrinks."""
+
     def test_imports_and_dotted_strings_are_references(self) -> None:
         source = (
             "import scripts.a\n"
@@ -184,6 +197,7 @@ class TestModuleTests:
     def _run(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, allowed: list[str]
     ) -> tuple[int, Path]:
+        """Run `module-tests` over a two-module tree where only `scripts.a` is tested."""
         baseline = tmp_path / "untested.json"
         baseline.write_text(json.dumps(allowed))
         (tmp_path / "tests").mkdir()
@@ -216,8 +230,12 @@ class TestModuleTests:
 
 
 class TestTypeCompleteness:
+    """`pyright --verifytypes` scores per package, held to a floor that only rises."""
+
     @staticmethod
     def fake_pyright(monkeypatch: pytest.MonkeyPatch, stdout: str) -> None:
+        """Make every subprocess call return `stdout` as pyright's output."""
+
         def run(*_args: object, **_kwargs: object) -> SimpleNamespace:
             return SimpleNamespace(stdout=stdout, stderr="")
 
@@ -225,11 +243,12 @@ class TestTypeCompleteness:
 
     @staticmethod
     def report(score: float) -> str:
+        """A `--verifytypes --outputjson` report with the given completeness score."""
         return json.dumps({"typeCompleteness": {"completenessScore": score}})
 
     def test_floor_is_enforced(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         baseline = tmp_path / "type_completeness.json"
-        baseline.write_text(json.dumps({quality.TYPED_PACKAGE: 80.0}))
+        baseline.write_text(json.dumps(dict.fromkeys(quality.TYPED_PACKAGES, 80.0)))
         monkeypatch.setattr(quality, "TYPE_COMPLETENESS_BASELINE", baseline)
         self.fake_pyright(monkeypatch, self.report(0.81))
         assert runner.invoke(quality.app, ["type-completeness"]).exit_code == 0
@@ -244,7 +263,7 @@ class TestTypeCompleteness:
         monkeypatch.setattr(quality, "ROOT", tmp_path)
         self.fake_pyright(monkeypatch, self.report(0.83279))
         assert runner.invoke(quality.app, ["type-completeness", "--update"]).exit_code == 0
-        assert json.loads(baseline.read_text()) == {quality.TYPED_PACKAGE: 83.2}
+        assert json.loads(baseline.read_text()) == dict.fromkeys(quality.TYPED_PACKAGES, 83.2)
         assert runner.invoke(quality.app, ["type-completeness"]).exit_code == 0
 
     def test_no_score_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -255,6 +274,8 @@ class TestTypeCompleteness:
 
 
 class TestTrackedIgnored:
+    """A tracked file matched by a .gitignore rule fails the gate."""
+
     def test_a_tracked_ignored_file_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def run(*_args: object, **_kwargs: object) -> SimpleNamespace:
             return SimpleNamespace(stdout="results.json\n")

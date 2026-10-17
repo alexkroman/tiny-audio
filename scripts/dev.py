@@ -10,7 +10,7 @@ from rich.console import Console
 
 from scripts import mutate, quality
 
-app = typer.Typer(
+app: typer.Typer = typer.Typer(
     name="dev",
     help="Run the project's lint, format, test and build tasks.",
     no_args_is_help=True,
@@ -18,20 +18,23 @@ app = typer.Typer(
 )
 app.add_typer(quality.app)
 app.command("mutate")(mutate.main)
-console = Console()
+console: Console = Console()
 
 # Every Python tree in the repo: the package, its CLI, the tests, the Space
 # demo and the course examples. Linters and type checkers all run over this.
 CODE_PATHS = ["tiny_audio", "scripts", "tests", "demo", "docs", "typings"]
 LIB_PATH = "tiny_audio"
+# The three trees every quality gate covers alike: the published package, the
+# CLI and training code that builds and ships it, and the tests that vouch
+# for both. demo/, docs/ and typings/ get the linters and pyright only.
+QUALITY_PATHS = [LIB_PATH, "scripts", "tests"]
 TOML_FILES = ["pyproject.toml", ".mdformat.toml"]
 
 # Every threshold below is a ratchet: raise it when the codebase clears the
 # next rung, never lower it to get a red build green. Coverage's floor lives in
 # `[tool.coverage.report] fail_under` (pyproject.toml) and is enforced by
 # TEST_COMMAND via pytest-cov.
-DOCSTRING_MIN_LIB = "95"  # tiny_audio/: the published model code
-DOCSTRING_MIN_SCRIPTS = "65"  # scripts/: CLI + training; probes drag it down
+DOCSTRING_MIN = "95"  # each of QUALITY_PATHS on its own, not pooled
 DEAD_CODE_MIN_CONFIDENCE = "80"
 
 LINT_COMMANDS = [
@@ -58,7 +61,7 @@ TYPE_CHECK_COMMANDS = [
     # Paths come from `[tool.pyright] include`.
     ["pyright"],
 ]
-SECURITY_COMMAND = ["bandit", "-c", "pyproject.toml", "-r", "tiny_audio", "scripts", "-ll"]
+SECURITY_COMMAND = ["bandit", "-c", "pyproject.toml", "-r", *QUALITY_PATHS, "-ll"]
 # Unused, missing, transitive-only and misplaced dependencies; configured in
 # `[tool.deptry]` (pyproject.toml).
 DEPS_COMMAND = ["deptry", "."]
@@ -73,44 +76,42 @@ TRACKED_IGNORED_COMMAND = [*QUALITY, "tracked-ignored"]
 INVARIANTS_COMMAND = [*QUALITY, "invariants"]
 # Reads the coverage.json TEST_COMMAND writes, so it runs after the tests.
 COVERAGE_FLOORS_COMMAND = [*QUALITY, "coverage-floors"]
-# Copy-pasted blocks of 4+ lines across tiny_audio/ and scripts/ (comments,
-# docstrings, imports and signatures ignored). demo/ is left out: it deploys
-# to the Space on its own and cannot share code with scripts/.
+# Copy-pasted blocks of 4+ lines across QUALITY_PATHS, within and between
+# them (comments, docstrings, imports and signatures ignored). demo/ is left
+# out: it deploys to the Space on its own and cannot share code with scripts/.
 DUPLICATION_COMMAND = [
     "pylint",
     "--disable=all",
     "--enable=duplicate-code",
     "--min-similarity-lines=4",
     "--score=n",
-    LIB_PATH,
-    "scripts",
+    *QUALITY_PATHS,
 ]
 DEAD_CODE_COMMAND = [
     "vulture",
-    "tiny_audio",
-    "scripts",
+    *QUALITY_PATHS,
     # Protocol / type-stub parameter names; see the file's docstring.
     "quality/vulture_whitelist.py",
     "--min-confidence",
     DEAD_CODE_MIN_CONFIDENCE,
 ]
-# `@overload` stubs are type signatures for the documented implementation
-# below them, not separate functions, so they are not counted.
+# The same rule for each tree, checked separately so one tree's surplus
+# cannot cover another's gap. Not counted: `@overload` stubs (signatures for
+# the documented implementation below them), nested functions (closures and
+# test fakes, documented by the function that holds them), and `test_*`
+# functions, whose names are their documentation.
 DOCSTRINGS_COMMANDS = [
     [
         "interrogate",
-        LIB_PATH,
+        path,
         "--ignore-overloaded-functions",
+        "--ignore-nested-functions",
+        "--ignore-regex",
+        "^test_",
         "--fail-under",
-        DOCSTRING_MIN_LIB,
-    ],
-    [
-        "interrogate",
-        "scripts",
-        "--ignore-overloaded-functions",
-        "--fail-under",
-        DOCSTRING_MIN_SCRIPTS,
-    ],
+        DOCSTRING_MIN,
+    ]
+    for path in QUALITY_PATHS
 ]
 # Everything `ta dev check` runs after the linters; see `check_commands()`.
 ANALYSIS_COMMANDS = [
@@ -133,8 +134,7 @@ ANALYSIS_COMMANDS = [
 TEST_COMMAND = [
     "pytest",
     "-v",
-    f"--cov={LIB_PATH}",
-    "--cov=scripts",
+    *(f"--cov={path}" for path in QUALITY_PATHS),
     "--cov-report=term-missing",
     "--cov-report=xml",
     "--cov-report=json",

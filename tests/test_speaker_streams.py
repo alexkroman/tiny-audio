@@ -13,7 +13,6 @@ import numpy.typing as npt
 import pytest
 
 from tiny_audio.alignment import AlignedWord
-from tiny_audio.asr_modeling import ASRModel
 from tiny_audio.asr_pipeline import (
     ASRPipeline,
     NemotronDiarizer,
@@ -131,14 +130,9 @@ class TestStreamsPipeline:
     """`ASRPipeline(..., return_speakers=True)` end to end, with every model stubbed."""
 
     @pytest.fixture
-    def pipeline(self, base_asr_model: ASRModel) -> ASRPipeline:
-        # device="cpu": see TestPipelineCall.pipeline in test_asr_pipeline.py.
-        return ASRPipeline(
-            model=base_asr_model,
-            feature_extractor=base_asr_model.feature_extractor,
-            tokenizer=base_asr_model.tokenizer,
-            device="cpu",
-        )
+    def pipeline(self, cpu_pipeline: ASRPipeline) -> ASRPipeline:
+        """The shared CPU pipeline (conftest.cpu_pipeline)."""
+        return cpu_pipeline
 
     @pytest.fixture
     def asr_inputs(self, monkeypatch: pytest.MonkeyPatch) -> list[npt.NDArray[np.float32]]:

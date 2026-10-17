@@ -102,10 +102,13 @@ def _swap(op: ast.AST) -> Any:
 
 
 def _describe(op: ast.AST) -> str:
+    """`Lt -> GtE`-style label for swapping `op`."""
     return f"{type(op).__name__} -> {_SWAPS[type(op)].__name__}"
 
 
 def _replace_in(ops: list[ast.cmpop], i: int) -> Callable[[], None]:
+    """An `apply` that swaps comparison operator `i` of `ops`."""
+
     def apply() -> None:
         ops[i] = _swap(ops[i])
 
@@ -113,6 +116,8 @@ def _replace_in(ops: list[ast.cmpop], i: int) -> Callable[[], None]:
 
 
 def _set_op(node: ast.BinOp | ast.AugAssign | ast.BoolOp) -> Callable[[], None]:
+    """An `apply` that swaps `node`'s operator."""
+
     def apply() -> None:
         node.op = _swap(node.op)
 
@@ -120,6 +125,8 @@ def _set_op(node: ast.BinOp | ast.AugAssign | ast.BoolOp) -> Callable[[], None]:
 
 
 def _set_value(node: ast.Constant, value: bool | int) -> Callable[[], None]:
+    """An `apply` that replaces `node`'s constant with `value`."""
+
     def apply() -> None:
         node.value = value
 
@@ -127,6 +134,8 @@ def _set_value(node: ast.Constant, value: bool | int) -> Callable[[], None]:
 
 
 def _set_op_to_uadd(node: ast.UnaryOp) -> Callable[[], None]:
+    """An `apply` that turns `not x` into `+x`, i.e. drops the negation."""
+
     def apply() -> None:
         node.op = ast.UAdd()
 

@@ -230,9 +230,8 @@ class TestUseSdpaWhereSafe:
             "tiny_audio.asr_attention._has_sliding_window_attention", has_sliding_window
         )
 
-    def test_corrects_a_stale_eager_decoder_to_sdpa(
-        self, monkeypatch: pytest.MonkeyPatch, on_mps: None
-    ) -> None:
+    @pytest.mark.usefixtures("on_mps")
+    def test_corrects_a_stale_eager_decoder_to_sdpa(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._set_sliding_window(monkeypatch, False)
         holder, calls = self._holder("eager")
 
@@ -240,9 +239,8 @@ class TestUseSdpaWhereSafe:
 
         assert calls == ["sdpa"]
 
-    def test_leaves_a_sliding_window_model_on_eager(
-        self, monkeypatch: pytest.MonkeyPatch, on_mps: None
-    ) -> None:
+    @pytest.mark.usefixtures("on_mps")
+    def test_leaves_a_sliding_window_model_on_eager(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Metal's sdpa returns wrong results for cached decode against that mask."""
         self._set_sliding_window(monkeypatch, True)
         holder, calls = self._holder("eager")
@@ -251,8 +249,9 @@ class TestUseSdpaWhereSafe:
 
         assert calls == []
 
+    @pytest.mark.usefixtures("on_mps")
     def test_is_a_noop_when_load_already_resolved_correctly(
-        self, monkeypatch: pytest.MonkeyPatch, on_mps: None
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """--local-code already gets this right; re-applying must not churn the model."""
         self._set_sliding_window(monkeypatch, False)
@@ -267,13 +266,12 @@ def _no_pcm(_a: object) -> bytes:
     return b""
 
 
+@pytest.mark.usefixtures("no_retry_backoff")
 class TestStreamingRetry:
     """AssemblyAIStreamingEvaluator retries only on transient stream close codes."""
 
     @pytest.fixture
-    def evaluator(
-        self, monkeypatch: pytest.MonkeyPatch, no_retry_backoff: None
-    ) -> AssemblyAIStreamingEvaluator:
+    def evaluator(self, monkeypatch: pytest.MonkeyPatch) -> AssemblyAIStreamingEvaluator:
         evaluator = AssemblyAIStreamingEvaluator(api_key="test")
         monkeypatch.setattr(evaluator, "_prepare_pcm", _no_pcm)
         return evaluator

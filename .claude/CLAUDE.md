@@ -30,9 +30,13 @@ records an improvement:
   `# type: ignore`, `# nosec` and `# pragma: no cover`. Fix the finding instead.
 - `ta dev quality module-tests`: every module under `tiny_audio/` and `scripts/` is imported or
   named by a test of its own.
-- `ta dev quality type-completeness`: share of `tiny_audio`'s public API with known types.
+- `ta dev quality type-completeness`: share of `tiny_audio`'s and `scripts`' public API with known
+  types.
 - `ta dev quality invariants`: restated facts agree and settled decisions hold
   (`scripts/invariants.py`; the backticked paths in this file must exist).
+
+`tiny_audio/`, `scripts/` and `tests/` go through every gate alike, including 95% docstring coverage
+per tree (nested and `test_*` functions exempt).
 
 ## Settled decisions
 

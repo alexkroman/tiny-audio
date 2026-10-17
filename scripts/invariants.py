@@ -44,6 +44,7 @@ _GUIDE_PATH = re.compile(r"`([\w.\-/]+(?:/[\w.\-]*|\.(?:py|md|json|ya?ml|toml|sh
 
 
 def _version(text: str) -> tuple[int, int, int]:
+    """The first `X.Y[.Z]` in `text` as a tuple (Z defaults to 0)."""
     match = _VERSION.search(text)
     if match is None:
         raise ValueError(text)
@@ -52,6 +53,7 @@ def _version(text: str) -> tuple[int, int, int]:
 
 
 def _dependencies(root: Path) -> dict[str, Any]:
+    """`[tool.poetry.dependencies]` from the tree's pyproject.toml."""
     pyproject = tomllib.loads((root / "pyproject.toml").read_text())
     deps: dict[str, Any] = pyproject["tool"]["poetry"]["dependencies"]
     return deps

@@ -37,6 +37,7 @@ def tree(tmp_path: Path) -> Path:
 
 
 def edit(tree: Path, rel: str, old: str, new: str) -> None:
+    """Replace `old` with `new` once in `rel`, failing if the fixture drifted from the repo."""
     path = tree / rel
     text = path.read_text()
     assert old in text, f"{old!r} not in {rel}; the fixture no longer matches the repo"

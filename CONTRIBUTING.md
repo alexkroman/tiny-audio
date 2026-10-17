@@ -188,6 +188,11 @@ poetry run ta dev install-hooks  # Install the pre-commit and pre-push git hooks
 `ta dev check` runs every check even after one fails and lists the failures at the end, so one run
 reports everything.
 
+`tiny_audio/`, `scripts/` and `tests/` go through the same gates with the same thresholds: ruff,
+black and strict pyright, bandit, vulture, duplication (within and across the three), 95% docstring
+coverage for each tree on its own, coverage with per-file floors, and the ratchets below. Docstrings
+are not required on nested functions or on `test_*` functions, whose names say what they check.
+
 `ta dev check` and `ta dev test` also run ratchets (`scripts/quality.py`), each against a baseline
 committed under `quality/` that may only improve:
 
@@ -200,8 +205,8 @@ committed under `quality/` that may only improve:
   `# nosec` and `# pragma: no cover` comments that may only shrink.
 - **Module tests:** every module under `tiny_audio/` and `scripts/` is imported (or named, for a
   `monkeypatch` target) by a test; coverage reached through another module's test does not count.
-- **Type completeness:** the share of `tiny_audio`'s public API with fully known types
-  (`pyright --verifytypes`) may only rise.
+- **Type completeness:** the share of `tiny_audio`'s and `scripts`' public API with fully known
+  types (`pyright --verifytypes`) may only rise.
 - **Tracked-ignored:** no tracked file may match a `.gitignore` rule.
 
 After an intended improvement, refresh a baseline with `ta dev quality <check> --update` (record

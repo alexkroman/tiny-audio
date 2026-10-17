@@ -34,7 +34,7 @@ import typer
 from scripts import invariants
 from scripts.utils import get_project_root
 
-app = typer.Typer(
+app: typer.Typer = typer.Typer(
     name="quality",
     help="Ratchets on file length, coverage, assertions, escape hatches and typing.",
     no_args_is_help=True,
@@ -69,8 +69,8 @@ ESCAPE_HATCHES = {
 }
 # The packages whose modules must each be reached by name from tests/.
 TESTED_PACKAGES = ("tiny_audio", "scripts")
-# The published package `pyright --verifytypes` scores (it ships py.typed).
-TYPED_PACKAGE = "tiny_audio"
+# The packages `pyright --verifytypes` scores; both ship py.typed in the wheel.
+TYPED_PACKAGES = ("tiny_audio", "scripts")
 
 # A call to one of these counts as an assertion: the code under test is itself
 # a guard, so "it did not raise" is the claim (`_assert_audio_token_counts`,
@@ -80,16 +80,19 @@ _PYTEST_ASSERTIONS = frozenset({"raises", "warns", "fail", "deprecated_call"})
 
 
 def _load(path: Path) -> dict[str, Any]:
+    """A baseline file's contents, or `{}` when it does not exist yet."""
     data: dict[str, Any] = json.loads(path.read_text()) if path.exists() else {}
     return data
 
 
 def _save(path: Path, data: dict[str, Any]) -> None:
+    """Write `data` as sorted, 2-space JSON (the layout `pretty-format-json` checks)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
 
 
 def _tracked_python_files() -> list[str]:
+    """Every tracked `.py` file, relative to the repo root."""
     out = subprocess.run(
         ["git", "ls-files", "*.py"], cwd=ROOT, capture_output=True, text=True, check=True
     )
@@ -194,6 +197,7 @@ def coverage_floors(
 
 
 def _callee(call: ast.Call) -> str:
+    """The called name of `call`: `f` for `f()` and `obj.f()`, else empty."""
     func = call.func
     if isinstance(func, ast.Attribute):
         return func.attr
@@ -201,6 +205,7 @@ def _callee(call: ast.Call) -> str:
 
 
 def _asserts_directly(func: ast.AST) -> bool:
+    """Whether `func`'s own body asserts, raises-checks or calls a guard."""
     for node in ast.walk(func):
         if isinstance(node, ast.Assert):
             return True
@@ -389,22 +394,15 @@ def completeness_percent(report: dict[str, Any]) -> float:
     return 100.0 * float(report["typeCompleteness"]["completenessScore"])
 
 
-@app.command("type-completeness")
-def type_completeness(
-    update: Annotated[bool, typer.Option("--update", help=UPDATE_HELP)] = False,
-) -> None:
-    """Share of tiny_audio's public symbols with a fully known type; it may only rise.
-
-    The package ships `py.typed`, so its annotations are an API. Strict mode
-    turns off the `reportUnknown*` rules, which this measures instead.
-    """
+def verifytypes_score(package: str) -> float:
+    """`pyright --verifytypes` completeness of `package`, as a percent."""
     proc = subprocess.run(
         [
             sys.executable,
             "-m",
             "pyright",
             "--verifytypes",
-            TYPED_PACKAGE,
+            package,
             "--ignoreexternal",
             "--outputjson",
         ],
@@ -414,20 +412,43 @@ def type_completeness(
         check=False,
     )
     try:
-        score = completeness_percent(json.loads(proc.stdout))
+        return completeness_percent(json.loads(proc.stdout))
     except (json.JSONDecodeError, KeyError) as exc:
-        typer.echo(f"pyright --verifytypes gave no score: {exc}\n{proc.stderr}", err=True)
+        msg = f"pyright --verifytypes {package} gave no score: {exc}\n{proc.stderr}"
+        raise ValueError(msg) from exc
+
+
+@app.command("type-completeness")
+def type_completeness(
+    update: Annotated[bool, typer.Option("--update", help=UPDATE_HELP)] = False,
+) -> None:
+    """Share of each package's public symbols with a fully known type; it may only rise.
+
+    Both packages ship `py.typed`, so their annotations are an API. Strict
+    mode turns off the `reportUnknown*` rules, which this measures instead.
+    """
+    try:
+        scores = {package: verifytypes_score(package) for package in TYPED_PACKAGES}
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
     if update:
-        _save(TYPE_COMPLETENESS_BASELINE, {TYPED_PACKAGE: math.floor(score * 10) / 10})
+        _save(TYPE_COMPLETENESS_BASELINE, {p: math.floor(s * 10) / 10 for p, s in scores.items()})
         typer.echo(f"Recorded {TYPE_COMPLETENESS_BASELINE.relative_to(ROOT)}")
         return
-    floor = float(_load(TYPE_COMPLETENESS_BASELINE).get(TYPED_PACKAGE, 0.0))
-    if score + 1e-9 < floor:
-        typer.echo(f"{TYPED_PACKAGE}: {score:.1f}% type-complete, below {floor:.1f}%", err=True)
+    floors = _load(TYPE_COMPLETENESS_BASELINE)
+    problems = [
+        f"{package}: {score:.1f}% type-complete, below {float(floors.get(package, 0.0)):.1f}%"
+        for package, score in scores.items()
+        if score + 1e-9 < float(floors.get(package, 0.0))
+    ]
+    for problem in problems:
+        typer.echo(problem, err=True)
+    if problems:
         typer.echo("Annotate the new public symbols; never lower the floor.", err=True)
         raise typer.Exit(1)
-    typer.echo(f"type-completeness: {TYPED_PACKAGE} {score:.1f}% (floor {floor:.1f}%)")
+    summary = ", ".join(f"{p} {s:.1f}%" for p, s in scores.items())
+    typer.echo(f"type-completeness: {summary}")
 
 
 # --------------------------------------------------------------- tracked-ignored

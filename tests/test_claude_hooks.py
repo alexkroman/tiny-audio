@@ -10,10 +10,13 @@ from scripts import claude_hooks
 
 
 def payload(path: str) -> dict[str, dict[str, str]]:
+    """A hook payload for an Edit/Write of `path`."""
     return {"tool_input": {"file_path": path}}
 
 
 class TestEditedPath:
+    """Payload paths resolve relative to the repo, and outside paths are ignored."""
+
     def test_absolute_and_relative_paths_resolve_to_the_repo(self, tmp_path: Path) -> None:
         assert claude_hooks.edited_path(payload(str(tmp_path / "a/b.py")), tmp_path) == "a/b.py"
         assert claude_hooks.edited_path(payload("a/b.py"), tmp_path) == "a/b.py"
@@ -28,6 +31,8 @@ class TestEditedPath:
 
 
 class TestProtect:
+    """The PreToolUse hook blocks hand edits to generated files only."""
+
     @pytest.mark.parametrize("rel", ["poetry.lock", "quality/file_length.json"])
     def test_generated_files_are_blocked(self, tmp_path: Path, rel: str) -> None:
         code, message = claude_hooks.protect(payload(rel), tmp_path)
@@ -40,6 +45,8 @@ class TestProtect:
 
 
 class TestLintEdit:
+    """The PostToolUse hook fixes and formats Python edits, reporting what remains."""
+
     def test_formats_fixes_and_passes_clean_code(self, tmp_path: Path) -> None:
         (tmp_path / "a.py").write_text("x = [1,2]\n")
         assert claude_hooks.lint_edit(payload("a.py"), tmp_path) == (0, "")
@@ -57,6 +64,8 @@ class TestLintEdit:
 
 
 class TestMain:
+    """The entry point reads stdin, dispatches by name, and maps results to exit codes."""
+
     def test_runs_the_named_hook_on_stdin(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
     ) -> None:

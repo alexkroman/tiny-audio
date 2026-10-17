@@ -37,6 +37,7 @@ def recorded_runs(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, ...]]:
 
 @pytest.fixture
 def pyproject() -> dict[str, Any]:
+    """The repository's parsed pyproject.toml."""
     return tomllib.loads((get_project_root() / "pyproject.toml").read_text())
 
 
@@ -113,8 +114,7 @@ class TestCommandWiring:
         assert runner.invoke(dev.app, ["test"]).exit_code == 0
         cmd, floors = recorded_runs
         assert cmd[0] == "pytest"
-        assert "--cov=tiny_audio" in cmd
-        assert "--cov=scripts" in cmd
+        assert {"--cov=tiny_audio", "--cov=scripts", "--cov=tests"} <= set(cmd)
         assert "--cov-report=xml" in cmd
         # The per-file floors read the JSON report the test run just wrote.
         assert "--cov-report=json" in cmd
@@ -221,6 +221,7 @@ class TestPrepush:
     def fake_git(
         monkeypatch: pytest.MonkeyPatch, branch: str = "feature", **codes: int
     ) -> list[tuple[str, ...]]:
+        """Stub `dev.git`: report `branch`, and exit with `codes[subcommand]` (default 0)."""
         calls: list[tuple[str, ...]] = []
 
         def git(*args: str) -> SimpleNamespace:
@@ -272,6 +273,7 @@ class TestFormatCode:
     }
 
     def _fake_ls_files(self, cmd: list[str], **_kw: object) -> SimpleNamespace:
+        """`git ls-files <pattern>` answered from LISTINGS."""
         return SimpleNamespace(stdout=self.LISTINGS[cmd[-1]])
 
     def test_every_tracked_markdown_and_json_file_is_formatted(
@@ -332,17 +334,22 @@ class TestQualityGateContents:
         for cmd in dev.DOCSTRINGS_COMMANDS:
             assert cmd in dev.check_commands()
 
-    def test_check_covers_both_packages_with_interrogate(self) -> None:
-        targets = {cmd[1] for cmd in dev.DOCSTRINGS_COMMANDS}
-        assert targets == {"tiny_audio", "scripts"}
+    def test_every_gate_covers_scripts_and_tests_like_the_package(self) -> None:
+        """tiny_audio/, scripts/ and tests/ go through the same gates, with the same floors."""
+        trees = set(dev.QUALITY_PATHS)
+        assert trees == {"tiny_audio", "scripts", "tests"}
+        assert {cmd[1] for cmd in dev.DOCSTRINGS_COMMANDS} == trees
+        assert len({tuple(cmd[2:]) for cmd in dev.DOCSTRINGS_COMMANDS}) == 1  # one rule
+        for cmd in (dev.SECURITY_COMMAND, dev.DEAD_CODE_COMMAND, dev.DUPLICATION_COMMAND):
+            assert trees <= set(cmd), cmd[0]
+        assert {f"--cov={tree}" for tree in trees} <= set(dev.TEST_COMMAND)
 
 
 class TestRatchetFloors:
     """Thresholds may go up, never down."""
 
     def test_docstring_floors(self) -> None:
-        assert int(dev.DOCSTRING_MIN_LIB) >= 95
-        assert int(dev.DOCSTRING_MIN_SCRIPTS) >= 65
+        assert int(dev.DOCSTRING_MIN) >= 95
 
     def test_dead_code_confidence_floor(self) -> None:
         assert int(dev.DEAD_CODE_MIN_CONFIDENCE) <= 80
