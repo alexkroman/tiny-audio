@@ -34,6 +34,7 @@ def activity(
 
 
 def frames(*on: tuple[int, int], n: int = 20) -> npt.NDArray[np.bool_]:
+    """Length-``n`` boolean frame mask, True over each half-open ``(start, end)`` run."""
     out = np.zeros(n, dtype=bool)
     for s, e in on:
         out[s:e] = True
@@ -41,6 +42,8 @@ def frames(*on: tuple[int, int], n: int = 20) -> npt.NDArray[np.bool_]:
 
 
 class TestSampleSpans:
+    """NemotronDiarizer.sample_spans turns active frame runs into sample ranges."""
+
     def test_frames_to_samples(self) -> None:
         spans = NemotronDiarizer.sample_spans(frames((3, 5), (10, 12)), SR, 20 * 160)
         assert spans == [(3 * 160, 5 * 160), (10 * 160, 12 * 160)]
@@ -61,6 +64,8 @@ class TestSampleSpans:
 
 
 class TestMaskedAudio:
+    """masked_audio slices the audio and zeroes it outside the speaker's spans, copy-only."""
+
     def test_zeros_outside_spans_in_the_slice(self) -> None:
         audio = np.arange(1, 11, dtype=np.float32)
         out = masked_audio(audio, [(1, 3), (6, 8)], 2, 9)
@@ -73,6 +78,8 @@ class TestMaskedAudio:
 
 
 class TestSpanIsActive:
+    """NemotronDiarizer.span_is_active says whether a word's time span touches the mask."""
+
     def test_word_inside_and_outside_the_mask(self) -> None:
         mask = frames((10, 20), n=50)
         assert NemotronDiarizer.span_is_active(mask, 0.12, 0.15)
@@ -86,6 +93,8 @@ class TestSpanIsActive:
 
 
 class TestStreamChunks:
+    """stream_chunks packs speaker turns into ASR-sized ranges, cutting long turns quietly."""
+
     def test_packs_turns_up_to_the_limit(self) -> None:
         audio = np.ones(60 * SR, dtype=np.float32)
         spans = [(0, 2 * SR), (5 * SR, 7 * SR), (17 * SR, 19 * SR), (30 * SR, 31 * SR)]
@@ -103,6 +112,8 @@ class TestStreamChunks:
 
 
 class TestDedupeWords:
+    """dedupe_words drops cross-speaker duplicates, keeping the more active speaker's copy."""
+
     def test_keeps_the_more_active_speaker(self) -> None:
         act = activity([(0, 0, 2, 0.9), (1, 1, 3, 0.6)])
         words = [
@@ -176,6 +187,8 @@ class TestStreamsPipeline:
 
     @staticmethod
     def stub_activity(monkeypatch: pytest.MonkeyPatch, act: npt.NDArray[np.float32]) -> None:
+        """Make NemotronDiarizer.activity return ``act`` regardless of the audio."""
+
         def fake_activity(audio: npt.ArrayLike, sample_rate: int = SR) -> npt.NDArray[np.float32]:
             return act
 
@@ -183,6 +196,7 @@ class TestStreamsPipeline:
 
     @staticmethod
     def speech(seconds: float = 5.0) -> dict[str, Any]:
+        """Seeded Gaussian-noise audio dict of ``seconds`` at 16 kHz, standing in for speech."""
         audio = np.random.default_rng(0).normal(0, 0.1, int(seconds * SR)).astype(np.float32)
         return {"array": audio, "sampling_rate": SR}
 

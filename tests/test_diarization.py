@@ -25,11 +25,14 @@ class TestNemotronGetInstance:
 
     @pytest.fixture(autouse=True)
     def reset_cache(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Clear the class-level model/processor cache for each test, restored afterwards."""
         monkeypatch.setattr(NemotronDiarizer, "_model", None)
         monkeypatch.setattr(NemotronDiarizer, "_processor", None)
 
     @staticmethod
     def _find_spec(spec: object) -> Callable[[str], object]:
+        """Stand-in for importlib.util.find_spec that returns ``spec`` for any name."""
+
         def find_spec(_name: str) -> object:
             return spec
 
@@ -58,6 +61,7 @@ class TestNemotronActivity:
 
     @pytest.fixture
     def processor(self, monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+        """Stub get_instance with a CPU model emitting zero logits; return the mock processor."""
         model = MagicMock()
         model.device = torch.device("cpu")
         model.dtype = torch.float32

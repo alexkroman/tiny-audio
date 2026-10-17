@@ -28,6 +28,7 @@ class TestResolveAttnImplementation:
 
     @pytest.fixture(autouse=True)
     def no_accelerators(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Report neither MPS nor CUDA as available, so every test starts on plain CPU."""
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
         monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
 
@@ -96,6 +97,7 @@ class TestHasSlidingWindowAttention:
 
     @pytest.fixture(autouse=True)
     def clear_cache(self) -> Iterator[None]:
+        """Clear the cached config lookups before and after each test so stubs take effect."""
         _has_sliding_window_attention.cache_clear()
         _text_config.cache_clear()
         yield
@@ -104,6 +106,7 @@ class TestHasSlidingWindowAttention:
 
     @staticmethod
     def _patch(monkeypatch: pytest.MonkeyPatch, **attrs: object) -> None:
+        """Make AutoConfig.from_pretrained return a config carrying ``attrs``."""
         config = SimpleNamespace(**attrs)
 
         def from_pretrained(*a: object, **k: object) -> SimpleNamespace:
@@ -162,6 +165,7 @@ class _MaskOnDevice:
     """
 
     def __init__(self, rows: list[list[int]], device: str) -> None:
+        """Hold ``rows`` as a CPU tensor while reporting ``device`` as its device."""
         self._tensor = torch.tensor(rows)
         self.device = torch.device(device)
         self.shape = self._tensor.shape
@@ -170,6 +174,7 @@ class _MaskOnDevice:
     def __eq__(  # pyright: ignore[reportIncompatibleMethodOverride]
         self, other: torch.Tensor | int
     ) -> torch.Tensor:
+        """Compare elementwise against the wrapped tensor."""
         return self._tensor == other
 
     # Like a real Tensor, hash by identity even though __eq__ is elementwise.
@@ -181,6 +186,7 @@ class TestAssertSdpaSafeOnMps:
 
     @staticmethod
     def _call(impl: str, mask: _MaskOnDevice | None) -> None:
+        """Run the MPS guard on a stub model whose LM uses attention ``impl``."""
         model = stub(
             language_model=SimpleNamespace(config=SimpleNamespace(_attn_implementation=impl))
         )
@@ -229,6 +235,8 @@ class TestAssertAudioTokenCounts:
 
     @staticmethod
     def projector() -> MagicMock:
+        """Mock projector whose get_output_length is ``(n - 4) // 4 + 1``."""
+
         def output_length(n: int) -> int:
             return (n - 4) // 4 + 1
 

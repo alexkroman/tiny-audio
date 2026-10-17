@@ -26,6 +26,8 @@ MISS = [("alpha beta gamma", "alpha beta delta")] * 5
 
 
 class TestExcludeDatasets:
+    """exclude_datasets keeps a one-off later run from hiding the full sweep."""
+
     def test_excluded_dataset_cannot_shadow_a_full_sweep(self, tmp_path: Path) -> None:
         """A later one-dataset run hides the full sweep -- unless that dataset is excluded."""
         for ds in ("ami", "loquacious"):
@@ -41,6 +43,8 @@ class TestExcludeDatasets:
 
 
 class TestLatestSweep:
+    """latest_sweep keeps only the newest run id's directories, across all datasets."""
+
     def test_picks_newest_run_id_and_drops_older_sweep(self, tmp_path: Path) -> None:
         write_run(tmp_path, "20260101_000000", "modelA", "ami", "oldrun", MATCH, 0.0)
         write_run(tmp_path, "20260102_000000", "modelA", "ami", "newrun", MISS, 33.3)
@@ -67,6 +71,8 @@ class TestLatestSweep:
 
 
 class TestMatchedCorpus:
+    """recompute_matched_corpus pools only datasets and rows every model shares."""
+
     def test_corpus_uses_only_datasets_every_model_has(self, tmp_path: Path) -> None:
         write_run(tmp_path, "20260102_000000", "modelA", "ami", "ra", MISS, 33.3)
         write_run(tmp_path, "20260102_001000", "modelA", "tedlium", "ra", MISS, 33.3)

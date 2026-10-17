@@ -29,12 +29,15 @@ def _model(accepts: bool, vocab: int = 248320, name: str = "Qwen3_5ForCausalLM")
 
 
 def _cfg(**training: object) -> DictConfig:
+    """Stub config whose ``training`` section is Liger on, batch 48, plus ``training``."""
     base: dict[str, object] = {"use_liger": True, "per_device_train_batch_size": 48}
     base.update(training)
     return stub(training=base)
 
 
 class TestRaisesWhereItCosts:
+    """On CUDA with a large vocab and no fused CE, the guard raises an actionable error."""
+
     def test_raises_on_cuda_with_a_large_vocab(self) -> None:
         with (
             patch("torch.cuda.is_available", return_value=True),
@@ -56,6 +59,8 @@ class TestRaisesWhereItCosts:
 
 
 class TestEscapeHatches:
+    """The guard stays silent off CUDA, on small vocabs, or when unfused CE is deliberate."""
+
     def test_silent_when_fused_ce_is_active(self) -> None:
         with patch("torch.cuda.is_available", return_value=True):
             _require_fused_cross_entropy(_model(True), _cfg())

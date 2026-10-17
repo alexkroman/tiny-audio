@@ -15,11 +15,13 @@ from scripts.eval.audio import TextNormalizer, as_16k_array, audio_to_wav_bytes,
 
 
 def decode(wav: bytes) -> tuple[sf.AudioData, int]:
+    """Read WAV bytes back into ``(samples, sample_rate)``."""
     return sf.read(io.BytesIO(wav))
 
 
 @pytest.fixture
 def tone() -> npt.NDArray[np.float32]:
+    """Provide one second of a 440 Hz sine at 16 kHz, amplitude 0.5."""
     t = np.arange(16000, dtype=np.float32) / 16000
     return (0.5 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
 
@@ -136,9 +138,10 @@ class _LowercaseNormalizer(EnglishTextNormalizer):
     """Stand-in for Whisper's normalizer: lowercases, loads no spelling table."""
 
     def __init__(self) -> None:
-        pass
+        """Skip the parent __init__ so no spelling table is loaded."""
 
     def __call__(self, s: str) -> str:
+        """Lowercase ``s`` and nothing else."""
         return s.lower()
 
 

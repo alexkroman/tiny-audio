@@ -5,6 +5,8 @@ from scripts.train_collator import TRANSCRIBE_PROMPT_PUNCT
 
 
 class TestResolveTranscribePrompt:
+    """An unset prompt becomes the punct prompt only if a training dataset has punctuation."""
+
     def test_unset_with_punct_source_resolves_to_punct(self) -> None:
         datasets = [
             {"path": "tedlium", "text_punct": False, "train_splits": ["train"]},

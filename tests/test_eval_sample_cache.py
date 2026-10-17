@@ -24,6 +24,7 @@ def _stream(n: int) -> IterableDataset:
 
 
 def _read(samples: CachedSamples, n: int) -> list[dict[str, object]]:
+    """Take the first ``n`` rows from a fresh iteration of ``samples``."""
     return list(itertools.islice(iter(samples), n))
 
 

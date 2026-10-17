@@ -13,6 +13,7 @@ from tiny_audio.diarization import NemotronDiarizer
 def activity(
     spans: list[tuple[int, float, float, float]], seconds: float = 4.0
 ) -> npt.NDArray[np.float32]:
+    """Build a 100 fps x 8-speaker activity matrix from (column, start, end, prob) spans."""
     act = np.zeros((int(seconds * 100), 8), dtype=np.float32)
     for col, start, end, p in spans:
         act[int(start * 100) : int(end * 100), col] = p
@@ -20,6 +21,8 @@ def activity(
 
 
 class TestTopSpeakers:
+    """Speakers above threshold come back in arrival order, capped by most speech."""
+
     def test_every_column_that_speaks_in_arrival_order(self) -> None:
         act = activity([(4, 0, 1, 0.9), (1, 1, 2, 0.9), (6, 2, 3, 0.3)])  # col 6 never > 0.5
         assert NemotronDiarizer.top_speakers(act) == [1, 4]
@@ -34,6 +37,8 @@ class TestTopSpeakers:
 
 
 class TestSegments:
+    """Activity columns become per-speaker segments, which may overlap."""
+
     def test_overlap_produces_overlapping_segments(self) -> None:
         act = activity([(0, 0, 2, 0.9), (1, 1.5, 3, 0.9)])
         segs = NemotronDiarizer.segments(act, [0, 1])
@@ -44,6 +49,8 @@ class TestSegments:
 
 
 class TestChunkBounds:
+    """Audio is split into contiguous chunks no longer than the training length."""
+
     def test_short_audio_is_one_chunk(self) -> None:
         assert chunk_bounds(np.ones(10 * 16000, np.float32), 16000) == [(0, 160000)]
 
@@ -63,6 +70,7 @@ class TestAudibleChunks:
     sr = 16000
 
     def speech_then_tail(self, tail_level: float) -> npt.NDArray[np.float32]:
+        """Build 15 s of noise-like speech followed by a 6 s tail at `tail_level` std."""
         rng = np.random.default_rng(0)
         speech = rng.normal(0, 0.1, 15 * self.sr)
         tail = rng.normal(0, tail_level, 6 * self.sr)

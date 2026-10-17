@@ -8,11 +8,14 @@ from docs.site import course_code
 
 
 def _block(lang: str, code: str) -> course_code.CodeBlock:
+    """Wrap `code` as a block on line 1 of a fake course page."""
     page = course_code.ROOT / "docs" / "course" / "example.md"
     return course_code.CodeBlock(page, 1, lang, code)
 
 
 class TestCourseExamples:
+    """Every code block in docs/course covers each checked language and passes its check."""
+
     BLOCKS = course_code.course_blocks()
 
     def test_course_has_examples_of_every_checked_language(self) -> None:
@@ -39,6 +42,8 @@ class TestDocExamples:
 
 
 class TestExtractBlocks:
+    """Fenced blocks are found inside lists and blockquotes, with markers stripped."""
+
     def test_strips_list_indent_and_blockquote_markers(self, tmp_path: Path) -> None:
         page = tmp_path / "page.md"
         page.write_text(
@@ -55,6 +60,8 @@ class TestExtractBlocks:
 
 
 class TestShellCommands:
+    """Shell snippets are split into argv lists ready to check against the CLI."""
+
     def test_joins_continuations_fills_placeholders_and_drops_comments(self) -> None:
         code = "# note\nta runpod attach <HOST> <PORT> \\\n    --logs  # recent\n"
         assert course_code.shell_commands(code) == [
@@ -63,6 +70,8 @@ class TestShellCommands:
 
 
 class TestCheckBlock:
+    """`check_block` names each kind of broken example and passes valid or untagged ones."""
+
     @pytest.mark.parametrize(
         ("lang", "code", "problem"),
         [

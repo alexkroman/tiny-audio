@@ -37,6 +37,7 @@ IMAGE = "img:1"
 
 
 def _plan(disk_gib: float = 100.0, vram_gib: float = 30.0) -> Plan:
+    """Build a two-component Plan recommending ``disk_gib`` disk and ``vram_gib`` VRAM."""
     return Plan(
         components=[
             Component("encoder", params=1_000, download_bytes=2 * GIB),
@@ -72,6 +73,7 @@ def stub_catalog(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
 
 def _use_plan(monkeypatch: pytest.MonkeyPatch, plan: Plan) -> list[tuple[Any, ...]]:
+    """Make ``build_plan`` return ``plan``; the returned list collects its call args."""
     calls: list[tuple[Any, ...]] = []
 
     def fake_build_plan(*args: Any) -> Plan:
@@ -83,6 +85,7 @@ def _use_plan(monkeypatch: pytest.MonkeyPatch, plan: Plan) -> list[tuple[Any, ..
 
 
 def _run_plan(**kwargs: Any) -> int | None:
+    """Call plan_command with default arguments, overridden by ``kwargs``."""
     args: dict[str, Any] = {
         "experiment": "exp",
         "seq_len": 320,
@@ -96,6 +99,8 @@ def _run_plan(**kwargs: Any) -> int | None:
 
 
 class TestPlanCommand:
+    """plan_command picks a GPU, disk vs network volume and datacenter, and prints the plan."""
+
     def test_json_output(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -201,14 +206,18 @@ class TestPlanCommand:
 
 
 class TestProvisionCommand:
+    """provision_command walks candidate GPUs until a training pod is created, or exits."""
+
     @pytest.fixture
     def home(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+        """Point HOME at tmp_path with an ``~/.ssh/id_ed25519.pub`` for the pod's key."""
         monkeypatch.setenv("HOME", str(tmp_path))
         (tmp_path / ".ssh").mkdir()
         (tmp_path / ".ssh" / "id_ed25519.pub").write_text("ssh-ed25519 AAAA me\n")
         return tmp_path
 
     def _run(self, **kwargs: Any) -> str | None:
+        """Call provision_command with default arguments, overridden by ``kwargs``."""
         args: dict[str, Any] = {
             "experiment": "exp",
             "seq_len": 320,
@@ -224,6 +233,10 @@ class TestProvisionCommand:
     def _stub_create(
         self, monkeypatch: pytest.MonkeyPatch, responses: list[str]
     ) -> list[list[str]]:
+        """Stub subprocess.run to answer the Nth pod-create call with ``responses[N]``.
+
+        Returns the list the stub appends each command line to.
+        """
         calls: list[list[str]] = []
 
         def fake_run(args: list[str], **_: Any) -> SimpleNamespace:
@@ -311,8 +324,11 @@ class TestProvisionCommand:
 
 
 class TestProvisionServeCommand:
+    """provision_serve_command orders SERVE_GPUS by preference and honours dry runs."""
+
     @pytest.fixture
     def home(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+        """Point HOME at tmp_path with an ``~/.ssh/id_ed25519.pub`` for the pod's key."""
         monkeypatch.setenv("HOME", str(tmp_path))
         (tmp_path / ".ssh").mkdir()
         (tmp_path / ".ssh" / "id_ed25519.pub").write_text("ssh-ed25519 AAAA me\n")

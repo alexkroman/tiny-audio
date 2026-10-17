@@ -16,6 +16,7 @@ from scripts.deploy.hub_sizes import (
 
 
 def _tensor(dtype: str, shape: tuple[int, ...]) -> SimpleNamespace:
+    """Fake a safetensors tensor-info entry with its parameter count."""
     count = 1
     for dim in shape:
         count *= dim
@@ -84,6 +85,7 @@ def test_vocab_table_params_reports_only_present_tables() -> None:
 
 
 def _info(*files: tuple[str, int | None]) -> SimpleNamespace:
+    """Fake a `model_info` result whose siblings are the given (filename, size) pairs."""
     return SimpleNamespace(
         siblings=[SimpleNamespace(rfilename=name, size=size) for name, size in files]
     )

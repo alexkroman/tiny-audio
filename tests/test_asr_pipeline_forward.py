@@ -37,14 +37,17 @@ def pipeline() -> ASRPipeline:
 
 
 def mock_model(pipe: ASRPipeline) -> MagicMock:
+    """Return the pipeline's model typed as the MagicMock the fixture installed."""
     return cast(MagicMock, pipe.model)
 
 
 def mock_tokenizer(pipe: ASRPipeline) -> MagicMock:
+    """Return the pipeline's tokenizer typed as the MagicMock the fixture installed."""
     return cast(MagicMock, pipe.tokenizer)
 
 
 def model_inputs() -> dict[str, Any]:
+    """Build a minimal non-final chunk of model inputs for `_forward`."""
     return {
         "input_features": torch.zeros(1, 80, 10),
         "attention_mask": torch.ones(1, 10, dtype=torch.long),
@@ -226,6 +229,8 @@ class TestCallPromptHandling:
 
 
 class TestTranscribeTimed:
+    """Timestamped transcription skips the forced aligner when the transcript is empty."""
+
     def test_empty_transcript_never_loads_the_aligner(
         self, pipeline: ASRPipeline, monkeypatch: pytest.MonkeyPatch
     ) -> None:

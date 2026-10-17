@@ -99,11 +99,13 @@ class TestMockEvaluator:
         """Mock evaluator for testing."""
 
         def __init__(self, responses: list[str], **kwargs: Unpack[EvaluatorOptions]) -> None:
+            """Store the canned responses and start the call counter at zero."""
             super().__init__(**kwargs)
             self.responses = responses
             self.call_count = 0
 
         def transcribe(self, audio: object) -> Transcription:
+            """Return the next canned response, cycling through the list."""
             response = self.responses[self.call_count % len(self.responses)]
             self.call_count += 1
             return response, 0.1, None
@@ -194,11 +196,15 @@ class TestEvaluatorReuseAcrossDatasets:
     """
 
     class MockEvaluator(Evaluator):
+        """Echoes its audio as the transcript and counts one simulated model load."""
+
         def __init__(self, **kwargs: Unpack[EvaluatorOptions]) -> None:
+            """Record a single setup, standing in for loading a model once."""
             super().__init__(**kwargs)
             self.setup_count = 1  # stands in for a model load
 
         def transcribe(self, audio: object) -> Transcription:
+            """Echo the audio value back as the transcript."""
             return str(audio), 0.1, None
 
     def test_field_overrides_apply_per_call(self) -> None:

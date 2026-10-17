@@ -22,6 +22,8 @@ from tiny_audio.asr_processing import prepend_lead_in
 
 
 class TestPrependLeadIn:
+    """prepend_lead_in adds exact zero-padding per waveform, or passes through when off."""
+
     def test_prepends_exactly_the_requested_silence(self) -> None:
         audio = np.ones(1600, dtype=np.float32)
         out = prepend_lead_in(audio, 16000, 0.25)
@@ -55,6 +57,8 @@ class TestPrependLeadIn:
 
 
 class TestConfigField:
+    """ASRConfig.inference_lead_in_seconds defaults to 0.25 and serializes."""
+
     def test_default_is_the_measured_value(self) -> None:
         assert ASRConfig().inference_lead_in_seconds == 0.25
 
@@ -71,6 +75,7 @@ class TestPipelineIntegration:
     """The pipeline must apply a real config value and ignore a stubbed one."""
 
     def _fake_pipeline(self, lead_in: object) -> ASRPipeline:
+        """Bare ASRPipeline (no __init__) whose model config carries ``lead_in``."""
         pipe = ASRPipeline.__new__(ASRPipeline)
         pipe.model = stub(config=types.SimpleNamespace(inference_lead_in_seconds=lead_in))
         pipe.feature_extractor = stub(sampling_rate=16000)
@@ -79,6 +84,7 @@ class TestPipelineIntegration:
     def _captured(
         self, pipe: ASRPipeline, audio: npt.NDArray[np.float32], monkeypatch: pytest.MonkeyPatch
     ) -> dict[str, Any]:
+        """Run ``pipe.preprocess`` on ``audio`` and return what it passed to the HF parent."""
         seen: dict[str, dict[str, Any]] = {}
 
         def fake_preprocess(

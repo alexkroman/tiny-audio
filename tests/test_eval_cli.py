@@ -336,6 +336,7 @@ class TestResultsContent:
 
 
 def _build_with_diarizer(model: str, streaming: bool = False) -> tuple[str, object]:
+    """Build an evaluator for `model` with `--diarizer-url` set and dummy API keys."""
     return _build_evaluator(
         model=model,
         endpoint=False,

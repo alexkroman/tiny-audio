@@ -14,6 +14,7 @@ class MockProjector:
     """Mock projector that mimics stride-2 downsampling."""
 
     def get_output_length(self, input_length: torch.Tensor) -> torch.Tensor:
+        """Return the frame count after stride-2 downsampling."""
         return input_length // 2
 
 

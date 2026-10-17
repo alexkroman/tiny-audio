@@ -23,6 +23,7 @@ from tiny_audio.asr_pipeline import ASRPipeline, PreparedChunk
 
 
 def _chunk(frames: int) -> PreparedChunk:
+    """Build a prepared chunk of `frames` frames; FakeModel echoes the count as a token."""
     return {
         "input_features": torch.zeros(1, frames, 4),
         "attention_mask": torch.ones(1, frames, dtype=torch.long),
@@ -33,10 +34,12 @@ class FakeCache:
     """Stands in for StaticCache: records its length and resets."""
 
     def __init__(self, config: object, max_cache_len: int) -> None:
+        """Keep the cache length and start the reset count at zero."""
         self.max_cache_len = max_cache_len
         self.resets = 0
 
     def reset(self) -> None:
+        """Count a reset."""
         self.resets += 1
 
 
@@ -48,12 +51,14 @@ class FakeModel:
     """generate() returns, per row: the row's frame count, then EOS (or no EOS for LONG)."""
 
     def __init__(self) -> None:
+        """Set a 256-token generation budget and start with no recorded calls."""
         self.generation_config = SimpleNamespace(max_new_tokens=256, eos_token_id=[EOS, 98])
         self.language_model = SimpleNamespace(config=object())
         self.device = torch.device("cpu")
         self.calls: list[dict[str, Any]] = []
 
     def generate(self, **kwargs: Any) -> torch.Tensor:
+        """Record the call and return budget-length rows of frame count plus EOS."""
         frames = kwargs["audio_attention_mask"].sum(dim=-1).tolist()
         budget = kwargs["max_new_tokens"]
         self.calls.append({"frames": frames, **kwargs})
@@ -63,6 +68,10 @@ class FakeModel:
 
 @pytest.fixture
 def decoder(monkeypatch: pytest.MonkeyPatch) -> tuple[GraphedDecoder, FakeModel]:
+    """Provide a GraphedDecoder over a FakeModel with FakeCache and a 253-token prompt.
+
+    The pipeline's longest chunk is 40 frames, which calibrates the short tier.
+    """
     monkeypatch.setattr(inference, "StaticCache", FakeCache)
 
     def prompt_253(pipe: object, prepared: object) -> int:
@@ -82,6 +91,8 @@ def decoder(monkeypatch: pytest.MonkeyPatch) -> tuple[GraphedDecoder, FakeModel]
 
 
 class TestGraphedDecoder:
+    """Batches pad to buckets on a short tier; rows that run out are redone on the full tier."""
+
     def test_buckets_and_tiers(self, decoder: tuple[GraphedDecoder, FakeModel]) -> None:
         dec, _ = decoder
         assert dec.buckets == [1, 2, 4, 6, 8, 12, 16, 24]
@@ -157,6 +168,7 @@ class TestMpsSafeSdpa:
 
     @staticmethod
     def _qkv() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return seeded random query, key and value tensors of shape (1, 2, 4, 8)."""
         gen = torch.Generator().manual_seed(0)
         q, k, v = (torch.randn(1, 2, 4, 8, generator=gen) for _ in range(3))
         return q, k, v
@@ -198,6 +210,7 @@ class TestGqaDecodeSdpa:
 
     @staticmethod
     def _module() -> torch.nn.Module:
+        """Fake an eval-mode attention module with four query heads per KV head."""
         # 8 query heads over 2 KV heads, as in Qwen3.5-2B.
         module = SimpleNamespace(training=False, num_key_value_groups=4, is_causal=True)
         return cast(torch.nn.Module, module)

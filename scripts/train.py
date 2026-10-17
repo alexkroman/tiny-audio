@@ -10,6 +10,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, NamedTuple
 
+import datasets
 import hydra
 import torch
 import torch._dynamo.config as dynamo_config
@@ -47,6 +48,7 @@ from tiny_audio.asr_modeling import ASRModel
 # training falls back to stock kernels and unfused cross-entropy.
 _liger_transformers: ModuleType | None
 _liger_import_error: ImportError | None
+exc: ImportError
 try:
     from liger_kernel import transformers as liger_transformers
 except ImportError as exc:
@@ -59,7 +61,7 @@ else:
 for _noisy in ("httpx", "httpcore", "urllib3", "huggingface_hub.file_download"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 
-logger = logging.getLogger(__name__)
+logger: logging.Logger = logging.getLogger(__name__)
 
 # Register the `base_config` structured-config schema that configs/config.yaml
 # lists first in its defaults (scripts/train_config.py). Must happen before
@@ -199,14 +201,15 @@ class DatasetLoader:
     """
 
     def __init__(self, config: DictConfig):
-        self.config = config.data
-        self.sample_rate = self.config.sample_rate
-        self.cache_dir = self.config.dataset_cache_dir
-        self.seed = config.training.get("seed", 42)
-        self.num_proc = self.config.get("num_proc", 16)
-        self.num_train_epochs = config.training.get("num_train_epochs", 1)
+        """Read the `data` block, plus the seed and epoch count from `training`."""
+        self.config: DictConfig = config.data
+        self.sample_rate: int = self.config.sample_rate
+        self.cache_dir: str | None = self.config.dataset_cache_dir
+        self.seed: int = config.training.get("seed", 42)
+        self.num_proc: int = self.config.get("num_proc", 16)
+        self.num_train_epochs: float = config.training.get("num_train_epochs", 1)
         # See _expand_epochs / load() for what this does and why it exists.
-        self.epoch_expansion = int(self.config.get("epoch_expansion", 1) or 1)
+        self.epoch_expansion: int = int(self.config.get("epoch_expansion", 1) or 1)
 
     def _prepare_split(self, dataset_cfg: DictConfig, split: str) -> Dataset:
         """Load one split of one source and reduce it to the columns training reads."""
@@ -434,7 +437,8 @@ class DatasetLoader:
             return ds
         return ds.repeat(times)
 
-    def load(self) -> tuple[Dataset | None, Dataset | None]:
+    def load(self) -> tuple[datasets.Dataset | None, datasets.Dataset | None]:
+        """Build the shuffled training set and the capped eval set (None if no splits)."""
         train_datasets: list[Dataset] = []
         val_datasets: list[Dataset] = []
 
@@ -659,6 +663,8 @@ def optimizer_param_groups(
 class ASRTrainer(Trainer):
     """Trainer subclass for ASR models."""
 
+    optimizer: torch.optim.Optimizer | None
+
     def __init__(
         self,
         *args: Any,
@@ -668,6 +674,7 @@ class ASRTrainer(Trainer):
         encoder_weight_decay: float | None = None,
         **kwargs: Any,
     ) -> None:
+        """Pass `args`/`kwargs` to Trainer; keep per-group LR/decay overrides (None = global)."""
         super().__init__(*args, **kwargs)
         self.decoder_learning_rate = decoder_learning_rate
         self.projector_weight_decay = projector_weight_decay
@@ -723,8 +730,11 @@ class ASRTrainer(Trainer):
         optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(
             self.args, opt_model if isinstance(opt_model, PreTrainedModel) else None
         )
-        self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
-        return self.optimizer
+        optimizer: torch.optim.Optimizer = optimizer_cls(
+            optimizer_grouped_parameters, **optimizer_kwargs
+        )
+        self.optimizer = optimizer
+        return optimizer
 
 
 class PushToHubCallback(TrainerCallback):
@@ -737,6 +747,7 @@ class PushToHubCallback(TrainerCallback):
         control: TrainerControl,
         **kwargs: Any,
     ) -> None:
+        """Push the current model to `hub_model_id`; push failures never stop training."""
         # Returning None leaves `control` as is: CallbackHandler only replaces
         # it when a callback returns a new one.
         del control
@@ -979,6 +990,7 @@ def disable_chat_template_thinking(model: ASRModel) -> None:
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig) -> None:
+    """Train an ASR model from the composed Hydra config (`ta train` / python -m scripts.train)."""
     push_to_hub = cfg.training.get("push_to_hub") and cfg.training.get("hub_model_id")
     # Fail before model load and data prep: Trainer's own repo creation would
     # only raise after both, and PushToHubCallback swallows push errors, so

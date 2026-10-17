@@ -7,7 +7,7 @@ from typing import Annotated
 import typer
 from huggingface_hub import HfApi, RepoUrl, SpaceHardware, upload_folder
 
-app = typer.Typer(add_completion=False)
+app: typer.Typer = typer.Typer(add_completion=False)
 
 
 def extract_repo_id(repo_id_or_url: str) -> str:

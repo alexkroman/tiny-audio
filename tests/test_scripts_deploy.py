@@ -73,6 +73,8 @@ class TestRunpodConnectionUtils:
 
 
 def _free_gib(value: float | None) -> Callable[..., float | None]:
+    """Stand-in for ``_remote_free_gib`` that always reports ``value`` GiB free."""
+
     def free_gib(conn: object, *a: object, **k: object) -> float | None:
         return value
 
@@ -80,6 +82,7 @@ def _free_gib(value: float | None) -> Callable[..., float | None]:
 
 
 def _plan_recommending_2500(*a: object, **k: object) -> object:
+    """Stand-in for ``build_plan``: a plan whose only field is a 2500 GiB disk recommendation."""
     return type("P", (), {"disk": {"recommended": 2500.0}})()
 
 
@@ -92,6 +95,7 @@ class TestRemoteDiskPreflight:
 
     @staticmethod
     def _conn(stdout: str, ok: bool = True) -> MagicMock:
+        """Mock connection whose ``run`` returns a result with ``ok`` and ``stdout``."""
         conn = MagicMock()
         conn.run.return_value = MagicMock(ok=ok, stdout=stdout)
         return conn
@@ -367,6 +371,7 @@ class TestBuildEvalScript:
         streaming: bool = True,
         extra_args: Sequence[str] | None = ("--foo", "bar"),
     ) -> str:
+        """Build the eval script with every option set, each overridable by keyword."""
         return build_eval_script(
             hf_token="hf_x",
             model="me/model",
@@ -409,6 +414,8 @@ class TestBuildEvalScript:
 
 
 class TestServeScript:
+    """build_serve_script starts the public server on the pod and exports any API key."""
+
     def test_binds_all_interfaces_and_prints_url(self) -> None:
         script = build_serve_script("hf_x", "me/model", 8000, 48, "")
         assert "python -m scripts.serve" in script

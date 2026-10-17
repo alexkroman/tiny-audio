@@ -61,7 +61,7 @@ class LazyGroup(typer.core.TyperGroup):
         return self.commands.get(cmd_name)
 
 
-app = typer.Typer(name="tiny-audio", cls=LazyGroup, no_args_is_help=True)
+app: typer.Typer = typer.Typer(name="tiny-audio", cls=LazyGroup, no_args_is_help=True)
 
 
 @app.callback()

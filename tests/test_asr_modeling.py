@@ -636,6 +636,7 @@ class TestEosTokenResolution:
 
 @pytest.fixture(scope="module")
 def unfrozen_encoder_model() -> ASRModel:
+    """Provide a module-scoped ASRModel whose audio encoder is trainable."""
     # Read-only users only: test_encoder_updates_survive_save_reload mutates
     # weights, so it builds its own.
     return ASRModel(make_asr_config(freeze_audio_encoder=False))
@@ -798,6 +799,7 @@ class TestAssertProjectorLoaded:
 
     @staticmethod
     def _keys(missing: Sequence[str] = (), unexpected: Sequence[str] = ()) -> _IncompatibleKeys:
+        """Build the load_state_dict result reporting these missing and unexpected keys."""
         return _IncompatibleKeys(list(missing), list(unexpected))
 
     def test_accepts_frozen_module_keys(self) -> None:

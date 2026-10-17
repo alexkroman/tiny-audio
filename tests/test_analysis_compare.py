@@ -18,6 +18,11 @@ BAD = [("alpha beta gamma delta", "alpha beta gamma epsilon")] * 20
 
 @pytest.fixture
 def outputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Provide an outputs dir where modelA is perfect and modelB misses 1 word in 4.
+
+    Each model has one sweep over ami and tedlium. The test also runs from tmp_path
+    and widens the console so table titles stay on one line.
+    """
     monkeypatch.chdir(tmp_path)  # no outputs/keywords.json: entity columns stay empty
     monkeypatch.setattr(common.console, "width", 400)  # keep table titles on one line
     root = tmp_path / "outputs"
@@ -28,6 +33,8 @@ def outputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 class TestCompare:
+    """The compare command prints its tables, needs a sweep per model and honours excludes."""
+
     def test_prints_every_table_and_separates_a_clear_gap(self, outputs: Path) -> None:
         result = runner.invoke(app, ["compare", "modelA", "modelB", "-o", str(outputs)])
         assert result.exit_code == 0, result.output

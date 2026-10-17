@@ -123,6 +123,8 @@ CONTAINER_DISK_WITH_VOLUME_GB = 50
 
 @dataclass
 class Component:
+    """One model part in a plan: its size, download bytes and whether it trains."""
+
     name: str
     params: int = 0
     download_bytes: int = 0
@@ -132,6 +134,8 @@ class Component:
 
 @dataclass
 class Plan:
+    """A sized run: components, dataset footprint, VRAM and disk estimates, warnings."""
+
     components: list[Component] = field(default_factory=list[Component])
     dataset_bytes: int = 0
     dataset_rows: list[tuple[str, int]] = field(default_factory=list[tuple[str, int]])
@@ -141,18 +145,22 @@ class Plan:
 
     @property
     def trainable_params(self) -> int:
+        """Parameters summed over the components that train."""
         return sum(c.params for c in self.components if c.trainable)
 
     @property
-    def need_vram_gib(self) -> float:  # overhead-padded VRAM a GPU must have
+    def need_vram_gib(self) -> float:
+        """Overhead-padded VRAM, in GiB, a GPU must have."""
         return self.vram[VRAM_RECOMMENDED_KEY]
 
     @property
-    def disk_gb(self) -> int:  # disk to request: the estimate + 15% + 5 GB of slack
+    def disk_gb(self) -> int:
+        """Disk to request, in GB: the estimate + 15% + 5 GB of slack."""
         return int(self.disk["recommended"] * 1.15) + 5
 
 
 def _load_cfg(experiment: str | None, overrides: list[str]) -> DictConfig:
+    """Compose configs/config.yaml with the experiment preset and overrides, as train.py would."""
     # Registers the `base_config` structured-config schema configs/config.yaml
     # composes against (idempotent; train_config also does it on import).
     register_configs()
@@ -163,6 +171,7 @@ def _load_cfg(experiment: str | None, overrides: list[str]) -> DictConfig:
 
 
 def _pod_name(experiment: str | None) -> str:
+    """Default pod name: `tiny-audio-<experiment>`, or `tiny-audio` with no preset."""
     return f"tiny-audio-{experiment}" if experiment else "tiny-audio"
 
 
@@ -615,6 +624,7 @@ def build_plan(experiment: str | None, overrides: list[str], seq_len: int) -> Pl
 
 
 def _fmt(n: float) -> str:
+    """Format a GiB figure for the plan tables."""
     return f"{n:,.2f} GiB"
 
 

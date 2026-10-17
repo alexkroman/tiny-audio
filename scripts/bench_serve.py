@@ -24,7 +24,7 @@ import jiwer
 import soundfile
 import typer
 
-app = typer.Typer(add_completion=False)
+app: typer.Typer = typer.Typer(add_completion=False)
 
 
 @dataclass
@@ -61,6 +61,7 @@ async def _run_level(
     result = LevelResult()
 
     async def one() -> None:
+        """Send one request once a slot frees, recording its latency and text or its error."""
         async with gate:
             start = time.perf_counter()
             try:
@@ -83,6 +84,7 @@ async def _run_level(
 async def _bench(
     url: str, audio: Path, levels: list[int], requests: int | None, parameters: dict[str, Any]
 ) -> None:
+    """Warm the server once, then print client latency and server stats per concurrency level."""
     seconds = soundfile.info(str(audio)).duration
     payload = {"inputs": base64.b64encode(audio.read_bytes()).decode(), "parameters": parameters}
     base = url.rstrip("/")

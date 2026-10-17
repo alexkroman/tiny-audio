@@ -379,6 +379,7 @@ class TestBatchedChunks:
 
     @staticmethod
     def _prepared(frames: int, dim: int = 4, time_major: bool = True) -> PreparedChunk:
+        """Build an all-ones prepared chunk of `frames` frames, time- or feature-major."""
         shape = (1, frames, dim) if time_major else (1, dim, frames)
         return {
             "input_features": torch.ones(shape),

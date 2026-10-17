@@ -11,6 +11,7 @@ from scripts.eval import datasets as ds_mod
 
 @pytest.fixture
 def fake_load(monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, MagicMock]:
+    """Patch `load_dataset` with a mock; return (the mock, the dataset it returns)."""
     loaded = MagicMock(name="dataset")
     load = MagicMock(return_value=loaded)
     monkeypatch.setattr(ds_mod, "load_dataset", load)

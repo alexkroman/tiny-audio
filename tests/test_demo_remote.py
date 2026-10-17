@@ -51,8 +51,11 @@ def test_query_parameters_match_the_server_parser() -> None:
 
 
 class TestRemoteRunner:
+    """The remote runner posts compacted audio to the server and reports HTTP errors."""
+
     @staticmethod
     def _serve(monkeypatch: pytest.MonkeyPatch, status: int) -> list[dict[str, Any]]:
+        """Fake the server's POST with ``status`` and stub compaction; return sent requests."""
         sent: list[dict[str, Any]] = []
 
         def post(url: str, **kwargs: Any) -> httpx.Response:

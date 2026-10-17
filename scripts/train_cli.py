@@ -15,7 +15,7 @@ from typing import Annotated
 
 import typer
 
-app = typer.Typer(
+app: typer.Typer = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
     help="Train a recipe locally (Hydra overrides pass through).",
@@ -36,6 +36,7 @@ def main() -> None:
 
 
 def _run(module: str, preset_key: str, experiment: str | None, overrides: list[str]) -> None:
+    """Run `python -m module` with the preset and overrides; exit with its return code."""
     args = [f"+{preset_key}={experiment}"] if experiment else []
     cmd = [sys.executable, "-m", module, *args, *overrides]
     typer.echo(" ".join(cmd[1:]), err=True)

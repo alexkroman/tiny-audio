@@ -93,7 +93,10 @@ def outputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 class TestEntityErrors:
+    """`entity-errors` lists missed entities of every type and filters by entity type."""
+
     def _run(self, outputs: Path, *extra: str) -> str:
+        """Invoke `entity-errors` for modela, assert success, and return its output."""
         result = runner.invoke(app, ["entity-errors", "modela", "-o", str(outputs), *extra])
         assert result.exit_code == 0, result.output
         return result.output
@@ -119,6 +122,8 @@ class TestEntityErrors:
 
 
 class TestHighWer:
+    """`high-wer` writes the samples over the threshold and rejects unknown models."""
+
     def test_filters_and_writes_report(self, outputs: Path) -> None:
         report = outputs / "report.txt"
         args = ["high-wer", "modela", "-o", str(outputs), "--threshold", "10"]

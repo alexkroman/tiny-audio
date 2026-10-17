@@ -62,9 +62,9 @@ from tiny_audio.alignment import get_device
 from tiny_audio.asr_pipeline import ASRPipeline, PreparedChunk
 from tiny_audio.diarization import NemotronDiarizer
 
-logger = logging.getLogger(__name__)
+logger: logging.Logger = logging.getLogger(__name__)
 
-app = typer.Typer(add_completion=False)
+app: typer.Typer = typer.Typer(add_completion=False)
 
 # Request options a client may set, with their types. Everything else the
 # pipeline accepts (generate kwargs, user_prompt) stays server-side: those
@@ -100,6 +100,7 @@ class _Job:
 
     @property
     def frames(self) -> int:
+        """Encoder frames in this chunk, the length batches are grouped by."""
         return int(self.prepared["attention_mask"].shape[-1])
 
 
@@ -126,6 +127,7 @@ class RequestStats:
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def add(self, total: float, audio_decode: float, gpu_wait: float) -> None:
+        """Record one request; whatever is not decode or GPU wait counts as other."""
         with self.lock:
             self.requests += 1
             self.total_seconds += total
@@ -140,14 +142,16 @@ class ChunkBatcher:
     def __init__(
         self, generate: Callable[[list[PreparedChunk]], list[str]], max_batch_size: int
     ) -> None:
+        """Wrap `generate` (a batch of chunks to texts); call `start` to begin serving."""
         self._generate = generate
-        self.max_batch_size = max(1, max_batch_size)
+        self.max_batch_size: int = max(1, max_batch_size)
         self._inbox: queue.SimpleQueue[_Job | None] = queue.SimpleQueue()
         self._thread = threading.Thread(target=self._loop, name="tiny-audio-gpu", daemon=True)
-        self.stats = BatcherStats()
+        self.stats: BatcherStats = BatcherStats()
         self._waits = threading.local()  # per request thread: seconds blocked in run()
 
     def start(self) -> None:
+        """Start the GPU thread that drains the queue."""
         self._thread.start()
 
     def close(self) -> None:
@@ -177,6 +181,7 @@ class ChunkBatcher:
         return seconds
 
     def _loop(self) -> None:
+        """GPU thread body: batch whatever is queued until `close` is called and it drains."""
         pending: list[_Job] = []
         closing = False
         while pending or not closing:
@@ -213,6 +218,7 @@ class ChunkBatcher:
         return batch
 
     def _execute(self, batch: list[_Job]) -> None:
+        """Run one batch, resolve each job's future (or fail them all), update stats."""
         start = time.perf_counter()
         self.stats.queue_wait_seconds += sum(start - job.queued_at for job in batch)
         try:
@@ -405,6 +411,7 @@ class JobStore:
     """
 
     def __init__(self, run: RequestRunner) -> None:
+        """Run each submitted job's request through `run` on a private thread pool."""
         self._run = run
         self._pool = ThreadPoolExecutor(REQUEST_THREADS, thread_name_prefix="job")
         self._jobs: dict[str, Future[tuple[int, bytes]]] = {}
@@ -424,9 +431,11 @@ class JobStore:
         return future.result() if future.done() else None
 
     def shutdown(self) -> None:
+        """Stop the pool without waiting; jobs not yet started are cancelled."""
         self._pool.shutdown(wait=False, cancel_futures=True)
 
     def _drop_expired(self) -> None:
+        """Forget finished jobs older than JOB_TTL_SECONDS (timed from when first seen done)."""
         now = time.monotonic()
         for job_id, future in list(self._jobs.items()):
             if future.done() and now - self._done_at.setdefault(job_id, now) > JOB_TTL_SECONDS:
@@ -437,6 +446,7 @@ def job_routes(jobs: JobStore, api_key: str | None) -> list[Route]:
     """`POST /jobs` and `GET /jobs/<id>` over `jobs`."""
 
     async def submit_job(request: Request) -> Response:
+        """Queue the request body as a job; 202 with its id."""
         if not _authorized(request, api_key):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         body = await _read_body(request)
@@ -448,6 +458,7 @@ def job_routes(jobs: JobStore, api_key: str | None) -> list[Route]:
         return JSONResponse({"id": job_id, "status": "running"}, status_code=202)
 
     async def job_result(request: Request) -> Response:
+        """A job's response once finished; 202 while running, 404 if unknown or expired."""
         if not _authorized(request, api_key):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         job_id = request.path_params["job_id"]
@@ -484,6 +495,7 @@ def create_app(pipe: ASRPipeline, batcher: ChunkBatcher, model_id: str) -> Starl
             return 500, json.dumps({"error": f"{type(e).__name__}: {e}"}).encode()
 
     async def transcribe(request: Request) -> Response:
+        """Transcribe the request body synchronously on a request thread."""
         if not _authorized(request, api_key):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         body = await _read_body(request)
@@ -501,9 +513,11 @@ def create_app(pipe: ASRPipeline, batcher: ChunkBatcher, model_id: str) -> Starl
     jobs = JobStore(run_request)
 
     async def health(_request: Request) -> Response:
+        """Liveness: answers once the model is loaded, naming it."""
         return JSONResponse({"status": "ok", "model": model_id})
 
     async def stats(_request: Request) -> Response:
+        """Batching and per-request timing counters since startup."""
         s, r = batcher.stats, request_stats
         return JSONResponse(
             {
@@ -525,6 +539,7 @@ def create_app(pipe: ASRPipeline, batcher: ChunkBatcher, model_id: str) -> Starl
 
     @asynccontextmanager
     async def lifespan(_app: Starlette) -> AsyncGenerator[None]:
+        """On shutdown, cancel pending jobs and let the GPU thread finish its queue."""
         yield
         jobs.shutdown()
         # Off the event loop: close() joins the GPU thread after its last batch.

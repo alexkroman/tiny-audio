@@ -12,10 +12,12 @@ from scripts.eval.evaluators.asr import DeepgramEvaluator, ElevenLabsEvaluator
 
 @pytest.fixture
 def audio() -> dict[str, object]:
+    """Provide one second of 16 kHz silence as a dataset audio dict."""
     return {"array": np.zeros(16000, dtype=np.float32), "sampling_rate": 16000}
 
 
 def _deepgram(evaluator: DeepgramEvaluator) -> MagicMock:
+    """Stub the evaluator's client with a two-speaker response; return the transcribe mock."""
     words = [
         SimpleNamespace(word="hi", speaker=3),
         SimpleNamespace(word="there", speaker=3),
@@ -33,10 +35,12 @@ def _deepgram(evaluator: DeepgramEvaluator) -> MagicMock:
 
 
 def _word(text: str, kind: str, speaker: str) -> dict[str, object]:
+    """Build one ElevenLabs word entry of the given type and speaker."""
     return {"text": text, "type": kind, "speaker_id": speaker, "logprob": 0.0}
 
 
 def _elevenlabs(evaluator: ElevenLabsEvaluator) -> MagicMock:
+    """Stub the evaluator's client with a two-speaker response; return the convert mock."""
     response = SpeechToTextChunkResponseModel.model_validate(
         {
             "language_code": "en",
@@ -58,6 +62,8 @@ def _elevenlabs(evaluator: ElevenLabsEvaluator) -> MagicMock:
 
 
 class TestDeepgramSpeakers:
+    """Deepgram diarizes into `<SPK_n>` turns only when the dataset has speakers."""
+
     def test_speaker_dataset_diarizes_into_turns(self, audio: dict[str, object]) -> None:
         evaluator = DeepgramEvaluator(api_key="k")
         evaluator.speakers = True
@@ -79,6 +85,8 @@ class TestDeepgramSpeakers:
 
 
 class TestElevenLabsSpeakers:
+    """ElevenLabs diarizes into `<SPK_n>` turns, dropping audio events, on speaker datasets."""
+
     def test_speaker_dataset_diarizes_into_turns(self, audio: dict[str, object]) -> None:
         evaluator = ElevenLabsEvaluator(api_key="k")
         evaluator.speakers = True

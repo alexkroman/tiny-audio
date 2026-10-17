@@ -19,10 +19,12 @@ class TestMLPAudioProjector:
 
     @pytest.fixture
     def config(self) -> MockProjectorConfig:
+        """Provide a 256 -> 512 dim projector config with pool stride 4."""
         return MockProjectorConfig(encoder_dim=256, llm_dim=512, projector_pool_stride=4)
 
     @pytest.fixture
     def projector(self, config: MockProjectorConfig) -> MLPAudioProjector:
+        """Provide an MLPAudioProjector built from the `config` fixture."""
         return MLPAudioProjector(config)
 
     def test_forward_shape(self, projector: MLPAudioProjector) -> None:

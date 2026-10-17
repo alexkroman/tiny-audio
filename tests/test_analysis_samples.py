@@ -27,6 +27,7 @@ def _write_run(root: Path, name: str, rows: list[tuple[str, str, float]]) -> Non
 
 @pytest.fixture
 def outputs(tmp_path: Path) -> Path:
+    """Provide an outputs dir with two modelA runs (ami, tedlium) and one modelB run."""
     _write_run(
         tmp_path,
         "20260101_000000_modelA_ami",
@@ -45,6 +46,8 @@ def outputs(tmp_path: Path) -> Path:
 
 
 class TestHighWer:
+    """`high-wer` reports rows at or above the threshold, worst first, per model."""
+
     def test_reports_rows_at_or_above_the_threshold_worst_first(
         self, outputs: Path, tmp_path: Path
     ) -> None:
@@ -65,8 +68,11 @@ class TestHighWer:
 
 
 class TestEntityErrors:
+    """`entity-errors` lists samples that missed a reference entity, optionally by type."""
+
     @pytest.fixture
     def keywords(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """Write a keywords.json of reference entities and point `KEYWORDS_FILE` at it."""
         path = tmp_path / "keywords.json"
         refs = {
             "alice met bob in paris": [

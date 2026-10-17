@@ -8,8 +8,8 @@ import typer
 from huggingface_hub import CommitOperationAdd, HfApi, get_token
 from rich.console import Console
 
-app = typer.Typer(add_completion=False)
-console = Console()
+app: typer.Typer = typer.Typer(add_completion=False)
+console: Console = Console()
 
 
 @app.command()

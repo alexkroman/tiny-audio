@@ -52,8 +52,8 @@ from scripts.eval.build_notsofar import REPO_ID, clean_text, download_file, meet
 from scripts.eval.build_notsofar import VERSION as EVAL_VERSION
 from tiny_audio.asr_processing import chunk_bounds
 
-app = typer.Typer(add_completion=False)
-console = Console()
+app: typer.Typer = typer.Typer(add_completion=False)
+console: Console = Console()
 
 VERSIONS = ("train_set/240825.1_train", "dev_set/240825.1_dev1")
 SAMPLE_RATE = 16000
@@ -78,6 +78,7 @@ class Word(NamedTuple):
 
 
 def _norm(word: str) -> str:
+    """Lowercase and drop everything but word characters and apostrophes, for matching."""
     return re.sub(r"[^\w']", "", word.lower())
 
 

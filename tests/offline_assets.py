@@ -45,6 +45,7 @@ _BUILD_VERSION = b"1"
 
 
 def _cache_key() -> str:
+    """Hash the build version and every fixture's path and bytes into a short cache key."""
     digest = hashlib.sha256(_BUILD_VERSION)
     for path in sorted(_FIXTURES.rglob("*")):
         if path.is_file():
@@ -54,6 +55,7 @@ def _cache_key() -> str:
 
 
 def _build(staging: Path) -> None:
+    """Lay out the fixture repos as a Hub cache in `staging`, adding random weights."""
     # Deferred: transformers imports huggingface_hub, which must not load
     # until the environment below is set.
     import torch  # noqa: PLC0415
@@ -78,6 +80,10 @@ def _build(staging: Path) -> None:
 
 
 def _seed(cache: Path) -> None:
+    """Build the cache in a sibling temp dir and rename it into place atomically.
+
+    Tolerates another session winning the rename race, since its cache is identical.
+    """
     cache.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(dir=cache.parent))
     try:

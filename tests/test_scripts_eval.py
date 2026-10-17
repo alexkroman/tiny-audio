@@ -60,6 +60,7 @@ class TestResolveLocalRuntime:
 
     @staticmethod
     def _resolver() -> Callable[[], tuple[int | str, str]]:
+        """Return `_resolve_local_runtime` typed as a no-arg (device, dtype) callable."""
         return _resolve_local_runtime
 
     def test_cuda_prefers_bfloat16(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -166,10 +167,15 @@ class TestMergeLoraAdapters:
 
     @staticmethod
     def _peft_holder() -> types.SimpleNamespace:
+        """Build a stand-in ASRModel whose `language_model` is a LoRA-wrapped tiny decoder."""
+
         class Tiny(PreTrainedModel):
+            """A minimal PreTrainedModel with one 4x4 linear layer for LoRA to target."""
+
             config_class = PretrainedConfig
 
             def __init__(self) -> None:
+                """Build the model on a default config with its `lin` layer."""
                 super().__init__(PretrainedConfig())
                 self.lin = nn.Linear(4, 4)
 
@@ -204,6 +210,10 @@ class TestUseSdpaWhereSafe:
     def _holder(
         loaded_impl: str, requested: str = "sdpa"
     ) -> tuple[types.SimpleNamespace, list[str]]:
+        """Fake a loaded model whose decoder used `loaded_impl`; also return the set-calls log.
+
+        The log records every attention implementation the code under test applies.
+        """
         calls: list[str] = []
         language_model = types.SimpleNamespace(
             config=types.SimpleNamespace(_attn_implementation=loaded_impl),
@@ -219,10 +229,13 @@ class TestUseSdpaWhereSafe:
 
     @pytest.fixture
     def on_mps(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Make the test run as if MPS were available."""
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
 
     @staticmethod
     def _set_sliding_window(monkeypatch: pytest.MonkeyPatch, value: bool) -> None:
+        """Patch the sliding-window check to report `value` for any decoder."""
+
         def has_sliding_window(_model_id: str) -> bool:
             return value
 
@@ -263,6 +276,7 @@ class TestUseSdpaWhereSafe:
 
 
 def _no_pcm(_a: object) -> bytes:
+    """Stand in for `_prepare_pcm`, skipping audio conversion."""
     return b""
 
 
@@ -272,12 +286,14 @@ class TestStreamingRetry:
 
     @pytest.fixture
     def evaluator(self, monkeypatch: pytest.MonkeyPatch) -> AssemblyAIStreamingEvaluator:
+        """Provide a streaming evaluator whose PCM preparation is a no-op."""
         evaluator = AssemblyAIStreamingEvaluator(api_key="test")
         monkeypatch.setattr(evaluator, "_prepare_pcm", _no_pcm)
         return evaluator
 
     @staticmethod
     def _stream_error(code: int | None) -> RuntimeError:
+        """Build a stream-closed error carrying `code`, or no code when None."""
         exc = _StreamClosedError(f"closed with {code}")
         if code is not None:
             exc.streaming_code = code
@@ -482,6 +498,7 @@ def test_endpoint_evaluator_diarize_decodes_activity(monkeypatch: pytest.MonkeyP
 
 
 def _word(text: str, start_s: float, end_s: float) -> types.SimpleNamespace:
+    """Build an AssemblyAI-style word with times converted to milliseconds."""
     return types.SimpleNamespace(text=text, start=int(start_s * 1000), end=int(end_s * 1000))
 
 
@@ -494,9 +511,11 @@ class _StreamTranscriber:
     """
 
     def __init__(self) -> None:
+        """Start with no recorded streams."""
         self.streams: list[npt.NDArray[np.float32]] = []
 
     def transcribe(self, data: io.BytesIO) -> types.SimpleNamespace:
+        """Record the decoded stream and return A's or B's words, by whether 0.5 s is unmasked."""
         audio = np.asarray(soundfile.read(data, dtype="float32")[0], dtype=np.float32)
         self.streams.append(audio)
         if audio[8000] != 0:  # 0.5 s: only A's stream keeps it
@@ -510,6 +529,10 @@ class _StreamTranscriber:
 def _streams_evaluator(
     monkeypatch: pytest.MonkeyPatch, activity: npt.NDArray[np.float32], keep: list[int]
 ) -> tuple[AssemblyAIStreamsEvaluator, _StreamTranscriber]:
+    """Build a speaker-mode streams evaluator with a fake transcriber and a fixed diarizer.
+
+    The diarizer returns `activity` and `keep` for any audio.
+    """
     evaluator = AssemblyAIStreamsEvaluator(
         api_key="k", diarizer_url="https://pod-8000.proxy.runpod.net", model="universal-3-5-pro"
     )

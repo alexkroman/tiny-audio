@@ -23,6 +23,7 @@ from tiny_audio.asr_pipeline import ASRPipeline, PreparedChunk
 
 
 def _chunk(frames: int) -> PreparedChunk:
+    """Build a zero-feature prepared chunk whose length is ``frames``."""
     return {
         "input_features": torch.zeros(1, frames, 4),
         "attention_mask": torch.ones(1, frames, dtype=torch.long),
@@ -30,10 +31,13 @@ def _chunk(frames: int) -> PreparedChunk:
 
 
 def _frames(prepared: list[PreparedChunk]) -> list[int]:
+    """Return the frame length of each chunk, so a test can see what a batch held."""
     return [int(p["attention_mask"].shape[-1]) for p in prepared]
 
 
 class TestChunkBatcher:
+    """ChunkBatcher batches queued chunks, keeps per-request order and fans out errors."""
+
     def test_results_come_back_in_order(self) -> None:
         batcher = ChunkBatcher(lambda batch: [str(n) for n in _frames(batch)], max_batch_size=4)
         batcher.start()
@@ -105,6 +109,8 @@ class TestChunkBatcher:
 
 
 class TestParameters:
+    """parse_parameters accepts typed JSON, coerces query strings and rejects the rest."""
+
     def test_json_types_pass(self) -> None:
         params = parse_parameters({"return_speakers": True, "num_speakers": 2}, from_query=False)
         assert params == {"return_speakers": True, "num_speakers": 2}
@@ -129,6 +135,8 @@ class TestParameters:
 
 
 class TestDecodeRequest:
+    """decode_request splits a JSON or raw-audio body into audio bytes and parameters."""
+
     def test_json_body(self) -> None:
         body = b'{"inputs": "UklGRg==", "parameters": {"return_timestamps": true}}'
         audio, params = decode_request(body, "application/json", {})
@@ -158,10 +166,12 @@ class FakePipeline:
     """Records calls; answers like ASRPipeline (numpy values included)."""
 
     def __init__(self, error: Exception | None = None) -> None:
+        """Start with no calls; ``error``, if given, is raised by every call."""
         self.calls: list[tuple[bytes, dict[str, Any]]] = []
         self.error = error
 
     def __call__(self, audio: bytes, **params: Any) -> dict[str, Any]:
+        """Record the call, then raise the configured error or return a fixed transcript."""
         self.calls.append((audio, params))
         if self.error is not None:
             raise self.error
@@ -172,10 +182,14 @@ class Client:
     """Requests straight into the ASGI app, in-process (httpx's ASGI transport)."""
 
     def __init__(self, app: Starlette) -> None:
+        """Wrap ``app``; each request opens a fresh ASGI transport to it."""
         self.app = app
 
     def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        """Send one request to the app on a private event loop and return the response."""
+
         async def send() -> httpx.Response:
+            """Issue the request through an AsyncClient bound to the ASGI transport."""
             transport = httpx.ASGITransport(app=self.app)
             async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
                 return await client.request(method, url, **kwargs)
@@ -183,9 +197,11 @@ class Client:
         return asyncio.run(send())
 
     def post(self, url: str, **kwargs: Any) -> httpx.Response:
+        """POST to ``url``; ``kwargs`` go to httpx (json, content, headers)."""
         return self.request("POST", url, **kwargs)
 
     def get(self, url: str) -> httpx.Response:
+        """GET ``url``."""
         return self.request("GET", url)
 
 
@@ -194,6 +210,12 @@ MakeClient = Callable[..., tuple[Client, FakePipeline]]
 
 @pytest.fixture
 def make_client(monkeypatch: pytest.MonkeyPatch) -> MakeClient:
+    """Provide a factory for an in-process client over the app and its FakePipeline.
+
+    The factory sets or clears the API-key env var and stubs ``decode_audio`` to pass
+    bytes straight through, both undone by monkeypatch at teardown.
+    """
+
     def make(
         api_key: str | None = None, error: Exception | None = None
     ) -> tuple[Client, FakePipeline]:
@@ -215,6 +237,8 @@ def make_client(monkeypatch: pytest.MonkeyPatch) -> MakeClient:
 
 
 class TestApp:
+    """The HTTP app routes requests to the pipeline, maps errors to status codes and auths."""
+
     def test_json_request(self, make_client: MakeClient) -> None:
         client, pipe = make_client()
         response = client.post(
@@ -288,6 +312,7 @@ class TestJobs:
 
     @staticmethod
     def _wait(client: Client, job_id: str) -> httpx.Response:
+        """Poll the job until it stops answering 202 (up to ~5 s) and return that response."""
         for _ in range(500):
             response = client.get(f"/jobs/{job_id}")
             if response.status_code != 202:
@@ -358,6 +383,7 @@ class TestDecodeAudio:
 
     @staticmethod
     def _wav(samples: npt.NDArray[np.float32], rate: int) -> bytes:
+        """Encode ``samples`` as 16-bit PCM WAV bytes at ``rate``."""
         buf = io.BytesIO()
         soundfile.write(buf, samples, rate, format="WAV", subtype="PCM_16")
         return buf.getvalue()

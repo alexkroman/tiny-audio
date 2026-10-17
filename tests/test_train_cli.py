@@ -12,6 +12,7 @@ runner = CliRunner()
 
 @pytest.fixture
 def calls(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """Stub `subprocess.call` in train_cli; return the list of commands it records."""
     seen: list[list[str]] = []
 
     def fake_call(cmd: list[str]) -> int:

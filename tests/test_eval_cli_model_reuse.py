@@ -25,6 +25,7 @@ class RecordingEvaluator(Evaluator):
     builds = 0
 
     def __init__(self, **kwargs: Unpack[EvaluatorOptions]) -> None:
+        """Count this construction on the class and start an empty field log."""
         super().__init__(**kwargs)
         type(self).builds += 1
         self.seen: list[tuple[str, str]] = []
@@ -39,6 +40,7 @@ class RecordingEvaluator(Evaluator):
         speakers: bool = False,
         verbatim_scoring: bool = False,
     ) -> list[EvalResult]:
+        """Run the base evaluation, then log the audio/text fields it resolved."""
         results = super().evaluate(
             dataset,
             max_samples,
@@ -51,6 +53,7 @@ class RecordingEvaluator(Evaluator):
         return results
 
     def transcribe(self, audio: object) -> Transcription:
+        """Echo the audio value back as the transcript."""
         return str(audio), 0.01, None
 
 

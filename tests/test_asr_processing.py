@@ -17,6 +17,7 @@ from tiny_audio.asr_processing import ASRProcessor
 
 
 def _quarter(x: int) -> int:
+    """Stand in for a stride-4 projector's `get_output_length`."""
     return x // 4
 
 

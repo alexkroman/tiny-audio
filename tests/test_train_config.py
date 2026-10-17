@@ -36,6 +36,7 @@ TRAIN_SCRIPT_KEYS = {
 
 
 def _compose(overrides: Sequence[str] = ()) -> DictConfig:
+    """Compose the repo's Hydra ``config`` with ``overrides`` applied."""
     with initialize_config_dir(config_dir=str(CONFIGS), version_base=None):
         return compose(config_name="config", overrides=list(overrides))
 
@@ -127,6 +128,11 @@ class TestHubTokenPreflight:
 
     @staticmethod
     def _run_main(monkeypatch: pytest.MonkeyPatch, token: str | None, *overrides: str) -> None:
+        """Run main() with push_to_hub on and Hub token ``token``.
+
+        ASRModel is replaced so getting past the preflight raises _ReachedModelBuildError.
+        """
+
         def no_model(*_a: object, **_k: object) -> None:
             raise _ReachedModelBuildError
 
