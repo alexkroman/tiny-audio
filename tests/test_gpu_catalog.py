@@ -74,7 +74,8 @@ class TestDatacenterCatalog:
 
     def test_missing_cli_is_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def boom(*_: Any, **__: Any) -> None:
-            raise FileNotFoundError("runpodctl")
+            msg = "runpodctl"
+            raise FileNotFoundError(msg)
 
         monkeypatch.setattr(subprocess, "run", boom)
         assert gpu_catalog.datacenter_catalog() == ()

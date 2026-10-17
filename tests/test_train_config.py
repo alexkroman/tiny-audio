@@ -4,6 +4,8 @@ import inspect
 from collections.abc import Sequence
 from dataclasses import fields
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from hydra import compose, initialize_config_dir
@@ -167,3 +169,55 @@ class TestHubTokenPreflight:
     def test_explicit_hub_token_is_enough(self, monkeypatch: pytest.MonkeyPatch) -> None:
         with pytest.raises(_ReachedModelBuildError):
             self._run_main(monkeypatch, None, "training.hub_token=hf_cfg")
+
+
+class TestResolvedDict:
+    """train._resolved_dict: a config node as a plain dict with string keys."""
+
+    def test_mapping_resolves_with_string_keys(self) -> None:
+        node = OmegaConf.create({"a": 1, "b": "${a}"})
+        assert train_module._resolved_dict(node, "test") == {"a": 1, "b": 1}
+
+    def test_a_non_mapping_is_rejected(self) -> None:
+        with pytest.raises(TypeError, match="test config must be a mapping"):
+            # A list where a mapping belongs, as a mistyped YAML file would give.
+            train_module._resolved_dict(cast(DictConfig, OmegaConf.create([1, 2])), "test")
+
+
+class TestApplyLigerKernels:
+    """Liger patching falls back to stock kernels, with a warning, when it can't apply."""
+
+    @staticmethod
+    def _cfg() -> DictConfig:
+        return OmegaConf.create({"model": {"text_model_id": "Qwen/Qwen3.5-0.8B"}})
+
+    def test_missing_liger_warns_and_falls_back(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        monkeypatch.setattr(train_module, "_liger_transformers", None)
+        monkeypatch.setattr(train_module, "_liger_import_error", None)
+        train_module._apply_liger_kernels(self._cfg())
+        assert "liger_kernel.transformers did not import" in caplog.text
+
+    def test_a_patcher_that_fails_warns_with_its_error(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        def broken() -> None:
+            msg = "no Qwen3_5 class"
+            raise AttributeError(msg)
+
+        liger = SimpleNamespace(apply_liger_kernel_to_qwen3_5=broken)
+        monkeypatch.setattr(train_module, "_liger_transformers", liger)
+        train_module._apply_liger_kernels(self._cfg())
+        assert "no Qwen3_5 class" in caplog.text
+
+    def test_a_working_patcher_is_applied(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        calls: list[str] = []
+        liger = SimpleNamespace(apply_liger_kernel_to_qwen3_5=lambda: calls.append("patched"))
+        monkeypatch.setattr(train_module, "_liger_transformers", liger)
+        caplog.set_level("INFO")
+        train_module._apply_liger_kernels(self._cfg())
+        assert calls == ["patched"]
+        assert "Applied liger kernels" in caplog.text

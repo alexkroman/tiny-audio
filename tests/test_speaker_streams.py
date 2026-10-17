@@ -146,7 +146,7 @@ class TestStreamsPipeline:
         """Record every ASR input; call k returns `self.script[k]`."""
         calls: list[npt.NDArray[np.float32]] = []
 
-        def fake_prepare(_self: object, chunk: npt.NDArray[np.float32], sample_rate: int) -> Any:
+        def fake_prepare(_self: object, chunk: npt.NDArray[np.float32], _sample_rate: int) -> Any:
             return {"audio": np.asarray(chunk)}
 
         def fake_generate(_self: object, prepared: Sequence[Any]) -> list[str]:
@@ -170,7 +170,7 @@ class TestStreamsPipeline:
         seen: list[int] = []
 
         def fake_align(
-            chunks: Sequence[tuple[npt.NDArray[np.float32], str]], sample_rate: int = SR
+            chunks: Sequence[tuple[npt.NDArray[np.float32], str]], **_kwargs: object
         ) -> list[list[AlignedWord]]:
             seen.extend(len(a) for a, _ in chunks)
             return [
@@ -185,7 +185,7 @@ class TestStreamsPipeline:
     def stub_activity(monkeypatch: pytest.MonkeyPatch, act: npt.NDArray[np.float32]) -> None:
         """Make NemotronDiarizer.activity return ``act`` regardless of the audio."""
 
-        def fake_activity(audio: npt.ArrayLike, sample_rate: int = SR) -> npt.NDArray[np.float32]:
+        def fake_activity(*_args: object, **_kwargs: object) -> npt.NDArray[np.float32]:
             return act
 
         monkeypatch.setattr(NemotronDiarizer, "activity", fake_activity)
@@ -291,11 +291,9 @@ class TestStreamsPipeline:
         assert [w["start"] for w in result["words"]] == pytest.approx([3.0, 19.05, 34.5])
         assert result["text"] == "a1 a2 b1"
 
+    @pytest.mark.usefixtures("asr_inputs")
     def test_words_inside_masked_audio_are_dropped(
-        self,
-        pipeline: ASRPipeline,
-        asr_inputs: list[npt.NDArray[np.float32]],
-        monkeypatch: pytest.MonkeyPatch,
+        self, pipeline: ASRPipeline, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         self.script = ["a1 ghost a2", "b1"]
         # "ghost" lands at 2.0 s, in SPEAKER_0's silenced 1-3 s gap.
@@ -329,16 +327,14 @@ class TestStreamsPipeline:
         assert result["text"] == "well Yes."
         assert [w["speaker"] for w in result["words"]] == ["SPEAKER_0", "SPEAKER_0"]
 
+    @pytest.mark.usefixtures("asr_inputs")
     def test_diarization_error_is_reported_not_raised(
-        self,
-        pipeline: ASRPipeline,
-        asr_inputs: list[npt.NDArray[np.float32]],
-        monkeypatch: pytest.MonkeyPatch,
+        self, pipeline: ASRPipeline, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         self.script = ["a1 a2"]
         self.stub_aligner(monkeypatch, {"a1": (0.2, 0.5), "a2": (3.2, 3.6)})
 
-        def boom(audio: npt.ArrayLike, sample_rate: int = SR) -> NoReturn:
+        def boom(*_args: object, **_kwargs: object) -> NoReturn:
             msg = "no nemotron"
             raise RuntimeError(msg)
 
@@ -349,11 +345,9 @@ class TestStreamsPipeline:
         assert result["text"] == "a1 a2"
         assert [w["word"] for w in result["words"]] == ["a1", "a2"]
 
+    @pytest.mark.usefixtures("asr_inputs")
     def test_alignment_error_is_reported_not_raised(
-        self,
-        pipeline: ASRPipeline,
-        asr_inputs: list[npt.NDArray[np.float32]],
-        monkeypatch: pytest.MonkeyPatch,
+        self, pipeline: ASRPipeline, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         self.script = ["a1 a2", "b1"]
         self.stub_activity(monkeypatch, activity(list(self.TWO_SPEAKERS)))

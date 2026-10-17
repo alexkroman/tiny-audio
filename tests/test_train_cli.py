@@ -47,7 +47,7 @@ def test_hydra_flags_and_plus_overrides_pass_through(calls: list[list[str]]) -> 
 
 
 def test_exit_code_is_the_trainers(monkeypatch: pytest.MonkeyPatch) -> None:
-    def failing_call(cmd: list[str]) -> int:
+    def failing_call(_cmd: list[str]) -> int:
         return 3
 
     monkeypatch.setattr("subprocess.call", failing_call)

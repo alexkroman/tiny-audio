@@ -723,17 +723,21 @@ class AssemblyAIStreamingEvaluator(Evaluator):
         """Keep the API key and create the shared stream semaphore on first use."""
         super().__init__(**kwargs)
         self.api_key = api_key
-        self._ensure_semaphore()
+        self._semaphore()
 
     @classmethod
-    def _ensure_semaphore(cls) -> None:
-        """Create the class-wide stream semaphore once, sized by ASSEMBLYAI_STREAM_CONCURRENCY."""
-        if cls._stream_semaphore is not None:
-            return
-        with cls._semaphore_lock:
-            if cls._stream_semaphore is None:
-                cap = int(os.environ.get("ASSEMBLYAI_STREAM_CONCURRENCY", cls._DEFAULT_CONCURRENCY))
-                cls._stream_semaphore = threading.Semaphore(cap)
+    def _semaphore(cls) -> threading.Semaphore:
+        """The class-wide stream semaphore, created once, sized by ASSEMBLYAI_STREAM_CONCURRENCY."""
+        semaphore = cls._stream_semaphore
+        if semaphore is None:
+            with cls._semaphore_lock:
+                semaphore = cls._stream_semaphore
+                if semaphore is None:
+                    cap = int(
+                        os.environ.get("ASSEMBLYAI_STREAM_CONCURRENCY", cls._DEFAULT_CONCURRENCY)
+                    )
+                    semaphore = cls._stream_semaphore = threading.Semaphore(cap)
+        return semaphore
 
     @staticmethod
     def _is_retryable(exc: BaseException) -> bool:
@@ -759,10 +763,7 @@ class AssemblyAIStreamingEvaluator(Evaluator):
     )
     def _run_session_with_retry(self, pcm_data: bytes) -> tuple[str, float]:
         """Run one session under the concurrency semaphore, retrying on backpressure codes."""
-        if self._stream_semaphore is None:
-            msg = "_run_session_with_retry called before the stream semaphore was created"
-            raise RuntimeError(msg)
-        with self._stream_semaphore:
+        with self._semaphore():
             return self._run_session(pcm_data)
 
     def _prepare_pcm(self, audio: object) -> bytes:

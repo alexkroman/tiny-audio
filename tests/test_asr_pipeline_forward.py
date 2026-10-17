@@ -142,7 +142,7 @@ class TestPostprocess:
     def test_empty_list_falls_back_to_parent(
         self, pipeline: ASRPipeline, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        def parent_postprocess(self: object, outputs: object, **kw: Any) -> dict[str, object]:
+        def parent_postprocess(_self: object, outputs: object, **_kw: Any) -> dict[str, object]:
             return {"text": "parent", "outputs": outputs}
 
         monkeypatch.setattr(
@@ -163,7 +163,7 @@ class TestPreprocess:
         seen: dict[str, Any] = {}
 
         def fake_preprocess(
-            self: object, inputs: dict[str, Any], **params: Any
+            _self: object, inputs: dict[str, Any], **_params: Any
         ) -> Iterator[dict[str, Any]]:
             seen["inputs"] = inputs
             yield {"input_features": torch.zeros(1)}
@@ -188,9 +188,10 @@ class TestCallPromptHandling:
     ) -> None:
         seen: dict[str, Any] = {}
 
-        def failing_transcribe(self: object, *args: object, **kwargs: Any) -> NoReturn:
+        def failing_transcribe(_self: object, *_args: object, **_kwargs: Any) -> NoReturn:
             seen["prompt_during_call"] = pipeline.model.TRANSCRIBE_PROMPT
-            raise RuntimeError("boom")
+            msg = "boom"
+            raise RuntimeError(msg)
 
         monkeypatch.setattr(ASRPipeline, "_transcribe_chunks", failing_transcribe)
         with pytest.raises(RuntimeError, match="boom"):
@@ -202,7 +203,7 @@ class TestCallPromptHandling:
     def test_no_user_prompt_leaves_model_untouched(
         self, pipeline: ASRPipeline, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        def fake_call(self: object, inputs: object, **kw: Any) -> dict[str, str]:
+        def fake_call(_self: object, _inputs: object, **_kw: Any) -> dict[str, str]:
             return {"text": "x"}
 
         monkeypatch.setattr(
@@ -218,7 +219,7 @@ class TestCallPromptHandling:
     ) -> None:
         seen: dict[str, Any] = {}
 
-        def fake_timed(inputs: object, **kwargs: Any) -> dict[str, str]:
+        def fake_timed(_inputs: object, **kwargs: Any) -> dict[str, str]:
             seen.update(kwargs)
             return {"text": "x"}
 
@@ -234,7 +235,7 @@ class TestTranscribeTimed:
     def test_empty_transcript_never_loads_the_aligner(
         self, pipeline: ASRPipeline, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        def fake_call(self: object, inputs: object, **kw: Any) -> dict[str, str]:
+        def fake_call(_self: object, _inputs: object, **_kw: Any) -> dict[str, str]:
             return {"text": ""}
 
         monkeypatch.setattr(

@@ -110,9 +110,8 @@ def test_deploy_creates_space_and_uploads(
     assert FakeHfApi.space_calls == []
 
 
-def test_deploy_with_endpoint_points_space_at_it(
-    demo_dir: Path, uploads: list[dict[str, object]]
-) -> None:
+@pytest.mark.usefixtures("uploads")
+def test_deploy_with_endpoint_points_space_at_it(demo_dir: Path) -> None:
     """--endpoint-url sets the Space's ENDPOINT_URL and drops it to CPU hardware."""
     url = "https://abc123-8000.proxy.runpod.net"
     hf_space.deploy(repo_id="me/demo", demo_dir=demo_dir, endpoint_url=url)

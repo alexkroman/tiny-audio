@@ -78,6 +78,7 @@ def main(
         "asr_modeling.py",
         "asr_layers.py",
         "asr_attention.py",
+        "asr_text.py",
         "asr_types.py",
         "asr_processing.py",
         "asr_pipeline.py",

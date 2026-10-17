@@ -70,7 +70,7 @@ def test_model_is_built_once_for_a_multi_dataset_sweep(
 
     # loquacious reads `wav`/`text`; earnings22 reads `audio`/`sentence`.
     # The rows carry both shapes so either field set resolves.
-    def fake_load(name: str, split: str, config: str | None = None) -> list[dict[str, str]]:
+    def fake_load(*_args: object) -> list[dict[str, str]]:
         return [{"wav": "a", "audio": "a", "text": "hi", "sentence": "hi"}]
 
     monkeypatch.setattr(eval_cli, "_build_evaluator", fake_build)

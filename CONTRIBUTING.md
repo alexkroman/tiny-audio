@@ -138,6 +138,7 @@ tiny-audio/
 │   ├── asr_modeling.py      # ASRModel: encoder + projector + decoder
 │   ├── asr_layers.py        # MPS-safe embeddings, encoder top-layer unfreezing
 │   ├── asr_attention.py     # attn_implementation choice (FA2 / sdpa / eager)
+│   ├── asr_text.py          # Transcript cleanup (repetition loops)
 │   ├── asr_types.py         # Typing aliases, protocols and TypedDicts
 │   ├── asr_config.py        # ASRConfig: all model settings
 │   ├── asr_pipeline.py      # HuggingFace pipeline for inference

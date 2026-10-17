@@ -88,7 +88,7 @@ class TestPipelineIntegration:
         seen: dict[str, dict[str, Any]] = {}
 
         def fake_preprocess(
-            self: object, inputs: dict[str, Any], **params: object
+            _self: object, inputs: dict[str, Any], **_params: object
         ) -> Iterator[dict[str, None]]:
             seen["inputs"] = inputs
             yield {"input_features": None}

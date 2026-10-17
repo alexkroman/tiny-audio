@@ -18,7 +18,7 @@ from starlette.applications import Starlette
 from starlette.types import Message
 
 from scripts import serve
-from scripts.serve import ChunkBatcher, RequestError, decode_request, parse_parameters
+from scripts.serve import ChunkBatcher, RequestError, _Job, decode_request, parse_parameters
 from tiny_audio.asr_pipeline import ASRPipeline
 from tiny_audio.asr_types import PreparedChunk
 from tiny_audio.diarization import NemotronDiarizer
@@ -90,14 +90,14 @@ class TestChunkBatcher:
         assert batcher.stats.largest_batch == 4
 
     def test_batch_is_oldest_plus_nearest_lengths(self) -> None:
-        batcher = ChunkBatcher(lambda batch: [], max_batch_size=3)
+        batcher = ChunkBatcher(lambda _batch: [], max_batch_size=3)
         pending = [serve._Job(_chunk(n)) for n in (100, 10, 95, 300, 104)]
         batch = batcher._take_batch(pending)
         assert [job.frames for job in batch] == [100, 104, 95]  # oldest first, then nearest
         assert [job.frames for job in pending] == [10, 300]
 
     def test_generate_error_reaches_every_waiter(self) -> None:
-        def boom(batch: list[PreparedChunk]) -> list[str]:
+        def boom(_batch: list[PreparedChunk]) -> list[str]:
             msg = "CUDA out of memory"
             raise RuntimeError(msg)
 
@@ -108,6 +108,16 @@ class TestChunkBatcher:
                 batcher.run([_chunk(1), _chunk(2)])
         finally:
             batcher.close()
+
+    def test_an_interrupt_reaches_every_waiter_and_keeps_unwinding(self) -> None:
+        def interrupted(_batch: list[PreparedChunk]) -> list[str]:
+            raise KeyboardInterrupt
+
+        batcher = ChunkBatcher(interrupted, max_batch_size=4)
+        jobs = [_Job(_chunk(1)), _Job(_chunk(2))]
+        with pytest.raises(KeyboardInterrupt):
+            batcher._execute(jobs)
+        assert all(isinstance(job.future.exception(), KeyboardInterrupt) for job in jobs)
 
 
 class TestParameters:
@@ -231,7 +241,7 @@ def make_client(monkeypatch: pytest.MonkeyPatch) -> MakeClient:
             return audio
 
         monkeypatch.setattr(serve, "decode_audio", passthrough)
-        batcher = ChunkBatcher(lambda batch: [], max_batch_size=4)
+        batcher = ChunkBatcher(lambda _batch: [], max_batch_size=4)
         app = serve.create_app(cast(ASRPipeline, pipe), batcher, "me/model")
         return Client(app), pipe
 

@@ -369,3 +369,12 @@ class TestCreateOrUpdateModelCard:
     def test_method_is_reachable_on_the_class(self) -> None:
         """nn.Module.__getattr__ is what raised; guard the attribute itself."""
         assert callable(getattr(ASRModel, "create_or_update_model_card", None))
+
+
+def test_turn_end_probe_returns_none_when_the_template_cannot_render() -> None:
+    def no_template(*_args: object, **_kwargs: object) -> str:
+        msg = "no chat template"
+        raise ValueError(msg)
+
+    fake = stub(tokenizer=stub(apply_chat_template=no_template))
+    assert ASRModel._derive_turn_end_token_id(cast(ASRModel, fake)) is None

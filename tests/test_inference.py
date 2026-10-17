@@ -7,6 +7,7 @@ from typing import Any, cast
 import pytest
 import torch
 import torch._dynamo.config as dynamo_config
+from torch._subclasses.fake_tensor import FakeTensorMode
 from transformers.integrations.hub_kernels import use_kernel_func_from_hub_with_fallback
 from transformers.integrations.sdpa_attention import sdpa_attention_forward
 
@@ -37,6 +38,7 @@ class FakeCache:
 
     def __init__(self, config: object, max_cache_len: int) -> None:
         """Keep the cache length and start the reset count at zero."""
+        del config
         self.max_cache_len = max_cache_len
         self.resets = 0
 
@@ -76,7 +78,7 @@ def decoder(monkeypatch: pytest.MonkeyPatch) -> tuple[GraphedDecoder, FakeModel]
     """
     monkeypatch.setattr(inference, "StaticCache", FakeCache)
 
-    def prompt_253(pipe: object, prepared: object) -> int:
+    def prompt_253(_pipe: object, _prepared: object) -> int:
         return 253
 
     monkeypatch.setattr(inference, "prompt_tokens", prompt_253)
@@ -85,7 +87,7 @@ def decoder(monkeypatch: pytest.MonkeyPatch) -> tuple[GraphedDecoder, FakeModel]
     def postprocess(outputs: dict[str, torch.Tensor]) -> dict[str, str]:
         return {"text": f"f{int(outputs['tokens'][0])}"}
 
-    def prepare_chunk(chunk: Any, sample_rate: int) -> PreparedChunk:
+    def prepare_chunk(_audio: Any, _sample_rate: int) -> PreparedChunk:
         return _chunk(40)  # the longest chunk the pipeline cuts is 40 frames here
 
     pipe = SimpleNamespace(model=model, postprocess=postprocess, prepare_chunk=prepare_chunk)
@@ -155,7 +157,7 @@ class TestGraphedDecoder:
     ) -> None:
         dec, model = decoder
 
-        def prompt_300(pipe: object, prepared: object) -> int:
+        def prompt_300(_pipe: object, _prepared: object) -> int:
             return 300
 
         monkeypatch.setattr(inference, "prompt_tokens", prompt_300)
@@ -163,6 +165,18 @@ class TestGraphedDecoder:
         assert not dec2.short_enabled
         dec2([_chunk(5)])
         assert model.calls[-1]["max_new_tokens"] == 256
+
+    def test_generate_must_return_token_ids(
+        self, decoder: tuple[GraphedDecoder, FakeModel], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dec, model = decoder
+
+        def scored(**_kwargs: Any) -> tuple[str, str]:
+            return ("sequences", "scores")
+
+        monkeypatch.setattr(model, "generate", scored)
+        with pytest.raises(TypeError, match="expected token ids"):
+            dec._decode([_chunk(1)], cache_len=64, budget=8)
 
 
 class TestMpsSafeSdpa:
@@ -246,6 +260,7 @@ def _fake_modeling(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
 
     @use_kernel_func_from_hub_with_fallback("neg", "operator")
     def neg(a: int) -> str:
+        del a
         return "reference"
 
     module = ModuleType("fake_modeling")
@@ -307,3 +322,14 @@ def test_in_place_delta_step_matches_fla() -> None:
     assert new_state is state  # updated in place: the cache's copy becomes a no-op
     assert torch.equal(out, expected_out)
     assert torch.equal(state, expected_state)
+
+
+def test_gated_delta_step_fake_gives_tracing_the_output_shape() -> None:
+    """torch.compile traces the custom op through its fake, which must shape the output like v."""
+    with FakeTensorMode():
+        q = k = torch.empty(2, 1, 4, 8)
+        v = torch.empty(2, 1, 6, 16)
+        g = beta = torch.empty(2, 1, 6)
+        state = torch.empty(2, 6, 8, 16)
+        out = inference.gated_delta_step_(q, k, v, g, beta, state, 0.25, True)
+    assert out.shape == v.shape

@@ -39,7 +39,8 @@ def test_upload_falls_back_to_the_original_bytes(
     cd_wav: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def no_ffmpeg(*_args: Any, **_kwargs: Any) -> None:
-        raise FileNotFoundError("ffmpeg")
+        msg = "ffmpeg"
+        raise FileNotFoundError(msg)
 
     monkeypatch.setattr(subprocess, "run", no_ffmpeg)
     assert app.compact_audio(str(cd_wav)) == (cd_wav.read_bytes(), "application/octet-stream")

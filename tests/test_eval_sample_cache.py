@@ -56,7 +56,7 @@ def test_fully_cached_run_never_streams(tmp_path: Path) -> None:
     class Exploding:
         features = None
 
-        def skip(self, n: int) -> NoReturn:
+        def skip(self, _n: int) -> NoReturn:
             msg = "streamed despite a full cache"
             raise AssertionError(msg)
 

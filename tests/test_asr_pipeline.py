@@ -204,13 +204,13 @@ class TestPipelineCall:
             k = len(calls) - 1
             return f"w{k}a w{k}b"
 
-        def fake_prepare(self: object, chunk: npt.NDArray[np.float32], sample_rate: int) -> Any:
+        def fake_prepare(_self: object, chunk: npt.NDArray[np.float32], _sample_rate: int) -> Any:
             return {"input_features": torch.zeros(len(chunk)), "attention_mask": torch.zeros(1)}
 
-        def fake_generate(self: object, prepared: Sequence[Any]) -> list[str]:
+        def fake_generate(_self: object, prepared: Sequence[Any]) -> list[str]:
             return [transcribe(int(p["input_features"].shape[0])) for p in prepared]
 
-        def fake_call(self: object, inputs: dict[str, Any], **kwargs: Any) -> dict[str, str]:
+        def fake_call(_self: object, inputs: dict[str, Any], **kwargs: Any) -> dict[str, str]:
             return {"text": transcribe(len(inputs["raw"] if "raw" in inputs else inputs["array"]))}
 
         monkeypatch.setattr(ASRPipeline, "prepare_chunk", fake_prepare)
@@ -231,7 +231,7 @@ class TestPipelineCall:
         """Long audio is transcribed per chunk; word times land on the recording timeline."""
 
         def fake_align(
-            chunks: Sequence[tuple[object, str]], sample_rate: int = 16000
+            chunks: Sequence[tuple[object, str]], **_kwargs: object
         ) -> list[list[AlignedWord]]:
             return [
                 [{"word": w, "start": 1.0, "end": 1.5} for w in text.split()] for _, text in chunks
@@ -287,7 +287,7 @@ class TestPipelineCall:
     def test_plain_chunks_concatenate_logprobs(
         self, pipeline: ASRPipeline, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        def fake_call(self: object, inputs: object, **kwargs: Any) -> dict[str, Any]:
+        def fake_call(_self: object, _inputs: object, **_kwargs: Any) -> dict[str, Any]:
             return {"text": "x", "top1_logprob": [-0.1], "top2_logprob": [-2.0]}
 
         monkeypatch.setattr(transformers.AutomaticSpeechRecognitionPipeline, "__call__", fake_call)
@@ -296,8 +296,9 @@ class TestPipelineCall:
         )
         assert result == {"text": "x x", "top1_logprob": [-0.1, -0.1], "top2_logprob": [-2.0, -2.0]}
 
+    @pytest.mark.usefixtures("chunked")
     def test_alignment_failure_recorded(
-        self, pipeline: ASRPipeline, chunked: list[int], monkeypatch: pytest.MonkeyPatch
+        self, pipeline: ASRPipeline, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         def boom(*args: object, **kwargs: object) -> NoReturn:
             msg = "model not loadable"
@@ -317,7 +318,7 @@ class TestPipelineCall:
         """Each Nemotron speaker is transcribed on its own turn; segments come back too."""
 
         def fake_align(
-            chunks: Sequence[tuple[object, str]], sample_rate: int = 16000
+            chunks: Sequence[tuple[object, str]], **_kwargs: object
         ) -> list[list[AlignedWord]]:
             return [
                 [{"word": w, "start": 0.5, "end": 0.9} for w in text.split()[:1]]
@@ -329,9 +330,7 @@ class TestPipelineCall:
         activity[0:250, 3] = 0.9  # arrives first -> SPEAKER_0
         activity[250:500, 5] = 0.9
 
-        def fake_activity(
-            audio: npt.ArrayLike, sample_rate: int = 16000
-        ) -> npt.NDArray[np.float32]:
+        def fake_activity(*_args: object, **_kwargs: object) -> npt.NDArray[np.float32]:
             return activity
 
         monkeypatch.setattr(NemotronDiarizer, "activity", fake_activity)
@@ -398,7 +397,7 @@ class TestBatchedChunks:
     def test_batches_split_at_max_batch_size(self, monkeypatch: pytest.MonkeyPatch) -> None:
         sizes: list[int] = []
 
-        def fake_generate(self: object, prepared: Sequence[PreparedChunk]) -> list[str]:
+        def fake_generate(_self: object, prepared: Sequence[PreparedChunk]) -> list[str]:
             sizes.append(len(prepared))
             return [str(int(p["attention_mask"].shape[-1])) for p in prepared]
 
@@ -413,7 +412,7 @@ class TestBatchedChunks:
         """A server's runner sees every non-silent chunk of the request at once."""
 
         def fake_prepare(
-            _self: object, chunk: npt.NDArray[np.float32], sample_rate: int
+            _self: object, chunk: npt.NDArray[np.float32], _sample_rate: int
         ) -> PreparedChunk:
             return TestBatchedChunks._prepared(len(chunk))
 
@@ -458,3 +457,54 @@ class TestBatchedGenerateParity:
         prepared = [pipeline.prepare_chunk(c, 16000) for c in chunks]
         solo = [pipeline.generate_prepared([p])[0] for p in prepared]
         assert pipeline.generate_prepared(prepared) == solo
+
+
+class TestOutputContracts:
+    """The pipeline raises, rather than mis-scoring, when a dependency breaks its contract."""
+
+    def test_generate_must_return_token_ids(
+        self, cpu_pipeline: ASRPipeline, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def scored(**_kwargs: Any) -> tuple[str, str]:
+            return ("sequences", "scores")
+
+        monkeypatch.setattr(cpu_pipeline.model, "generate", scored)
+        prepared = cpu_pipeline.prepare_chunk(np.zeros(16000, dtype=np.float32), 16000)
+        with pytest.raises(TypeError, match="expected token ids"):
+            cpu_pipeline.generate_prepared([prepared])
+
+    def test_decode_must_return_one_string(
+        self, cpu_pipeline: ASRPipeline, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def batch_decode(*_args: Any, **_kwargs: Any) -> list[str]:
+            return ["a", "b"]
+
+        monkeypatch.setattr(cpu_pipeline.model.tokenizer, "decode", batch_decode)
+        with pytest.raises(TypeError, match="expected str"):
+            cpu_pipeline.postprocess({"tokens": torch.tensor([1, 2])})
+
+    def test_missing_feature_extractor_or_tokenizer_is_an_error(
+        self, cpu_pipeline: ASRPipeline, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(cpu_pipeline, "feature_extractor", None)
+        monkeypatch.setattr(cpu_pipeline, "tokenizer", None)
+        with pytest.raises(RuntimeError, match="no feature extractor"):
+            cpu_pipeline._sampling_rate()
+        with pytest.raises(RuntimeError, match="no tokenizer"):
+            cpu_pipeline._tokenizer()
+
+
+class TestConstruction:
+    """ASRPipeline's own arguments, before transformers' pipeline machinery runs."""
+
+    def test_the_feature_extractor_defaults_to_the_models_processor(
+        self, base_asr_model: ASRModel
+    ) -> None:
+        pipeline = ASRPipeline(model=base_asr_model, device="cpu")
+        assert pipeline.feature_extractor is not None
+        assert pipeline._sampling_rate() == base_asr_model.feature_extractor.sampling_rate
+
+    def test_a_second_positional_input_is_rejected(self, cpu_pipeline: ASRPipeline) -> None:
+        audio = {"array": np.zeros(1600, dtype=np.float32), "sampling_rate": 16000}
+        with pytest.raises(TypeError, match="takes 1 positional input, got 2"):
+            cpu_pipeline(audio, audio)

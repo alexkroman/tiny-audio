@@ -75,7 +75,7 @@ class TestRunpodConnectionUtils:
 def _free_gib(value: float | None) -> Callable[..., float | None]:
     """Stand-in for ``_remote_free_gib`` that always reports ``value`` GiB free."""
 
-    def free_gib(conn: object, *a: object, **k: object) -> float | None:
+    def free_gib(_conn: object, *_a: object, **_k: object) -> float | None:
         return value
 
     return free_gib
@@ -440,7 +440,7 @@ def test_runpod_serve_starts_server_session(
     conn = MagicMock()
     conn.run.return_value = MagicMock(ok=True, stdout="abc123\n")
 
-    def fake_connect(host: str, port: int) -> MagicMock:
+    def fake_connect(_host: str, _port: int) -> MagicMock:
         return conn
 
     monkeypatch.setattr(runpod, "connect", fake_connect)

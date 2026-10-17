@@ -111,7 +111,7 @@ class TestSaveResults:
                 metrics=sample_metrics,
                 output_dir=tmpdir,
             )
-            # Format: timestamp_model_dataset
+            # The name is the timestamp, model and dataset joined by underscores.
             dir_name = result_dir.name
             parts = dir_name.split("_")
             assert len(parts) >= 3

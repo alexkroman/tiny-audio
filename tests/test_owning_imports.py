@@ -95,3 +95,18 @@ def test_a_violation_fails_the_command(monkeypatch: pytest.MonkeyPatch) -> None:
     result = CliRunner().invoke(quality.app, ["owning-imports"])
     assert result.exit_code == 1
     assert ": bad" in result.output
+
+
+def test_plain_and_aliased_module_imports_are_tracked() -> None:
+    source = (
+        "import scripts.dev\n"
+        "import scripts.dev as d\n"
+        "x = scripts.subprocess\n"  # `scripts` is bound; scripts/__init__ does not import it
+        "y = d.subprocess\n"
+    )
+    (problem,) = owning_imports.violations(source, "t.py")
+    assert "`d.subprocess`" in problem
+
+
+def test_strings_outside_any_repo_module_are_ignored() -> None:
+    assert owning_imports.violations("x = 'scripts_extra.dev.subprocess'\n", "t.py") == []

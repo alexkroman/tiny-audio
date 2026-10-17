@@ -117,11 +117,9 @@ class TestPlanCommand:
         }
         assert out["warnings"] == ["heads up"]
 
+    @pytest.mark.usefixtures("stub_catalog")
     def test_small_disk_uses_container_disk_and_picks_smallest_gpu(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-        stub_catalog: dict[str, Any],
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _use_plan(monkeypatch, _plan(disk_gib=100))
         assert _run_plan() == 0
@@ -149,11 +147,9 @@ class TestPlanCommand:
         assert _run_plan(gpu="L40S") == 0
         assert '--gpu-id "L40S"' in capsys.readouterr().out
 
+    @pytest.mark.usefixtures("stub_catalog")
     def test_large_disk_needs_volume_in_supported_datacenter(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-        stub_catalog: dict[str, Any],
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _use_plan(monkeypatch, _plan(disk_gib=1500))
         assert _run_plan() == 0
@@ -167,11 +163,9 @@ class TestPlanCommand:
         assert f"--size {int(1500 * 1.15) + 5}" in out
         assert "caps at" not in out
 
+    @pytest.mark.usefixtures("stub_catalog")
     def test_oversized_volume_is_capped_with_warning(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-        stub_catalog: dict[str, Any],
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _use_plan(monkeypatch, _plan(disk_gib=5000))
         _run_plan(gpu="NVIDIA H100 80GB HBM3")
@@ -246,18 +240,19 @@ class TestProvisionCommand:
         monkeypatch.setattr(subprocess, "run", fake_run)
         return calls
 
+    @pytest.mark.usefixtures("home")
     def test_no_candidates_exits(
-        self, monkeypatch: pytest.MonkeyPatch, stub_catalog: dict[str, Any], home: Path
+        self, monkeypatch: pytest.MonkeyPatch, stub_catalog: dict[str, Any]
     ) -> None:
         stub_catalog["gpus"] = []
         _use_plan(monkeypatch, _plan())
         with pytest.raises(typer.Exit):
             self._run()
 
+    @pytest.mark.usefixtures("stub_catalog")
     def test_missing_pubkey_exits(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        stub_catalog: dict[str, Any],
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
@@ -267,12 +262,9 @@ class TestProvisionCommand:
             self._run()
         assert "id_ed25519.pub" in capsys.readouterr().out
 
+    @pytest.mark.usefixtures("stub_catalog", "home")
     def test_dry_run_creates_nothing(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        stub_catalog: dict[str, Any],
-        home: Path,
-        capsys: pytest.CaptureFixture[str],
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _use_plan(monkeypatch, _plan())
         calls = self._stub_create(monkeypatch, [])
@@ -282,11 +274,11 @@ class TestProvisionCommand:
         assert "candidates (smallest first): A40\n" in out
         assert "! heads up" in out
 
+    @pytest.mark.usefixtures("home")
     def test_walks_candidates_until_one_is_created(
         self,
         monkeypatch: pytest.MonkeyPatch,
         stub_catalog: dict[str, Any],
-        home: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         stub_catalog["gpus"] = [(24, "L4"), (48, "A40"), (80, "H100")]
@@ -313,9 +305,8 @@ class TestProvisionCommand:
         assert "unexpected response" in out
         assert "runpodctl pod delete pod123" in out
 
-    def test_all_out_of_capacity_exits(
-        self, monkeypatch: pytest.MonkeyPatch, stub_catalog: dict[str, Any], home: Path
-    ) -> None:
+    @pytest.mark.usefixtures("stub_catalog", "home")
+    def test_all_out_of_capacity_exits(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _use_plan(monkeypatch, _plan())
         calls = self._stub_create(monkeypatch, ['{"error": "x"}', '{"error": "y"}'])
         with pytest.raises(typer.Exit):
@@ -334,11 +325,11 @@ class TestProvisionServeCommand:
         (tmp_path / ".ssh" / "id_ed25519.pub").write_text("ssh-ed25519 AAAA me\n")
         return tmp_path
 
+    @pytest.mark.usefixtures("home")
     def test_listed_preferred_gpus_go_first(
         self,
         monkeypatch: pytest.MonkeyPatch,
         stub_catalog: dict[str, Any],
-        home: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """Catalog-listed SERVE_GPUS first, in preference order; unlisted ones still tried."""
@@ -362,9 +353,8 @@ class TestProvisionServeCommand:
         assert last[last.index("--ports") + 1] == POD_PORTS
         assert "https://pod9-8000.proxy.runpod.net" in capsys.readouterr().out
 
-    def test_dry_run_creates_nothing(
-        self, monkeypatch: pytest.MonkeyPatch, stub_catalog: dict[str, Any], home: Path
-    ) -> None:
+    @pytest.mark.usefixtures("stub_catalog", "home")
+    def test_dry_run_creates_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def no_run(*args: Any, **kwargs: Any) -> Any:
             pytest.fail("pod created on a dry run")
 

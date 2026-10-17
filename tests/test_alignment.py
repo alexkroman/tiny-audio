@@ -31,7 +31,7 @@ class FakeProcessor:
         return features, [t.split() for t in texts]
 
     def decode_forced_alignment(
-        self, logits: Any, input_ids: Any, word_lists: list[list[str]], timestamp_id: int
+        self, _logits: Any, _input_ids: Any, word_lists: list[list[str]], _timestamp_id: int
     ) -> list[list[dict[str, float]]]:
         """Give word i of each list the span [i, i + 0.5) seconds."""
         return [
@@ -105,7 +105,8 @@ class TestAlignChunks:
             [],
         ]
 
-    def test_too_long_chunk_raises(self, fake_pair: tuple[MagicMock, FakeProcessor]) -> None:
+    @pytest.mark.usefixtures("fake_pair")
+    def test_too_long_chunk_raises(self) -> None:
         too_long = np.zeros(int(16000 * (QwenForcedAligner.MAX_SECONDS + 1)), dtype=np.float32)
         with pytest.raises(ValueError, match="at most 300 s"):
             QwenForcedAligner.align_chunks([(np.zeros(10), "ok"), (too_long, "too long")])

@@ -18,8 +18,8 @@ import numpy.typing as npt
 import pytest
 import soundfile
 import torch
-import torch.nn as nn
 from peft import LoraConfig, PeftModel, get_peft_model
+from torch import nn
 from transformers import PretrainedConfig, PreTrainedModel
 
 from scripts.eval.cli import _build_tiny_audio_evaluator

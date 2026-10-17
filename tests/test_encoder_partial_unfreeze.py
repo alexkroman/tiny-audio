@@ -275,7 +275,8 @@ class TestPartialUnfreezeIsUsableEndToEnd:
         assert {p.dtype for p in model.audio_tower.parameters()} == {torch.float32}
         assert {p.dtype for p in model.language_model.parameters()} == {torch.bfloat16}
 
-    def test_encoder_dtype_defaults_to_model_dtype(self, base_asr_config: ASRConfig) -> None:
+    @pytest.mark.usefixtures("base_asr_config")
+    def test_encoder_dtype_defaults_to_model_dtype(self) -> None:
         assert ASRConfig(model_dtype="bfloat16").encoder_dtype == "bfloat16"
         assert ASRConfig(model_dtype="float32").encoder_dtype == "float32"
 

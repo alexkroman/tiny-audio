@@ -28,7 +28,14 @@ import httpx
 import typer
 from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig
-from tenacity import RetryError, retry, retry_if_result, stop_after_delay, wait_fixed
+from tenacity import (
+    RetryError,
+    TryAgain,
+    retry,
+    retry_if_exception_type,
+    stop_after_delay,
+    wait_fixed,
+)
 
 from scripts.deploy import gpu_catalog
 from scripts.deploy.hub_sizes import (
@@ -927,30 +934,25 @@ def wait_command(
     """
 
     @retry(
-        retry=retry_if_result(lambda ep: ep is None),
+        retry=retry_if_exception_type(TryAgain),
         stop=stop_after_delay(timeout_s),
         wait=wait_fixed(15),
     )
-    def poll() -> tuple[str, int] | None:
+    def poll() -> tuple[str, int]:
+        """The pod's SSH endpoint; raises TryAgain until it has one."""
         out = gpu_catalog.runpodctl_json("pod", "get", pod_id)
         try:
             ssh: dict[str, Any] = json.loads(out[out.index("{") :]).get("ssh") or {}
         except (ValueError, AttributeError):
             # No JSON yet (or a partial write) -- same as "not ready", poll again.
-            return None
-        if ssh.get("ip") and ssh.get("port"):
-            return ssh["ip"], ssh["port"]
-        return None
+            raise TryAgain from None
+        if not (ssh.get("ip") and ssh.get("port")):
+            raise TryAgain
+        return ssh["ip"], ssh["port"]
 
     try:
-        endpoint = poll()
+        ip, port = poll()
     except RetryError:
         print(f"Pod {pod_id} exposed no SSH endpoint within {timeout_s}s.")
         raise typer.Exit(1) from None
-    # retry_if_result keeps polling while the result is None, so a return
-    # without RetryError always carries an endpoint.
-    if endpoint is None:
-        msg = "pod polling returned without an SSH endpoint"
-        raise RuntimeError(msg)
-    ip, port = endpoint
     print(f"{ip} {port}")

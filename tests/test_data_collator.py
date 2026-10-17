@@ -61,7 +61,7 @@ def collator(
 def create_sample(text: str, duration_sec: float = 1.0, sample_rate: int = 16000) -> dict[str, Any]:
     """Create a sample with dummy audio."""
     num_samples = int(duration_sec * sample_rate)
-    audio_array = np.random.randn(num_samples).astype(np.float32) * 0.1
+    audio_array = np.random.default_rng(0).standard_normal(num_samples).astype(np.float32) * 0.1
     return {
         "audio": {"array": audio_array, "sampling_rate": sample_rate},
         "text": text,
@@ -151,9 +151,8 @@ class TestLabelMasking:
         assert len(audio_positions) > 0, "No audio tokens found"
         assert all(labels[i] == -100 for i in audio_positions), "Audio tokens should be masked"
 
-    def test_label_token_alignment(
-        self, collator: DataCollator, tokenizer: PreTrainedTokenizerBase
-    ) -> None:
+    @pytest.mark.usefixtures("tokenizer")
+    def test_label_token_alignment(self, collator: DataCollator) -> None:
         """Verify that unmasked labels match corresponding input_ids."""
         text = "Alignment test."
         samples = [create_sample(text)]

@@ -88,7 +88,7 @@ def test_load_eval_samples_caches_the_undecoded_stream(
     seen: dict[str, Any] = {}
 
     def fake_load(
-        name: str, split: str, config_override: str | None = None, *, decode_audio: bool = True
+        name: str, split: str, _config_override: str | None = None, *, decode_audio: bool = True
     ) -> str:
         seen.update(name=name, split=split, decode_audio=decode_audio)
         return "stream"
