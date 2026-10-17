@@ -1,13 +1,23 @@
 """Tests for DataCollator label masking behavior."""
 
+from types import SimpleNamespace
 from typing import Any, cast
 
 import numpy as np
 import pytest
 import torch
+from omegaconf import OmegaConf
 from transformers import AutoTokenizer, PreTrainedTokenizerBase, WhisperFeatureExtractor
 
-from scripts.train_collator import DataCollator
+from scripts.train_augment import BatchAugmenter
+from scripts.train_collator import (
+    TRANSCRIBE_PROMPT_PUNCT,
+    TRANSCRIBE_PROMPT_VERBATIM,
+    TRANSCRIBE_PROMPT_VERBATIM_PUNCT,
+    DataCollator,
+    build_collators,
+)
+from tiny_audio.asr_processing import DEFAULT_TRANSCRIBE_PROMPT as TRANSCRIBE_PROMPT
 
 
 class MockProjector:
@@ -340,3 +350,71 @@ class TestExtractAudioArraysFilters:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestPromptChoice:
+    """The prompt follows the row's declared punctuation and verbatim policy."""
+
+    @pytest.mark.parametrize(
+        ("punct", "verbatim", "prompt"),
+        [
+            (False, False, TRANSCRIBE_PROMPT),
+            (True, False, TRANSCRIBE_PROMPT_PUNCT),
+            (False, True, TRANSCRIBE_PROMPT_VERBATIM),
+            (True, True, TRANSCRIBE_PROMPT_VERBATIM_PUNCT),
+        ],
+    )
+    def test_prompt_for_policy(
+        self, collator: DataCollator, punct: bool, verbatim: bool, prompt: str
+    ) -> None:
+        feature = {"text": "hello", "_text_punct": punct, "_text_verbatim": verbatim}
+        user = collator._build_sample(feature, 3)["messages"][0]["content"]
+        assert user.endswith(" " + prompt)
+
+
+class TestNoiseOnlyRows:
+    """A noise-only row (target "") still teaches the model to stop."""
+
+    def test_empty_target_labels_only_the_stop_token(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        feature_extractor: WhisperFeatureExtractor,
+        projector: MockProjector,
+    ) -> None:
+        collator = DataCollator(
+            tokenizer=tokenizer,
+            feature_extractor=feature_extractor,
+            sample_rate=16000,
+            projector=projector,
+            augmenter=BatchAugmenter(16000, noise_only_prob=1.0, seed=0),
+        )
+        batch = collator([create_sample("first row"), create_sample("second row")])
+        im_end = tokenizer.convert_tokens_to_ids("<|im_end|>")
+        for labels in batch["labels"].tolist():
+            kept = [t for t in labels if t != -100]
+            assert im_end in kept
+            assert "row" not in tokenizer.decode(kept)
+
+
+class TestBuildCollators:
+    """Only the training collator augments."""
+
+    def test_eval_collator_never_augments(
+        self, tokenizer: PreTrainedTokenizerBase, feature_extractor: WhisperFeatureExtractor
+    ) -> None:
+        model = cast(
+            "Any",
+            SimpleNamespace(
+                tokenizer=tokenizer,
+                feature_extractor=feature_extractor,
+                projector=MockProjector(),
+                config=SimpleNamespace(encoder_conv_layers=None),
+                audio_token="<audio>",
+            ),
+        )
+        on = OmegaConf.create({"sample_rate": 16000, "babble_prob": 0.1, "noise_only_prob": 0.02})
+        train, evaluation = build_collators(model, on, seed=0)
+        assert train.augmenter is not None
+        assert evaluation.augmenter is None
+        off = OmegaConf.create({"sample_rate": 16000})
+        assert build_collators(model, off, seed=0)[0].augmenter is None

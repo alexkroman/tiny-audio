@@ -71,6 +71,18 @@ class DataConfig:
     epoch_expansion: int = 1
     max_eval_samples: int | None = None
     max_eval_samples_per_dataset: int | None = None
+    # Sources are named "path" (every config of it) or "path:name".
+    # Row-count multiplier, applied after target_samples (>1 repeat-pads).
+    source_weights: dict[str, float] = field(default_factory=dict[str, float])
+    # Sources whose labels are word-for-word: they train under the verbatim
+    # prompts (scripts/train_collator.py) instead of the plain/punct ones.
+    verbatim_sources: list[str] = field(default_factory=list[str])
+    # Training-batch augmentation (scripts/train_augment.py); 0 disables.
+    # babble: mix another row of the batch in at an SNR drawn from babble_snr_db.
+    babble_prob: float = 0.0
+    babble_snr_db: list[float] = field(default_factory=lambda: [0.0, 15.0])
+    # noise_only: replace the row with noise or many-talker babble, target "".
+    noise_only_prob: float = 0.0
 
 
 @dataclass
