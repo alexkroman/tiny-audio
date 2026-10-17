@@ -1,5 +1,6 @@
 """Tests for ASRModel — projector dispatch, tokenizer init, embeddings, audio token counting."""
 
+import copy
 import inspect
 import json
 from collections.abc import Sequence
@@ -277,6 +278,53 @@ class TestForward:
             labels=labels,
         )
         assert out.loss is not None
+
+    def test_unfused_loss_matches_full_logits(self, base_asr_model: ASRModel) -> None:
+        """Without liger, only label positions reach lm_head; the loss is unchanged."""
+        assert not base_asr_model._lm_accepts_skip_logits
+        torch.manual_seed(0)
+        input_ids = torch.randint(10, 100, (2, 12))
+        labels = input_ids.clone()
+        labels[0, :7] = -100  # prompt/audio positions carry no label
+        labels[1, :9] = -100
+        labels[1, 11] = -100  # a padded tail
+        attention_mask = torch.ones_like(input_ids)
+
+        with torch.no_grad():
+            out = base_asr_model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+            logits = base_asr_model(input_ids=input_ids, attention_mask=attention_mask).logits
+        shift = torch.nn.functional.pad(labels, (0, 1), value=-100)[:, 1:]
+        expected = torch.nn.functional.cross_entropy(
+            logits.float().flatten(0, 1), shift.flatten(), ignore_index=-100
+        )
+        torch.testing.assert_close(out.loss, expected)
+        # Positions 6..10 predict a label in some row; nothing else is projected.
+        assert out.logits.shape[1] == 5
+
+
+class TestPushToHub:
+    """push_to_hub forwards only the arguments it was given."""
+
+    @pytest.mark.parametrize(("tags", "forwarded"), [(None, False), (["asr"], True)])
+    def test_tags_forwarded_only_when_given(
+        self,
+        base_asr_model: ASRModel,
+        monkeypatch: pytest.MonkeyPatch,
+        tags: list[str] | None,
+        forwarded: bool,
+    ) -> None:
+        # transformers iterates kwargs.get("tags", []), so tags=None crashed
+        # the push at the very end of a training run.
+        seen: dict[str, Any] = {}
+
+        def fake_push(_self: PreTrainedModel, repo_id: str, **kwargs: Any) -> str:
+            seen.update(kwargs)
+            return repo_id
+
+        monkeypatch.setattr(PreTrainedModel, "push_to_hub", fake_push)
+        monkeypatch.setattr(base_asr_model, "config", copy.copy(base_asr_model.config))
+        base_asr_model.push_to_hub("user/repo", tags=tags)
+        assert ("tags" in seen) is forwarded
 
 
 class TestGenerate:

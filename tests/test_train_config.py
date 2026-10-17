@@ -85,12 +85,20 @@ def test_default_config_is_the_published_recipe() -> None:
 
 
 def test_tiny_preset_trains_the_default_model_on_the_sample() -> None:
-    """`-e tiny` is the default recipe on 73 clips: only data, steps and hardware differ."""
+    """`-e tiny` is the default recipe on dev-clean with a smaller decoder.
+
+    Only the decoder, data, steps and hardware differ: the encoder, projector
+    and LoRA setup are the default's.
+    """
     default, tiny = _compose(), _compose(["+experiments=tiny"])
-    assert tiny.model == default.model
+    assert tiny.model.text_model_id == "Qwen/Qwen3.5-0.8B"
+    assert {**tiny.model, "text_model_id": None} == {**default.model, "text_model_id": None}
     for key in ("freeze_audio_encoder", "freeze_language_model", "learning_rate"):
         assert tiny.training[key] == default.training[key], key
-    assert [d.path for d in tiny.data.datasets] == ["hf-internal-testing/librispeech_asr_dummy"]
+    [source] = tiny.data.datasets
+    assert source.data_files == {
+        "train": "hf://datasets/openslr/librispeech_asr/clean/validation/*.parquet"
+    }
     # Nothing leaves the machine, and nothing CUDA-only is required.
     assert tiny.training.push_to_hub is False
     assert tiny.training.report_to == "none"
@@ -190,6 +198,24 @@ class TestApplyLigerKernels:
     @staticmethod
     def _cfg() -> DictConfig:
         return OmegaConf.create({"model": {"text_model_id": "Qwen/Qwen3.5-0.8B"}})
+
+    @pytest.fixture(autouse=True)
+    def _on_cuda(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The tests below are about a CUDA machine; without one liger is skipped.
+        monkeypatch.setattr("torch.cuda.is_available", lambda: True)
+
+    def test_skipped_without_cuda(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """liger is Triton (CUDA-only): a CPU or Mac run never calls the patcher."""
+        calls: list[str] = []
+        liger = SimpleNamespace(apply_liger_kernel_to_qwen3_5=lambda: calls.append("patched"))
+        monkeypatch.setattr(train_module, "_liger_transformers", liger)
+        monkeypatch.setattr("torch.cuda.is_available", lambda: False)
+        caplog.set_level("INFO")
+        train_module._apply_liger_kernels(self._cfg())
+        assert calls == []
+        assert "No CUDA device" in caplog.text
 
     def test_missing_liger_warns_and_falls_back(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture

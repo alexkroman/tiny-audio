@@ -1,0 +1,31 @@
+# LibriSpeech dev-clean (2,703 utterances, 5.4 hours, ~340 MB) as a small
+# training set for the free run (`-e tiny`). Large enough that the model has
+# to read the audio rather than memorize the sentences, small enough to
+# download on a laptop.
+#
+# Scored on test-clean (`ta eval -d librispeech`), which shares no speakers
+# or utterances with dev-clean.
+
+---
+datasets:
+  # The generic parquet loader over dev-clean's shards only. Loading
+  # openslr/librispeech_asr with `name: clean` downloads every split of that
+  # config, train-360 included (~30 GB).
+  - path: parquet
+    data_files:
+      train: hf://datasets/openslr/librispeech_asr/clean/validation/*.parquet
+    audio_column: audio
+    text_column: text
+    task: transcribe
+    train_splits:
+      - train
+    # Eval is off in the free run; this only satisfies the loader.
+    eval_splits:
+      - train
+
+# Audio processing
+sample_rate: 16000
+
+# Processing options
+dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
+max_eval_samples: 8

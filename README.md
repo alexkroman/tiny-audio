@@ -32,19 +32,22 @@ demo:**
 ## Quickstart
 
 ```python
-# 1. Transcribe with the published model
+# 1. Transcribe with the published model (the first call downloads ~6 GB)
 #    pip install "transformers>=5.0" peft torch torchaudio librosa
 from transformers import pipeline
 
 pipe = pipeline(
     "automatic-speech-recognition", model="mazesmazes/tiny-audio", trust_remote_code=True
 )
-print(pipe("audio.wav")["text"])
-# The quarterly revenue grew by 12% according to Dr. Smith.
+print(pipe("https://huggingface.co/datasets/Narsil/asr_dummy/resolve/main/mlk.flac")["text"])
+# I have a dream that one day this nation will rise up and live out the true meaning of its creed.
 ```
 
+Pass a path to transcribe your own recording. WAV, FLAC, OGG and MP3 work out of the box; other
+formats (m4a, video) need [ffmpeg](https://ffmpeg.org/download.html) installed.
+
 ```bash
-# 2. Train the same model for free: 73 LibriSpeech clips, on your laptop or a free Colab GPU
+# 2. Train your own for free, on your laptop: ~30 minutes on an Apple Silicon Mac, ~3 GB download
 git clone https://github.com/alexkroman/tiny-audio.git && cd tiny-audio
 poetry install
 poetry run ta train asr -e tiny
@@ -55,10 +58,12 @@ poetry run ta runpod plan               # VRAM and disk the config needs, before
 poetry run python scripts/train.py      # the default config: the published model's recipe
 ```
 
-The free run is the default recipe with only the data, step count and hardware settings changed
-([configs/experiments/tiny.yaml](configs/experiments/tiny.yaml)). It overfits its 73 clips, so its
-WER on unseen audio stays high; the point is to watch the projector learn before you pay for
-anything.
+The free run ([configs/experiments/tiny.yaml](configs/experiments/tiny.yaml)) is the default recipe
+with the smaller Qwen3.5-0.8B decoder, trained on LibriSpeech dev-clean (5.4 hours) instead of the
+full mix. Watch the loss: it sits near 4 while the projector's output is still noise to the decoder,
+then drops below 1 around step 500 as the decoder starts reading the audio. The result transcribes
+unseen LibriSpeech audio at about 16% WER, with mistakes like "furnishings" for "furniture". It fits
+in 16 GB of memory and also runs on a CUDA GPU, including a free Colab T4.
 
 No install at all: the **[live demo](https://huggingface.co/spaces/mazesmazes/tiny-audio)** lets you
 record yourself or upload a file.
@@ -140,7 +145,7 @@ What each training budget costs:
 
 | Run                                  | Data                                 | Hardware                        | Cost                |
 | ------------------------------------ | ------------------------------------ | ------------------------------- | ------------------- |
-| **Free run** (`-e tiny`)             | 73 LibriSpeech clips                 | Your laptop or a free Colab GPU | Free                |
+| **Free run** (`-e tiny`)             | LibriSpeech dev-clean (5.4 hours)    | Your laptop or a free Colab GPU | Free                |
 | **Course run**                       | LoquaciousSet `small` (~250 hours)   | One rented GPU, a few hours     | A few GPU-hours     |
 | **Default config** (published model) | ~3M clips across ten corpora (>1 TB) | One 80 GB GPU, a day or more    | Hundreds of dollars |
 

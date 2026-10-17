@@ -17,8 +17,9 @@ from transformers.dynamic_module_utils import (
 BUNDLED = sorted(p for p in Path("tiny_audio").glob("*.py") if p.name.startswith("asr_")) + [
     Path("tiny_audio") / n for n in ("projectors.py", "alignment.py", "diarization.py")
 ]
-# requirements.txt: transformers, torch, torchaudio, peft (+ their deps safetensors, numpy).
-ALLOWED = {"transformers", "torch", "torchaudio", "peft", "safetensors", "numpy"}
+# requirements.txt: transformers, torch, torchaudio, peft (+ their deps safetensors, numpy,
+# huggingface_hub).
+ALLOWED = {"transformers", "torch", "torchaudio", "peft", "safetensors", "numpy", "huggingface_hub"}
 
 
 @pytest.mark.parametrize("path", BUNDLED, ids=lambda p: p.name)

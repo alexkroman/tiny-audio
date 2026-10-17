@@ -58,7 +58,7 @@ else:
     _liger_transformers = liger_transformers
     _liger_import_error = None
 
-for _noisy in ("httpx", "httpcore", "urllib3", "huggingface_hub.file_download"):
+for _noisy in ("httpx", "httpx2", "httpcore", "urllib3", "huggingface_hub.file_download"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -218,9 +218,12 @@ class DatasetLoader:
             msg = "Dataset path is required"
             raise ValueError(msg)
 
+        data_files = dataset_cfg.get("data_files")
         ds = load_dataset(
             dataset_path,
             name=dataset_cfg.get("name"),
+            # plain dict: datasets isinstance-checks it, and a DictConfig fails
+            data_files={str(k): str(v) for k, v in data_files.items()} if data_files else None,
             split=split,
             cache_dir=self.cache_dir,
             num_proc=self.num_proc,
@@ -918,6 +921,13 @@ def _apply_liger_kernels(cfg: DictConfig) -> None:
     # this wrong is not a crash but an OOM: Qwen3.5's vocab is 248,320, so an
     # unfused (B, T, V) logits tensor is ~16GB at B=32/T=512 before the
     # log_softmax copy.
+    if not torch.cuda.is_available():
+        # liger's kernels are Triton, CUDA-only. On a CPU-only linux box
+        # (CI, a laptop without a GPU) it is installed but would fail on the
+        # first fused op; ASRModel.forward has its own label-positions-only
+        # path for the unfused loss.
+        logger.info("No CUDA device; skipping liger kernels.")
+        return
     text_model_id = str(cfg.model.get("text_model_id", "")).lower()
     patcher_name = next((fn for key, fn in _LIGER_PATCHERS if key in text_model_id), None)
     if patcher_name is None:
