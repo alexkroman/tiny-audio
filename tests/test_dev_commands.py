@@ -304,15 +304,6 @@ class TestQualityGateContents:
         assert ["ruff", "format", "--check", *dev.CODE_PATHS] in dev.LINT_COMMANDS
         assert ["black", "--check", *dev.CODE_PATHS] in dev.LINT_COMMANDS
 
-    def test_lint_checks_all_tracked_html(self) -> None:
-        djlint = next(cmd for cmd in dev.lint_commands() if cmd[0] == "djlint")
-        assert djlint[:2] == ["djlint", "--lint"]
-        assert "docs/course/examples/data_trace.html" in djlint
-
-    def test_no_html_means_no_djlint_call(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(dev, "html_files", list)
-        assert all(cmd[0] != "djlint" for cmd in dev.lint_commands())
-
     def test_lint_checks_all_tracked_markdown(self) -> None:
         commands = {cmd[0]: cmd for cmd in dev.lint_commands()}
         assert commands["mdformat"][:2] == ["mdformat", "--check"]

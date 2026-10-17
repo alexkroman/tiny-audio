@@ -188,12 +188,10 @@ pyobjc-framework-Speech = { version = "*", markers = "sys_platform == 'darwin'" 
 #   poetry install --with hybrid-kernels
 types-tqdm = "^4.70.0.20260906"
 scipy-stubs = "^1.18.1.1"
-matplotlib = "^3.11.2"
 mdformat-frontmatter = "^2.1.2"
 pre-commit-hooks = "^6.0.0"
 pymarkdownlnt = "^0.9.40"
 mdformat-gfm = "^1.0.0"
-djlint = "^1.46.6"              # HTML lint for tracked .html (docs/course/examples/)
 [tool.poetry.group.hybrid-kernels]
 optional = true
 
@@ -349,7 +347,7 @@ select = [
 # pytest's idiom is the bare assert, and unit tests exercise private helpers
 # directly (pyright's reportPrivateUsage is off for tests/ for the same reason).
 "tests/**" = ["S101", "SLF001"]
-# Printing is what a CLI, a demo and a course example are for.
+# Printing is what a CLI, a demo and the docs build helpers are for.
 "{scripts,demo,docs}/**" = ["T20"]
 
 [tool.ruff.lint.flake8-unused-arguments]
@@ -362,7 +360,7 @@ ignore-variadic-names = true
 known-third-party = ["wandb"]
 
 [tool.deptry]
-# The course example plots with matplotlib; it is not part of the package.
+# docs/ holds the course site's build helpers (docs/site/requirements.txt), not the package.
 extend_exclude = ["docs"]
 
 [tool.deptry.package_module_name_map]
@@ -422,11 +420,6 @@ output = "coverage.xml"
 # Skip B615: We intentionally want latest HuggingFace model versions
 # Skip B108: RunPod deployment uses /tmp for remote scripts
 skips = ["B615", "B108"]
-
-[tool.djlint]
-# Plain HTML, not a template language. Covers unclosed and orphan tags,
-# inline styles and missing page metadata (`ta dev lint`).
-profile = "html"
 
 [tool.pymarkdown]
 # YAML front matter (MODEL_CARD.md, demo/README.md) and GFM tables, which

@@ -195,11 +195,6 @@ def markdown_files() -> list[str]:
     return tracked_files("*.md")
 
 
-def html_files() -> list[str]:
-    """Tracked HTML that `ta dev lint` checks (the course's generated trace page)."""
-    return tracked_files("*.html")
-
-
 def json_files() -> list[str]:
     """Tracked JSON (the quality/ baselines) that `ta dev lint` checks.
 
@@ -216,14 +211,11 @@ def lint_commands() -> list[list[str]]:
     scripts/quality.py writes).
     """
     markdown = markdown_files()
-    html = html_files()
     return [
         *LINT_COMMANDS,
         ["mdformat", "--check", *markdown],
         ["pymarkdown", "scan", *markdown],
         ["pretty-format-json", *json_files()],
-        # Rules and profile come from `[tool.djlint]` (pyproject.toml).
-        *([["djlint", "--lint", *html]] if html else []),
     ]
 
 

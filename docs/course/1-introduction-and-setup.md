@@ -1,6 +1,6 @@
 # Class 1: Introduction and Setup
 
-**Time:** 1.5 hours (40 min lecture + 50 min hands-on)
+**Time:** 1 hour 20 min (40 min lecture + 40 min hands-on)
 
 **Goal**: Understand the architecture well enough to predict tensor shapes, then get the published
 model running on your machine.
@@ -226,7 +226,7 @@ it.
 
 ______________________________________________________________________
 
-## Part B: Hands-On (50 min)
+## Part B: Hands-On (40 min)
 
 ### Exercise 1: Environment Setup (15 min)
 
@@ -334,20 +334,6 @@ poetry run ta eval --help
 # Run the test suite (a couple of minutes)
 poetry run ta dev test
 ```
-
-### Exercise 4: Trace the Data (10 min)
-
-`docs/course/examples/trace_data.py` pushes one LibriSpeech clip through the published model and
-records the tensor at every stage: waveform, spectrogram, encoder output, projector output. It also
-finds, for each projected audio token, the nearest real word embedding in the decoder's vocabulary,
-which shows how "text-like" the projector's output has become.
-
-```bash
-poetry run python docs/course/examples/trace_data.py
-```
-
-It writes `docs/course/examples/data_trace.html`. Open it in a browser and check the shapes against
-the table in the lecture. (A pre-generated copy is checked in if you'd rather just read it.)
 
 ______________________________________________________________________
 

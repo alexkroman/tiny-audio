@@ -4,7 +4,7 @@ A hands-on course: build, train, evaluate, and deploy your own ASR model with Ti
 
 |                   |                                                                                      |
 | ----------------- | ------------------------------------------------------------------------------------ |
-| **Duration**      | 3.5 hours of class time, plus an unattended training run                             |
+| **Duration**      | 3 hours 20 min of class time, plus an unattended training run                        |
 | **Cost**          | Classes 1 and 3 are free. Class 2's cloud run costs GPU time (see [Budget](#budget)) |
 | **Prerequisites** | Python, the command line, git                                                        |
 
@@ -51,7 +51,7 @@ ______________________________________________________________________
 
 ### [Class 1: Introduction and Setup](./1-introduction-and-setup.md)
 
-**Time:** 1.5 hours
+**Time:** 1 hour 20 min
 
 - How an encoder, a projector, and a decoder turn audio into text
 - Exactly what the projector computes, with real shapes and sizes

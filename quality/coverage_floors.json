@@ -125,7 +125,6 @@
   "tests/test_serve.py": 99.3,
   "tests/test_speaker_metrics.py": 100.0,
   "tests/test_speaker_streams.py": 100.0,
-  "tests/test_trace_data_html.py": 100.0,
   "tests/test_train_cli.py": 100.0,
   "tests/test_train_config.py": 100.0,
   "tests/test_transcribe_prompt_resolution.py": 100.0,
