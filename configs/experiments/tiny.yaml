@@ -1,33 +1,46 @@
 # @package _global_
-# The free run: the default recipe (same encoder, projector, decoder and LoRA)
-# trained on LibriSpeech's 73-clip sample instead of the ten-corpus mix.
+# The free run: a scaled-down version of the default recipe that learns to
+# transcribe on a laptop.
 #
 #   poetry run ta train asr -e tiny
 #
-# It overfits those clips -- that is the point. You watch the projector go
-# from noise to something the frozen decoder can read, on your own machine,
-# before renting a GPU for the real run. Only the data, the step budget and
-# the hardware settings differ from configs/config.yaml; everything that
-# shapes the model is inherited unchanged.
+# It trains on LibriSpeech dev-clean (2,703 clips, 5.4 hours, a ~340 MB
+# download) instead of the ten-corpus mix. Watch the loss: it sits near 4
+# while the projector is still noise to the decoder, then drops below 1
+# somewhere around step 400-650 as the decoder starts reading the audio.
+# Measured on an M4 Max: ~30 minutes, 16% WER on 100 unseen test-clean clips.
 #
-# Runs on Apple Silicon, a CUDA GPU (including a free Colab T4), or slowly
-# on CPU. The trained checkpoint lands in outputs/tiny/:
+# Only the decoder, the data, the step budget and the hardware settings
+# differ from configs/config.yaml; the encoder (Granite Speech 470M), the
+# projector and the LoRA setup are inherited unchanged. The decoder is
+# Qwen3.5-0.8B, the smallest Qwen3.5, instead of the default's Qwen3.5-2B.
+#
+# Peak GPU memory is 8-10 GB, so it fits a 16 GB Mac. Runs on Apple Silicon,
+# a CUDA GPU (including a free Colab T4), or slowly on CPU. The trained
+# checkpoint lands in outputs/tiny/:
 #
 #   poetry run ta eval -m outputs/tiny --local-code -d librispeech -n 20
 
 ---
 defaults:
-  - override /data: librispeech_dummy
+  - override /data: librispeech_dev
+
+model:
+  text_model_id: Qwen/Qwen3.5-0.8B
 
 data:
   num_proc: 1
 
 training:
-  # ~16 passes over the 73 clips.
-  max_steps: 300
-  warmup_steps: 30
-  per_device_train_batch_size: 4
-  per_device_eval_batch_size: 4
+  # 3,200 clips, ~1.2 passes over dev-clean. 73 clips (librispeech_dummy)
+  # is too few: the LoRA'd decoder memorizes the sentences and ignores the
+  # audio, reaching near-zero loss and >100% WER on unseen speech.
+  max_steps: 800
+  warmup_steps: 80
+  # Effective batch 4. Batch 4 in one pass peaks above 10 GB on 19 s clips.
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 2
+  per_device_eval_batch_size: 2
   logging_steps: 10
 
   # Portable settings. The production config assumes a recent NVIDIA card:
@@ -40,8 +53,9 @@ training:
   dataloader_persistent_workers: false
   dataloader_prefetch_factor: null
   dataloader_pin_memory: false
-  # liger is linux-only. At batch 4 the unfused logits tensor is small, so
-  # going without its fused cross-entropy is fine here.
+  # liger is linux-only. Without its fused cross-entropy, ASRModel.forward
+  # projects only the transcript positions through lm_head, which keeps the
+  # logits tensor small.
   allow_unfused_ce: true
 
   # Nothing leaves the machine: no W&B, no Hub, no mid-run checkpoints.

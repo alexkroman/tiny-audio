@@ -100,7 +100,7 @@ The cost of Class 2 is entirely yours to choose. Three tiers:
 
 | Tier                                        | Data                                                   | Hardware                          | Cost                                    |
 | ------------------------------------------- | ------------------------------------------------------ | --------------------------------- | --------------------------------------- |
-| **Free run** (`ta train asr -e tiny`)       | 73 LibriSpeech clips                                   | Your laptop or a free Colab GPU   | Free                                    |
+| **Free run** (`ta train asr -e tiny`)       | LibriSpeech dev-clean (5.4 hours), Qwen3.5-0.8B        | Your laptop or a free Colab GPU   | Free                                    |
 | **Course run** (what Class 2 walks through) | LoquaciousSet `small` (~250 hours)                     | One rented 80 GB GPU, a few hours | A few GPU-hours at RunPod's hourly rate |
 | **Production recipe** (the default config)  | The `multiasr` mix, ~3M clips, over a terabyte on disk | An 80 GB GPU for a day or more    | Hundreds of dollars                     |
 

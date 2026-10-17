@@ -13,7 +13,7 @@ import transformers
 
 from tiny_audio.alignment import AlignedWord, QwenForcedAligner
 from tiny_audio.asr_modeling import ASRModel
-from tiny_audio.asr_pipeline import ASRPipeline
+from tiny_audio.asr_pipeline import ASRPipeline, _single_input
 from tiny_audio.asr_processing import collate_chunks
 from tiny_audio.asr_types import PreparedChunk
 from tiny_audio.diarization import NemotronDiarizer
@@ -136,14 +136,14 @@ class TestPostprocess:
 
 
 class TestExtractAudioFileAndBytes:
-    """_extract_audio handles file paths and bytes inputs (uses ffmpeg_read)."""
+    """_extract_audio handles URLs, file paths and bytes (soundfile, else ffmpeg)."""
 
     def test_extract_audio_from_bytes(self) -> None:
-        """Bytes input should be parsed by ffmpeg_read."""
+        """Bytes soundfile can't read fall back to ffmpeg_read."""
 
         pipeline = object.__new__(ASRPipeline)
 
-        with patch("tiny_audio.asr_pipeline.ffmpeg_read") as mock_read:
+        with patch("tiny_audio.asr_processing.ffmpeg_read") as mock_read:
             mock_read.return_value = np.zeros(16000, dtype=np.float32)
             result = pipeline._extract_audio(b"some-audio-bytes")
 
@@ -152,7 +152,7 @@ class TestExtractAudioFileAndBytes:
         mock_read.assert_called_once()
 
     def test_extract_audio_from_path(self, tmp_path: Path) -> None:
-        """File path input should be opened and read via ffmpeg_read."""
+        """A path soundfile can't read falls back to ffmpeg_read."""
 
         pipeline = object.__new__(ASRPipeline)
 
@@ -160,12 +160,61 @@ class TestExtractAudioFileAndBytes:
         f = tmp_path / "audio.wav"
         f.write_bytes(b"fake-wav-bytes")
 
-        with patch("tiny_audio.asr_pipeline.ffmpeg_read") as mock_read:
+        with patch("tiny_audio.asr_processing.ffmpeg_read") as mock_read:
             mock_read.return_value = np.zeros(16000, dtype=np.float32)
             result = pipeline._extract_audio(str(f))
 
         assert result is not None
         assert result["sampling_rate"] == 16000
+
+    def test_wav_decodes_and_resamples_without_ffmpeg(self, tmp_path: Path) -> None:
+        """A 22.05 kHz stereo WAV comes back mono at 16 kHz; ffmpeg is never called."""
+        sf = pytest.importorskip("soundfile")
+        f = tmp_path / "audio.wav"
+        sf.write(f, np.zeros((22050, 2), dtype=np.float32), 22050)
+        pipeline = object.__new__(ASRPipeline)
+
+        with patch("tiny_audio.asr_processing.ffmpeg_read") as mock_read:
+            result = pipeline._extract_audio(str(f))
+
+        mock_read.assert_not_called()
+        assert result is not None
+        assert result["array"].shape == (16000,)
+
+    def test_dict_without_audio_is_not_ours(self) -> None:
+        """A dict with neither `array` nor `raw` goes back to the parent pipeline."""
+        pipeline = object.__new__(ASRPipeline)
+        assert pipeline._extract_audio({"sampling_rate": 16000}) is None
+
+    def test_without_soundfile_everything_goes_to_ffmpeg(self, tmp_path: Path) -> None:
+        """soundfile is optional; when it is missing, ffmpeg decodes even a WAV."""
+        f = tmp_path / "audio.wav"
+        f.write_bytes(b"wav-bytes")
+        pipeline = object.__new__(ASRPipeline)
+
+        with (
+            patch("tiny_audio.asr_processing._soundfile", None),
+            patch("tiny_audio.asr_processing.ffmpeg_read") as mock_read,
+        ):
+            mock_read.return_value = np.zeros(16000, dtype=np.float32)
+            pipeline._extract_audio(str(f))
+
+        assert mock_read.call_args.args[0] == b"wav-bytes"
+
+    def test_url_is_fetched(self) -> None:
+        """An http(s) string is downloaded, not opened as a path."""
+        pipeline = object.__new__(ASRPipeline)
+
+        with (
+            patch("tiny_audio.asr_processing.httpx") as httpx,
+            patch("tiny_audio.asr_processing.ffmpeg_read") as mock_read,
+        ):
+            httpx.get.return_value.content = b"remote-bytes"
+            mock_read.return_value = np.zeros(16000, dtype=np.float32)
+            pipeline._extract_audio("https://example.com/a.flac")
+
+        httpx.get.assert_called_once_with("https://example.com/a.flac", follow_redirects=True)
+        assert mock_read.call_args.args[0] == b"remote-bytes"
 
 
 class TestPipelineCall:
@@ -508,3 +557,16 @@ class TestConstruction:
         audio = {"array": np.zeros(1600, dtype=np.float32), "sampling_rate": 16000}
         with pytest.raises(TypeError, match="takes 1 positional input, got 2"):
             cpu_pipeline(audio, audio)
+
+
+class TestSingleInput:
+    """_single_input takes a stage's one input positionally or by name."""
+
+    def test_by_name(self) -> None:
+        kwargs: dict[str, Any] = {"inputs": "x", "other": 1}
+        assert _single_input((), kwargs, "inputs") == "x"
+        assert kwargs == {"other": 1}
+
+    def test_two_inputs_is_an_error(self) -> None:
+        with pytest.raises(TypeError, match="exactly one 'inputs'"):
+            _single_input(("a",), {"inputs": "b"}, "inputs")
