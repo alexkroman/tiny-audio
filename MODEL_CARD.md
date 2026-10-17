@@ -350,12 +350,12 @@ support), the transcript is still returned and the error is reported under
 ## Train Your Own
 
 Everything that produced this model is open: the code, the data mix, and the recipe. Swap the
-encoder, the LLM, or the projector from config and train on your own data. A smoke test runs on a
-laptop in about five minutes:
+encoder, the LLM, or the projector from config and train on your own data. The recipe is the repo's
+default config:
 
 ```bash
 git clone https://github.com/alexkroman/tiny-audio.git && cd tiny-audio && poetry install
-poetry run python scripts/train.py +experiments=mps_smoke
+poetry run python scripts/train.py
 ```
 
 The
@@ -396,8 +396,9 @@ request format.
 | **Learning Rate** | 1e-3 (projector), 1e-4 (LoRA)                                                                                                                                   |
 | **Precision**     | bf16 (projector held in fp32)                                                                                                                                   |
 
-The training recipe is
-[`configs/experiments/granite_qwen_frozen.yaml`](https://github.com/alexkroman/tiny-audio/blob/main/configs/experiments/granite_qwen_frozen.yaml).
+The training recipe is the default config,
+[`configs/config.yaml`](https://github.com/alexkroman/tiny-audio/blob/main/configs/config.yaml) with
+[`configs/training/production.yaml`](https://github.com/alexkroman/tiny-audio/blob/main/configs/training/production.yaml).
 
 ## Limitations
 

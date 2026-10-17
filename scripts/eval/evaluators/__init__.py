@@ -20,7 +20,6 @@ from .base import (
     Evaluator,
     setup_assemblyai,
 )
-from .swift_sdk import SwiftSDKEvaluator
 
 __all__ = [
     "AppleSpeechEvaluator",
@@ -39,7 +38,6 @@ __all__ = [
     "LocalEvaluator",
     "LocalStreamingEvaluator",
     "SmallestEvaluator",
-    "SwiftSDKEvaluator",
     "TextNormalizer",
     "setup_assemblyai",
 ]

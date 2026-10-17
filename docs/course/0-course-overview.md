@@ -2,33 +2,34 @@
 
 A hands-on course: build, train, evaluate, and deploy your own ASR model with Tiny Audio.
 
-|                   |                                                                                                               |
-| ----------------- | ------------------------------------------------------------------------------------------------------------- |
-| **Duration**      | 3.5 hours of class time, plus an unattended training run                                                      |
-| **Cost**          | Classes 1 and 3 and the local smoke test are free. Class 2's cloud run costs GPU time (see [Budget](#budget)) |
-| **Prerequisites** | Python, the command line, git                                                                                 |
+|                   |                                                                                      |
+| ----------------- | ------------------------------------------------------------------------------------ |
+| **Duration**      | 3.5 hours of class time, plus an unattended training run                             |
+| **Cost**          | Classes 1 and 3 are free. Class 2's cloud run costs GPU time (see [Budget](#budget)) |
+| **Prerequisites** | Python, the command line, git                                                        |
 
 ## What You'll Build
 
 ```text
-Audio → GLM-ASR encoder (frozen) → MLP projector (trained) → Qwen3-0.6B decoder (fine-tuned) → Text
+Audio → Granite Speech encoder (frozen) → MLP projector (trained)
+      → Qwen3.5-2B decoder (frozen + LoRA) → Text
 ```
 
-| Component     | Model                            | Params | During training                   |
-| ------------- | -------------------------------- | ------ | --------------------------------- |
-| Audio encoder | GLM-ASR-Nano-2512 (encoder only) | ~635M  | Frozen                            |
-| Projector     | 2-layer MLP with frame stacking  | ~6.3M  | Trained from scratch              |
-| Decoder       | Qwen3-0.6B                       | ~600M  | Fine-tuned at a low learning rate |
+| Component     | Model                                             | Params                 | During training                           |
+| ------------- | ------------------------------------------------- | ---------------------- | ----------------------------------------- |
+| Audio encoder | `ibm-granite/granite-speech-5.0-470m-turboctc-nc` | ~473M                  | Frozen                                    |
+| Projector     | 2-layer MLP (hidden 4096)                         | ~12.6M                 | Trained from scratch (lr 1e-3)            |
+| Decoder       | `Qwen/Qwen3.5-2B`                                 | ~1.9B base + ~67M LoRA | Base frozen; LoRA r=64 adapters (lr 1e-4) |
 
 You reuse two pretrained models and teach them to talk to each other. The projector is the only part
-built from nothing; the decoder gets a gentle fine-tune so it learns to read audio tokens. Then you
-publish the result to the Hugging Face Hub and put a live demo on the web.
+built from nothing; the decoder's own weights never change, and small LoRA adapters on its linear
+layers learn to read audio tokens. About 3% of the 4.8B parameters train. Then you publish the
+result to the Hugging Face Hub and put a live demo on the web.
 
-> **This is not the published model.** `mazesmazes/tiny-audio` and the WER table in the README come
-> from the `granite_qwen_frozen` recipe: a Granite Speech 470M encoder and a frozen Qwen3.5-2B with
-> LoRA, trained on the full `multiasr` mix. The course swaps in a smaller encoder and decoder,
-> fine-tunes the decoder instead of adding LoRA, and trains on far less data, so expect a higher WER
-> from your course run.
+> **This is the default recipe, on less data.** The course run inherits `configs/config.yaml` and
+> `configs/training/production.yaml` (the same Granite + Qwen3.5 + LoRA recipe family the published
+> `mazesmazes/tiny-audio` comes from) and changes the data, ~250 hours instead of the full
+> `multiasr` mix, plus a few schedule settings. Expect a higher WER from your course run.
 
 ### Four Ideas to Leave With
 
@@ -62,7 +63,6 @@ ______________________________________________________________________
 **Time:** 1 hour, then training runs on its own
 
 - What `scripts/train.py` does, step by step
-- A free local smoke test of the whole training loop
 - Sizing a cloud GPU with `ta runpod plan`
 - Writing your own experiment config and launching on RunPod
 - Reading the loss and gradient curves
@@ -96,13 +96,12 @@ ______________________________________________________________________
 
 ## Budget
 
-The cost of Class 2 is entirely yours to choose. Three tiers:
+The cost of Class 2 is entirely yours to choose. Two tiers:
 
-| Tier                                        | Data                                                   | Hardware                                    | Cost                                    |
-| ------------------------------------------- | ------------------------------------------------------ | ------------------------------------------- | --------------------------------------- |
-| **Smoke test**                              | 73 LibriSpeech clips                                   | Your laptop (Apple Silicon or any CUDA GPU) | Free                                    |
-| **Course run** (what Class 2 walks through) | LoquaciousSet `small` (~250 hours)                     | One rented GPU, a few hours                 | A few GPU-hours at RunPod's hourly rate |
-| **Production recipe** (`stage_1`)           | The `multiasr` mix, ~3M clips, over a terabyte on disk | An 80 GB GPU for a day or more              | Hundreds of dollars                     |
+| Tier                                        | Data                                                   | Hardware                          | Cost                                    |
+| ------------------------------------------- | ------------------------------------------------------ | --------------------------------- | --------------------------------------- |
+| **Course run** (what Class 2 walks through) | LoquaciousSet `small` (~250 hours)                     | One rented 80 GB GPU, a few hours | A few GPU-hours at RunPod's hourly rate |
+| **Production recipe** (the default config)  | The `multiasr` mix, ~3M clips, over a terabyte on disk | An 80 GB GPU for a day or more    | Hundreds of dollars                     |
 
 `ta runpod plan` measures the GPU memory and disk any config needs before you rent anything. Class 2
 shows you how to use it.
@@ -114,11 +113,9 @@ ______________________________________________________________________
 **Development (Classes 1 and 3):** any modern laptop with 8 GB RAM and 20 GB of free disk. Loading
 the published model downloads about 6 GB (its own weights plus the encoder's repo).
 
-**Local smoke test (Class 2, optional):** a machine with 16 GB of RAM or more. Apple Silicon with 32
-GB is comfortable. It runs the real training loop, including the decoder fine-tune, on a tiny
-dataset.
-
-**Cloud training (Class 2):** a RunPod account and a GPU. The class sizes it for you.
+**Training (Class 2):** a RunPod account and a GPU. There is no laptop-sized training recipe: the
+default config is a 2B decoder sized for one 80 GB GPU, so Class 2 trains in the cloud. The class
+shows you how to size the GPU with `ta runpod plan`.
 
 ______________________________________________________________________
 

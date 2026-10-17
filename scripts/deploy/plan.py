@@ -9,7 +9,7 @@ Everything that can be measured is measured rather than assumed:
   - parameter counts come from safetensors headers over HTTP range requests
     (no weights downloaded),
   - download sizes come from the Hub's file metadata,
-  - the projector is instantiated from the real PROJECTOR_CLASSES entry so the
+  - the projector is instantiated from the real MLPAudioProjector so the
     number can't drift from the implementation.
 
 Activation memory is the one genuine estimate; its formula is printed so the
@@ -63,9 +63,9 @@ VRAM_RECOMMENDED_KEY = f"recommended (x{OVERHEAD_FACTOR})"
 # The analytical per-layer activation formula further down is a FLOOR, not an
 # estimate, and this reconciles it with reality.
 #
-# Measured, from the completed granite_qwen run on an H100 80GB (recorded in
-# configs/experiments/granite_qwen.yaml): per_device=32 sat at ~41.4 of the
-# 79.6 GiB nvidia-smi reports, against ~5.6 GiB of static for that recipe, so
+# Measured, from the completed granite_qwen run (Qwen3.5-2B) on an H100 80GB:
+# per_device=32 sat at ~41.4 of the 79.6 GiB nvidia-smi reports, against
+# ~5.6 GiB of static for that recipe, so
 #     (41.4 - 5.6) / 32          = 1.12 GiB of activation tape per sample
 #     1.12 GiB / (320 tok * 24 layers) = 156,587 bytes / token / layer
 # The formula below yields 2 * (6*2048 + 3*6144) = 61,440 for the same model.
@@ -82,7 +82,7 @@ VRAM_RECOMMENDED_KEY = f"recommended (x{OVERHEAD_FACTOR})"
 #     r=64 for granite_qwen_lora) -- real but only ~0.6% of the gap.
 #
 # Derived from ONE measurement on ONE recipe, so treat it as calibration, not
-# theory. It is conservative for a dense decoder (granite_gemma), which has no
+# theory. It is conservative for a dense decoder, which has no
 # gated-delta-net state -- over-provisioning there is the cheap direction.
 # Re-derive if a run's observed peak diverges: the inputs are all in the
 # wandb system metrics plus the static breakdown this script prints.
@@ -152,13 +152,18 @@ class Plan:
         return int(self.disk["recommended"] * 1.15) + 5
 
 
-def _load_cfg(experiment: str, overrides: list[str]) -> DictConfig:
-    # Registers the `base_config` structured-config schema the experiment
-    # configs compose against (idempotent; train_config also does it on import).
+def _load_cfg(experiment: str | None, overrides: list[str]) -> DictConfig:
+    # Registers the `base_config` structured-config schema configs/config.yaml
+    # composes against (idempotent; train_config also does it on import).
     register_configs()
     configs = get_project_root() / "configs"
+    preset = [f"+experiments={experiment}"] if experiment else []
     with initialize_config_dir(config_dir=str(configs), version_base=None):
-        return compose(config_name="config", overrides=[f"+experiments={experiment}", *overrides])
+        return compose(config_name="config", overrides=[*preset, *overrides])
+
+
+def _pod_name(experiment: str | None) -> str:
+    return f"tiny-audio-{experiment}" if experiment else "tiny-audio"
 
 
 def _get(node: DictConfig, key: str, default: Any) -> Any:
@@ -306,12 +311,12 @@ def _add_projector(
     audio_id: str,
     text_id: str,
 ) -> None:
-    """Append the projector, sized by instantiating the real PROJECTOR_CLASSES entry."""
+    """Append the projector, sized by instantiating the real MLPAudioProjector."""
     # Lazy, like the transformers import in build_plan.
     asr_config_cls: type[ASRConfig] = importlib.import_module("tiny_audio.asr_config").ASRConfig
-    projector_classes: dict[str, type[MLPAudioProjector]] = importlib.import_module(
+    projector_cls: type[MLPAudioProjector] = importlib.import_module(
         "tiny_audio.projectors"
-    ).PROJECTOR_CLASSES
+    ).MLPAudioProjector
     proj_params = 0
     if encoder_dim and llm_dim:
         shim = asr_config_cls(
@@ -319,14 +324,12 @@ def _add_projector(
             text_model_id=text_id,
             encoder_dim=encoder_dim,
             llm_dim=llm_dim,
-            projector_type=str(_get(model, "projector_type", "mlp")),
             projector_pool_stride=int(_get(model, "projector_pool_stride", 4)),
             projector_hidden_dim=model.get("projector_hidden_dim"),
         )
-        cls = projector_classes[shim.projector_type]
         # Meta device: shapes without storage or init, all a numel count needs.
         with importlib.import_module("torch").device("meta"):
-            proj_params = sum(p.numel() for p in cls(shim).parameters())
+            proj_params = sum(p.numel() for p in projector_cls(shim).parameters())
     else:
         plan.warnings.append("Could not resolve encoder/llm dims; projector excluded.")
     plan.components.append(
@@ -545,7 +548,7 @@ def _estimate_disk(plan: Plan, train: DictConfig, trainable_bytes_per: int) -> N
     # A checkpoint is model.safetensors + optimizer.pt, and both scale with the
     # whole *trainable* stack rather than the projector: ASRModel.state_dict
     # serializes the language model too whenever freeze_language_model is false
-    # (stage_1), and HF Trainer always writes AdamW's two states per trainable
+    # (a full-decoder fine-tune), and HF Trainer always writes AdamW's two states per trainable
     # param. save_total_limit copies sit on disk simultaneously, so retention
     # multiplies -- charging one projector-sized checkpoint understated a joint
     # fine-tune by ~500x.
@@ -575,7 +578,7 @@ def _estimate_disk(plan: Plan, train: DictConfig, trainable_bytes_per: int) -> N
         )
 
 
-def build_plan(experiment: str, overrides: list[str], seq_len: int) -> Plan:
+def build_plan(experiment: str | None, overrides: list[str], seq_len: int) -> Plan:
     """Resolve a training config and measure its parameter, VRAM and disk footprint."""
     # Imported lazily: transformers + tiny_audio cost several seconds, which
     # every `ta runpod` command would otherwise pay because runpod.py imports
@@ -615,7 +618,7 @@ def _fmt(n: float) -> str:
     return f"{n:,.2f} GiB"
 
 
-def _print_plan_json(plan: Plan, experiment: str) -> None:
+def _print_plan_json(plan: Plan, experiment: str | None) -> None:
     """Print the plan as machine-readable JSON (`--json`)."""
     print(
         json.dumps(
@@ -639,9 +642,10 @@ def _print_plan_json(plan: Plan, experiment: str) -> None:
     )
 
 
-def _print_plan_tables(plan: Plan, experiment: str, seq_len: int) -> None:
+def _print_plan_tables(plan: Plan, experiment: str | None, seq_len: int) -> None:
     """Print the component, dataset, GPU-memory and disk tables plus any warnings."""
-    print(f"\n=== Resource plan: +experiments={experiment} (seq_len={seq_len}) ===\n")
+    source = f"+experiments={experiment}" if experiment else "configs/config.yaml"
+    print(f"\n=== Resource plan: {source} (seq_len={seq_len}) ===\n")
     print(f"{'component':<52} {'params':>14} {'download':>11}  train")
     for c in plan.components:
         print(
@@ -748,7 +752,7 @@ def _volume_datacenter(gpu: str) -> str:
     return dcs[0][0]
 
 
-def _print_volume_provision(plan: Plan, experiment: str, gpu: str, image: str) -> None:
+def _print_volume_provision(plan: Plan, experiment: str | None, gpu: str, image: str) -> None:
     """Print the network-volume + pod commands for a run too big for a container disk."""
     # Everything that grows lives on /workspace (HF_HOME and
     # HF_DATASETS_CACHE both point there), so a network volume absorbs the
@@ -757,7 +761,7 @@ def _print_volume_provision(plan: Plan, experiment: str, gpu: str, image: str) -
     # of "no instances available" on every GPU type -- container disks come
     # from host-local storage.
     vol_gb = min(plan.disk_gb, NETWORK_VOLUME_MAX_GB)
-    vol_name = f"tiny-audio-{experiment}"
+    vol_name = _pod_name(experiment)
     capped = vol_gb >= NETWORK_VOLUME_MAX_GB
     dc_id = _volume_datacenter(gpu)
 
@@ -766,7 +770,7 @@ def _print_volume_provision(plan: Plan, experiment: str, gpu: str, image: str) -
         f"  runpodctl network-volume create --name {vol_name} \\\n"
         f"    --size {vol_gb} --data-center-id {dc_id}\n\n"
         f"  # 2. create the pod in that SAME datacenter, attaching the volume:\n"
-        f"  runpodctl pod create --name tiny-audio-{experiment} \\\n"
+        f"  runpodctl pod create --name {_pod_name(experiment)} \\\n"
         f'    --gpu-id "{gpu}" --image {image} \\\n'
         f"    --network-volume-id <VOLUME_ID> --data-center-ids {dc_id} \\\n"
         f"    --container-disk-in-gb {CONTAINER_DISK_WITH_VOLUME_GB} --ports '{POD_PORTS}' \\\n"
@@ -786,7 +790,7 @@ def _print_volume_provision(plan: Plan, experiment: str, gpu: str, image: str) -
 
 
 def plan_command(
-    experiment: str = typer.Option("granite_qwen_frozen", "--experiment", "-e"),
+    experiment: str | None = typer.Option(None, "--experiment", "-e"),
     seq_len: int = typer.Option(
         320,
         "--seq-len",
@@ -824,7 +828,7 @@ def plan_command(
         _print_volume_provision(plan, experiment, gpu, image)
     else:
         print(
-            f"  runpodctl pod create --name tiny-audio-{experiment} \\\n"
+            f"  runpodctl pod create --name {_pod_name(experiment)} \\\n"
             f'    --gpu-id "{gpu}" --image {image} \\\n'
             f"    --container-disk-in-gb {disk_gb} --ports '{POD_PORTS}' \\\n"
             f'    --env "{{\\"SSH_PUBLIC_KEY\\":\\"$(cat ~/.ssh/id_ed25519.pub)\\"}}"\n'
@@ -842,10 +846,10 @@ def plan_command(
 
 
 def provision_command(
-    experiment: str = typer.Option("granite_qwen_frozen", "--experiment", "-e"),
+    experiment: str | None = typer.Option(None, "--experiment", "-e"),
     seq_len: int = typer.Option(320, "--seq-len"),
     name: str | None = typer.Option(
-        None, "--name", help="Pod name (default tiny-audio-<experiment>)"
+        None, "--name", help="Pod name (default tiny-audio[-<experiment>])"
     ),
     image: str = typer.Option("runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404", "--image"),
     max_attempts: int = typer.Option(6, "--max-attempts", help="How many GPU types to try"),
@@ -867,7 +871,7 @@ def provision_command(
     disk = plan.disk_gb
     candidates = gpu_catalog.available_gpus(vram)
 
-    print(f"\n{experiment}: needs >= {vram:.1f} GiB VRAM, {disk} GB disk")
+    print(f"\n{experiment or 'default config'}: needs >= {vram:.1f} GiB VRAM, {disk} GB disk")
     # Surface the same warnings `plan` prints -- the network-volume one in
     # particular explains a container-disk request that RunPod will refuse to
     # fill, which otherwise reads as plain "no capacity" on every GPU type.
@@ -885,7 +889,7 @@ def provision_command(
         return None
 
     pod_id = create_first_available(
-        name or f"tiny-audio-{experiment}",
+        name or _pod_name(experiment),
         [gpu_id for _, gpu_id in candidates[:max_attempts]],
         image=image,
         disk_gb=disk,
@@ -894,10 +898,8 @@ def provision_command(
     print("\nNext:")
     print(f"  poetry run ta runpod wait {pod_id}          # prints <ip> <port>")
     print("  poetry run ta runpod deploy <ip> <port>")
-    print(
-        f"  poetry run ta runpod train <ip> <port> -e {experiment} "
-        "--no-attach --session-name run1 -f"
-    )
+    preset = f"-e {experiment} " if experiment else ""
+    print(f"  poetry run ta runpod train <ip> <port> {preset}--no-attach --session-name run1 -f")
     print(f"  runpodctl pod delete {pod_id}               # when finished\n")
     return pod_id
 

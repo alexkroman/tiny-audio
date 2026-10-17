@@ -523,20 +523,14 @@ class DatasetLoader:
 
 
 def decay_parameter_ids(model: torch.nn.Module) -> set[int]:
-    """ids of the trainable parameters that should get weight decay.
-
-    Shared by ASRTrainer.create_optimizer and scripts/debug/check_gradient_flow.py
-    so the probe audits the routing the trainer actually uses.
-    """
+    """ids of the trainable parameters that should get weight decay."""
     # ALL_LAYERNORM_LAYERS only contains torch.nn.LayerNorm, but every
     # decoder here normalizes with an RMSNorm subclass instead, whose gain
     # weights would silently land in the decay group and be pulled toward
     # zero — destabilizing the residual-stream scale the projector's
     # _NORM_INIT was tuned to. This used to be a two-entry allowlist
     # (Qwen3RMSNorm, LlamaRMSNorm), which quietly excluded every other
-    # family — an unfrozen Gemma 4 E2B would have decayed all 247 of its
-    # Gemma4RMSNorm gain tensors across 9 distinct sites. Match
-    # structurally on the class name so a new decoder is covered on
+    # family. Match structurally on the class name so a new decoder is covered on
     # arrival rather than needing an import added here.
     #
     # Substring, not endswith: Qwen3.5's gated-delta-net layers normalize
@@ -620,9 +614,6 @@ def optimizer_param_groups(
     projector WD; each override falls back to `lr` / `weight_decay`, and
     no-decay groups always get 0.0. Names are checked against fixed prefixes
     so the routing matches the freeze flags exactly. Empty groups are kept.
-
-    Shared by ASRTrainer.create_optimizer and scripts/debug/check_gradient_flow.py
-    so the probe audits the routing the trainer actually uses.
     """
     decay_ids = decay_parameter_ids(model)
     settings = {
@@ -802,8 +793,6 @@ TRAINING_MODEL_PARAMS = [
     "lora_alpha",
     "lora_dropout",
     "lora_target_modules",
-    "lora_rank_pattern",
-    "lora_alpha_pattern",
     "freeze_projector",
     "freeze_language_model",
     "freeze_text_embed_tokens",
@@ -891,30 +880,21 @@ def _init_wandb(cfg: DictConfig) -> None:
         run.summary["git_dirty"] = git_dirty
 
 
-# Decoder-family substring -> liger patcher. First match wins, so longer keys
-# are listed first.
-_LIGER_PATCHERS = (
-    ("gemma-4", "apply_liger_kernel_to_gemma4"),
-    ("qwen3.5", "apply_liger_kernel_to_qwen3_5"),
-    ("qwen3", "apply_liger_kernel_to_qwen3"),
-)
+# Decoder-family substring -> liger patcher. Only Qwen3.5 is supported.
+_LIGER_PATCHERS = (("qwen3.5", "apply_liger_kernel_to_qwen3_5"),)
 
 
 def _apply_liger_kernels(cfg: DictConfig) -> None:
     """Patch the decoder's transformers module with liger's fused kernels, if mapped."""
     # Must run before the LM class is instantiated. The big win is fused
     # linear cross-entropy: instead of materializing the (B, T, V) fp32
-    # log-softmax tensor that HF's standard CE / LabelSmoother path requires
-    # (~15GB at B=50, V=151k on Qwen3-0.6B), liger fuses lm_head @
-    # hidden_states + softmax + CE into a single kernel with peak memory
-    # O(B·T·D). Label smoothing flows through this kernel via the
-    # loss_function's **kwargs path (see ASRModel.forward) — so set HF
-    # Trainer's label_smoothing_factor=0 in configs to bypass the
-    # LabelSmoother and rely on model.config.label_smoothing instead.
+    # log-softmax tensor that HF's standard CE path requires, liger fuses
+    # lm_head @ hidden_states + softmax + CE into a single kernel with peak
+    # memory O(B·T·D).
     #
     # The patcher is per-architecture, so it must track text_model_id. Getting
-    # this wrong is not a crash but an OOM: Gemma 4's vocab is 262,144, so an
-    # unfused (B, T, V) logits tensor is ~17GB at B=32/T=512 before the
+    # this wrong is not a crash but an OOM: Qwen3.5's vocab is 248,320, so an
+    # unfused (B, T, V) logits tensor is ~16GB at B=32/T=512 before the
     # log_softmax copy.
     text_model_id = str(cfg.model.get("text_model_id", "")).lower()
     patcher_name = next((fn for key, fn in _LIGER_PATCHERS if key in text_model_id), None)
@@ -943,11 +923,7 @@ def _apply_liger_kernels(cfg: DictConfig) -> None:
 
 
 def build_asr_config(cfg: DictConfig) -> ASRConfig:
-    """Merge `model:` with the TRAINING_MODEL_PARAMS set under `training:` into an ASRConfig.
-
-    Shared with scripts/debug/check_gradient_flow.py so the probe builds the
-    model an experiment config actually trains.
-    """
+    """Merge `model:` with the TRAINING_MODEL_PARAMS set under `training:` into an ASRConfig."""
     model_container = OmegaConf.to_container(cfg.model, resolve=True)
     assert isinstance(model_container, dict), "model config must be a dict"
     # Keys are ModelConfig field names (scripts/train_config.py), i.e. strings.
@@ -988,11 +964,7 @@ def build_asr_config(cfg: DictConfig) -> ASRConfig:
 
 
 def disable_chat_template_thinking(model: ASRModel) -> None:
-    """Rewrite an `enable_thinking` chat template (Qwen3) so thinking is always off.
-
-    Shared with scripts/debug/check_gradient_flow.py, whose batch goes through
-    the same DataCollator and so needs the same rewritten template.
-    """
+    """Rewrite an `enable_thinking` chat template (Qwen3) so thinking is always off."""
     # Workaround: TRL's DataCollatorForChatML doesn't pass enable_thinking=False to Qwen3.
     # See https://github.com/huggingface/trl/issues/3387
     chat_template = model.tokenizer.chat_template

@@ -32,7 +32,6 @@ from scripts.eval.evaluators import (
     LocalEvaluator,
     LocalStreamingEvaluator,
     SmallestEvaluator,
-    SwiftSDKEvaluator,
 )
 from scripts.eval.evaluators.base import Metrics
 
@@ -221,14 +220,14 @@ _HOSTED_BACKENDS: dict[str, _HostedBackend] = {
 }
 
 
-# --model values that dispatch to a non-PyTorch backend (hosted API, Swift
-# binary, on-device Apple recognizer) rather than loading an ASRModel here.
-_NON_LOCAL_MODELS = frozenset({"assemblyai", "apple-speech", "swift", *_HOSTED_BACKENDS})
+# --model values that dispatch to a non-PyTorch backend (hosted API,
+# on-device Apple recognizer) rather than loading an ASRModel here.
+_NON_LOCAL_MODELS = frozenset({"assemblyai", "apple-speech", *_HOSTED_BACKENDS})
 
 
 def _reject_local_code(model: str, endpoint: bool) -> None:
     """Fail on --local-code for a backend that runs no tiny_audio code."""
-    if endpoint or model in _NON_LOCAL_MODELS or model.startswith("swift://"):
+    if endpoint or model in _NON_LOCAL_MODELS:
         msg = (
             f"--local-code has no meaning for --model {model!r}: it swaps the "
             "modeling code bundled with a checkpoint for this checkout's, and "
@@ -270,44 +269,6 @@ def _build_assemblyai_evaluator(
         base_url=base_url,
         num_workers=num_workers,
     )
-
-
-def _build_swift_evaluator(model: str) -> tuple[str, Evaluator]:
-    """Build the Swift SDK evaluator for `swift` or `swift://<local bundle dir>`."""
-    suffix = model[len("swift://") :] if model.startswith("swift://") else ""
-    # Path-like suffix → load that local bundle (TINY_AUDIO_LOCAL_MODEL_DIR
-    # path: the Swift binary actually honors this).
-    # Empty suffix → load the Swift SDK's pinned default bundle.
-    # Anything else (a repo id) is rejected — the Swift binary ignores
-    # `repo_id`, which previously produced output dirs labeled with a
-    # model that was never actually evaluated.
-    if suffix.startswith(("/", "~", "./", "../")):
-        model_dir = Path(suffix).expanduser().resolve()
-        if not model_dir.is_dir():
-            msg = f"swift:// path does not resolve to a directory: {model_dir}"
-            raise typer.BadParameter(msg)
-        return f"swift-local-{model_dir.name}", SwiftSDKEvaluator(
-            model_dir=model_dir,
-        )
-    if suffix == "":
-        return "swift-default-bundle", SwiftSDKEvaluator()
-    msg = (
-        f"swift://{suffix!r} is not supported — the Swift binary loads "
-        "the SDK-pinned bundle and ignores arbitrary repo ids, so this "
-        "form would silently evaluate the default bundle while labeling "
-        "outputs with your repo id (see asr_pipeline.py docstring).\n\n"
-        "To evaluate that model via the Swift SDK, build a local bundle "
-        "from it first:\n"
-        "  cd ~/Code/ios/tiny-audio-swift\n"
-        f"  poetry run python -m scripts.bundle.cli build-bundle --projector {suffix}\n"
-        "  cd -\n"
-        "  ta eval -m "
-        "swift://~/Code/ios/tiny-audio-swift/swift/Sources/TinyAudio/Resources/Model "
-        "-d ...\n\n"
-        "Or evaluate the HF checkpoint directly (PyTorch path, no Swift):\n"
-        f"  ta eval -m {suffix} -d ..."
-    )
-    raise typer.BadParameter(msg)
 
 
 def _build_tiny_audio_evaluator(
@@ -366,15 +327,14 @@ def _build_evaluator(
     Earnings22, `transcript` for SPGISpeech) -- which welded a few bytes of
     per-dataset config to a very expensive per-model setup. `ta eval -d all`
     therefore paid that setup 12 times: 12 full `from_pretrained` loads for a
-    local model, 12 `swift build` + subprocess spawns + warmups for
-    `swift://`, 12 SFSpeechRecognizer authorizations for `apple-speech`.
+    local model, 12 SFSpeechRecognizer authorizations for `apple-speech`.
 
     The column names now ride on `Evaluator.evaluate(...)` instead, so one
     instance serves every dataset. Anything an evaluator accumulates across
     `transcribe` calls must be cleared in `_reset_run_state`.
     """
     # Checked before anything is constructed, so the error lands before an API
-    # client, a Swift build or an SFSpeechRecognizer authorization. A silent
+    # client or an SFSpeechRecognizer authorization. A silent
     # no-op would be the worse failure: --local-code exists to make a working
     # tree edit visible in the WER, and ignoring it on a backend that has no
     # local code at all would read as "my change did nothing".
@@ -406,8 +366,6 @@ def _build_evaluator(
         return "apple-speech", AppleSpeechEvaluator(
             locale=locale,
         )
-    if model == "swift" or model.startswith("swift://"):
-        return _build_swift_evaluator(model)
     return _build_tiny_audio_evaluator(
         model=model,
         endpoint=endpoint,
@@ -548,7 +506,7 @@ def main(
     # the datasets of one sweep can be grouped together afterwards.
     run_id = run_id or uuid.uuid4().hex[:12]
 
-    # Built once, before the loop: model load / Swift build / API client setup
+    # Built once, before the loop: model load / API client setup
     # is per-model, not per-dataset. See _build_evaluator.
     model_id, evaluator = _build_evaluator(
         model=model,

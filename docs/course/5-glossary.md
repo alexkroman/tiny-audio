@@ -8,52 +8,57 @@ ______________________________________________________________________
 
 **ASR (Automatic Speech Recognition)** Converting spoken audio into written text.
 
-**Encoder** The audio model that turns a spectrogram into a sequence of feature vectors. Tiny Audio
-uses the encoder half of GLM-ASR-Nano-2512: 32 Transformer layers, 1280-dimensional output, one
-vector every 20 ms. Frozen during training. In code it is `model.audio_tower`.
+**Encoder** The audio model that turns a spectrogram into a sequence of feature vectors. The default
+config uses Granite Speech 5.0 470M (`ibm-granite/granite-speech-5.0-470m-turboctc-nc`):
+1024-dimensional output, one vector every 80 ms. Frozen during training. In code it is
+`model.audio_tower`.
 
 **Projector** The trainable bridge between encoder features and the decoder's embedding space. A
-two-layer MLP with frame stacking, about 6.3M parameters, trained from scratch. In code,
-`model.projector`.
+two-layer MLP (optionally with frame stacking), about 12.6M parameters in the default config,
+trained from scratch. In code, `model.projector`.
 
 **Decoder** The language model that writes the transcript, conditioned on the projected audio tokens
-and a text prompt. Tiny Audio uses Qwen3-0.6B, fine-tuned at a low learning rate. In code,
+and a text prompt. The default config uses Qwen3.5-2B, frozen, with LoRA adapters. In code,
 `model.language_model`. "Decoder", "language model", and "LLM" are used interchangeably.
 
-**Vector** A fixed-length list of numbers; the unit every layer reads and writes. The encoder's
-vectors are 1280 numbers long, the decoder's 1024. No single number means anything alone; the
-pattern across all of them does.
+**Vector** A fixed-length list of numbers; the unit every layer reads and writes. In the default
+config the encoder's vectors are 1024 numbers long, the decoder's 2048. No single number means
+anything alone; the pattern across all of them does.
 
 **Weight (Parameter)** A number learned during training. Layers hold grids of them, and a layer's
-work is multiplying an input vector by its grid to produce the next vector. "635M parameters" counts
+work is multiplying an input vector by its grid to produce the next vector. "473M parameters" counts
 weights, not vector width: weights stay, vectors flow.
 
 **Embedding / Embedding Table** The decoder's lookup table from token ID to vector (`embed_tokens`).
 A language model never sees text directly, only these vectors. Audio tokens are built to have the
 same width so they slot in beside them.
 
-**GLM-ASR** An open speech recognition model from Z.ai (Zhipu). Tiny Audio borrows only its audio
-encoder and discards its own decoder.
+**Granite Speech** IBM's open speech model family. Tiny Audio borrows only its audio encoder.
 
-**Qwen3** Alibaba's open language-model family. Qwen3-0.6B is the smallest member and ships with a
-chat template, which the training collator requires.
+**GLM-ASR** An open speech recognition model from Z.ai (Zhipu). An earlier Tiny Audio recipe used
+its audio encoder (with Qwen3-0.6B); Class 1 uses that pairing to illustrate frame stacking.
+
+**Qwen3 / Qwen3.5** Alibaba's open language-model families. The default decoder is Qwen3.5-2B, which
+ships with a chat template, which the training collator requires.
 
 **Frame Stacking** Concatenating `k` adjacent encoder frames into one wider vector, cutting the
 sequence length by `k`. With `k = 4`, 50 encoder frames per second become 12.5 audio tokens per
-second. `output_length = (input_length - k) // k + 1`.
+second. `output_length = (input_length - k) // k + 1`. The default (`projector_pool_stride: 1`)
+doesn't stack, since Granite already emits 12.5 frames per second.
 
-**Audio Token** One row of the projector's output: a 1024-dimensional vector standing in for about
-80 ms of speech, inserted into the decoder's input where an `<audio>` placeholder token sits.
+**Audio Token** One row of the projector's output: a vector the size of the decoder's embeddings
+(2048 dimensions for Qwen3.5-2B) standing in for about 80 ms of speech, inserted into the decoder's
+input where an `<audio>` placeholder token sits.
 
 **Chat Template** The formatting a chat model expects: `<|im_start|>user … <|im_end|>` and so on.
 Tiny Audio builds a user turn of `<audio>` placeholders followed by "Transcribe the speech to text",
 and an assistant turn containing the transcript. Loss is computed on the assistant turn only.
 
 **Output Scale** A fixed multiplier at the end of the projector, calibrated once so audio tokens
-have the same magnitude as Qwen3's word embeddings. Not learned.
+have the same magnitude as the decoder's word embeddings. Not learned.
 
 **RMSNorm** A normalization layer that rescales a vector to unit root-mean-square. Used at the
-projector's input and throughout Qwen3.
+projector's input and throughout the decoder.
 
 **MLP (Multi-Layer Perceptron)** Stacked linear layers with a nonlinearity (here GELU) between them.
 
@@ -72,33 +77,29 @@ ______________________________________________________________________
 **Sample Rate** Measurements per second. 16 kHz means 16,000 samples per second of audio.
 
 **Log-Mel Spectrogram** Audio represented as energy per frequency band over time, with bands spaced
-on the mel scale (roughly how humans hear pitch) and energies on a log scale. GLM-ASR uses 128 bands
-at 100 frames per second.
-
-**SpecAugment** Data augmentation that masks random time spans of the spectrogram during training.
-Available via `model.apply_spec_augment`; most useful when the encoder is trainable.
+on the mel scale (roughly how humans hear pitch) and energies on a log scale. The encoder's own
+feature extractor computes it (GLM-ASR, for example, uses 128 bands at 100 frames per second).
 
 ______________________________________________________________________
 
 ## Training
 
 **Frozen** A module whose weights are excluded from the optimizer and never change. The encoder is
-frozen in every recipe; the decoder can be frozen with `training.freeze_language_model=true`.
+frozen by default, and so is the decoder's base (`training.freeze_language_model: true`); only the
+projector and the decoder's LoRA adapters train.
 
 **Fine-tuning** Continuing to train a pretrained model on a new task, usually at a much lower
-learning rate than it was pretrained with. The decoder is fine-tuned at 2e-5 while the projector
-trains at 1e-3.
+learning rate than it was pretrained with. In the default config the decoder is adapted through LoRA
+at 1e-4 while the projector trains at 1e-3; a full decoder fine-tune is
+`training.freeze_language_model=false training.use_lora=false`.
 
 **LoRA (Low-Rank Adaptation)** Instead of updating a large weight matrix, learn a small low-rank
-correction beside it. Cuts trainable parameters from hundreds of millions to a few million and
-leaves the original weights intact. `training.use_lora=true`.
+correction beside it. Cuts trainable parameters by an order of magnitude or more (~67M instead of
+~1.9B for the default rank 64 on all of Qwen3.5-2B's linear layers) and leaves the original weights
+intact. On by default (`model.use_lora: true`).
 
 **Loss (Cross-Entropy)** How surprised the decoder is by the correct next token, averaged over the
 transcript. Training minimizes it.
-
-**Label Smoothing** Spreading a little of the target probability over wrong tokens so the model
-isn't pushed to absolute certainty. On by default (0.1) in `config.yaml`, off in the `stage_1`
-recipe.
 
 **Step** One optimizer update after one (accumulated) batch.
 
@@ -112,27 +113,30 @@ memory.
 **Learning Rate (LR)** Step size of each weight update. Too high diverges, too low crawls.
 
 **Warmup** Ramping the LR linearly from zero over the first N steps so early, noisy gradients don't
-wreck the pretrained weights. 2000 steps in production.
+wreck the pretrained weights. 1000 steps in the default config.
 
-**Cosine Schedule with Minimum LR** After warmup, the LR follows a cosine curve down to a floor
-(`min_lr_rate` × peak) rather than to zero, so late training still makes progress.
+**Cosine Schedule** After warmup, the LR follows a cosine curve down. The default (`cosine`) goes
+all the way to zero so the run settles at the end; `cosine_with_min_lr` instead stops at a floor
+(`min_lr_rate` × peak).
 
 **Gradient** The direction that would increase the loss; the optimizer moves the other way.
 
-**Gradient Norm** The overall size of the gradient. Healthy runs settle into a narrow band (1-3
-here) after warmup. Spikes signal instability.
+**Gradient Norm** The overall size of the gradient. Healthy runs settle into a narrow band after
+warmup (the default clips at 1.0). Spikes signal instability.
 
 **Gradient Clipping** Capping the gradient norm (`max_grad_norm`) so one bad batch can't take a huge
 step.
 
-**Weight Decay** A gentle pull of weights toward zero each step. Applied to the decoder (0.01),
-never to the projector.
+**Weight Decay** A gentle pull of weights toward zero each step. In the default config only the
+projector carries it (`projector_weight_decay: 0.01`); the decoder group, i.e. the LoRA adapters,
+uses 0.0.
 
 **AdamW** The optimizer. Keeps a running mean and variance of each parameter's gradient, which is
 why it needs two extra copies of every trainable parameter in memory.
 
-**Mixed Precision (bf16)** Computing in 16-bit bfloat16 for speed while keeping fp32 master weights
-so small updates aren't rounded away.
+**Mixed Precision (bf16)** Computing in 16-bit bfloat16 for speed while keeping the trainable
+weights (projector, LoRA adapters) in fp32 so small updates aren't rounded away. The frozen encoder
+and decoder are stored in bf16 (`model.model_dtype: bfloat16`).
 
 **Overfitting** The model memorizes training clips instead of generalizing. Visible as eval loss
 rising while training loss keeps falling.
@@ -196,8 +200,8 @@ SSH connection dropping.
 **W&B (Weights & Biases)** Experiment tracking. The trainer logs loss, eval loss, gradient norm, and
 learning rate there every 50 steps.
 
-**CUDA / MPS** NVIDIA's and Apple's GPU compute platforms. Production training targets CUDA; the
-smoke test runs on MPS or CPU.
+**CUDA / MPS** NVIDIA's and Apple's GPU compute platforms. Training targets CUDA (the default config
+is sized for one 80 GB GPU); inference also runs on MPS or CPU.
 
 **VRAM** GPU memory. Determines the largest batch (and model) you can train. `ta runpod plan`
 estimates what a config needs.

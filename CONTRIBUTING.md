@@ -27,7 +27,6 @@ poetry run ta --help  # Show all commands
 | `ta deploy` | Deploy demo to HuggingFace Space                                                    |
 | `ta push`   | Push model to HuggingFace Hub                                                       |
 | `ta demo`   | Launch local Gradio demo                                                            |
-| `ta debug`  | Debug utilities (check-gradient-flow)                                               |
 | `ta runpod` | Remote training on RunPod (plan, up, wait, deploy, train, attach, eval, checkpoint) |
 | `ta dev`    | Development tools (lint, format, type-check, test, check, precommit, ...)           |
 
@@ -70,14 +69,14 @@ Configuration uses [Hydra](https://hydra.cc/). Override any value with `key=valu
 
 ```bash
 # Override model settings
-poetry run python scripts/train.py +experiments=stage_1 model.projector_hidden_dim=2048
+poetry run python scripts/train.py model.projector_hidden_dim=2048
 
 # Override training settings
-poetry run python scripts/train.py +experiments=stage_1 \
-  training.decoder_learning_rate=1e-5 training.per_device_train_batch_size=50
+poetry run python scripts/train.py \
+  training.decoder_learning_rate=5e-5 training.per_device_train_batch_size=24
 
 # Swap the dataset config
-poetry run python scripts/train.py +experiments=stage_1 data=librispeech_dummy
+poetry run python scripts/train.py data=librispeech_dummy
 ```
 
 The YAML files are validated against a typed
@@ -90,11 +89,7 @@ new knob, declare it there; for a one-off run, append an undeclared key with
 
 ```text
 configs/
-├── config.yaml                  # Main config (model defaults; imports data + training)
-├── experiments/                 # Training recipes
-│   ├── stage_1.yaml             # Default: frozen encoder + projector + decoder trained jointly
-│   ├── granite_qwen_frozen.yaml # Published model: Granite Speech encoder + LoRA on a Qwen3.5 decoder
-│   └── mps_smoke.yaml           # Local CPU/MPS smoke test
+├── config.yaml                  # Main config: granite_qwen_frozen (Granite Speech + LoRA on Qwen3.5-2B)
 ├── data/
 │   ├── multiasr.yaml            # Ten-corpus training mix (default)
 │   └── librispeech_dummy.yaml   # 73-clip sample for smoke tests
@@ -108,27 +103,30 @@ Defaults from `configs/config.yaml` and `configs/training/production.yaml`:
 
 ```yaml
 model:
-  audio_model_id: zai-org/GLM-ASR-Nano-2512   # Audio encoder
-  text_model_id: Qwen/Qwen3-0.6B              # Language model
-  projector_type: mlp
-  projector_pool_stride: 4                    # Frames stacked per projector input
-  projector_hidden_dim: 1024
+  audio_model_id: ibm-granite/granite-speech-5.0-470m-turboctc-nc  # Audio encoder
+  text_model_id: Qwen/Qwen3.5-2B              # Language model
+  projector_pool_stride: 1                    # Frames stacked per projector input
+  projector_hidden_dim: 4096
+  use_lora: true                              # LoRA adapters on the frozen decoder
+  lora_rank: 64
+  lora_alpha: 64
 
 training:
-  freeze_language_model: false                # Decoder is fine-tuned
+  freeze_audio_encoder: true                  # Encoder is frozen
+  freeze_language_model: true                 # Decoder base is frozen; LoRA trains
   freeze_projector: false
   learning_rate: 1e-3                         # Projector
-  decoder_learning_rate: 2e-5                 # Decoder
-  per_device_train_batch_size: 100
+  decoder_learning_rate: 1e-4                 # LoRA adapters
+  per_device_train_batch_size: 64
+  gradient_accumulation_steps: 1
   max_steps: -1                               # Train by epochs instead
-  num_train_epochs: 2                         # stage_1 overrides this to 1
-  warmup_steps: 2000
-  lr_scheduler_type: cosine_with_min_lr
+  num_train_epochs: 1
+  warmup_steps: 1000
+  lr_scheduler_type: cosine
 ```
 
-The encoder is frozen by the `freeze_audio_encoder` default in `ASRConfig`; set
-`training.freeze_audio_encoder=false` (or `training.encoder_trainable_top_layers=N` for the top N
-blocks) to train it.
+Set `training.freeze_audio_encoder=false` (or `training.encoder_trainable_top_layers=N` for the top
+N blocks) to train it.
 
 ## Project Structure
 
@@ -199,7 +197,8 @@ commit the diff.
 
 ### Adding a New Projector
 
-1. Add your projector class to `tiny_audio/projectors.py`:
+1. Replace `MLPAudioProjector` in `tiny_audio/projectors.py` (it is built directly by
+   `ASRModel._create_projector`), keeping the same interface:
 
    ```python
    class MyProjector(nn.Module):
@@ -217,24 +216,7 @@ commit the diff.
            return input_length
    ```
 
-1. Register it in the `PROJECTOR_CLASSES` dict in `projectors.py`:
-
-   ```python
-   PROJECTOR_CLASSES = {
-       "mlp": MLPAudioProjector,
-       "my_projector": MyProjector,  # Add here
-   }
-   ```
-
-1. Create an experiment config `configs/experiments/my_projector.yaml`:
-
-   ```yaml
-   # @package _global_
-   model:
-     projector_type: my_projector
-   ```
-
-1. Train: `poetry run python scripts/train.py +experiments=my_projector`
+1. Train: `poetry run python scripts/train.py`
 
 ### Adding a New Dataset
 
@@ -260,8 +242,7 @@ commit the diff.
    max_eval_samples_per_dataset: 500
    ```
 
-1. Train with your dataset:
-   `poetry run python scripts/train.py +experiments=stage_1 data=my_dataset`
+1. Train with your dataset: `poetry run python scripts/train.py data=my_dataset`
 
 ### Key Files to Understand
 

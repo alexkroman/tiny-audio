@@ -3,7 +3,7 @@
 Minimal script for transcribing audio with
 [`mazesmazes/tiny-audio-granite-qwen-frozen-3`](https://huggingface.co/mazesmazes/tiny-audio-granite-qwen-frozen-3).
 
-**Model:** audio → Granite Speech 5.0 470M encoder (frozen) → MLP projector → Qwen3.5-4B + LoRA
+**Model:** audio → Granite Speech 5.0 470M encoder (frozen) → MLP projector → Qwen3.5-2B + LoRA
 (rank 64) → text. The weights are bf16, so you need about 10 GB of GPU/unified memory.
 
 ## Install

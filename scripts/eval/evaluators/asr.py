@@ -127,8 +127,7 @@ def _resolve_local_runtime() -> tuple[int | str, str]:
 
     Why it matters: granite-qwen's config.json carries `model_dtype: float32`,
     which is load-bearing for TRAINING only -- fp32 master weights exist so
-    AdamW's 2e-5 decoder step doesn't round away under bf16's ULP (see
-    configs/experiments/granite_qwen.yaml). Inference has no optimizer, so it
+    AdamW's 2e-5 decoder step doesn't round away under bf16's ULP. Inference has no optimizer, so it
     was holding 2.27B params in fp32 and reading 9.1 GB of weights per decoded
     token instead of 4.5 GB, on a decode loop that is entirely
     memory-bandwidth bound.

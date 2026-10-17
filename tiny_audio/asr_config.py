@@ -29,22 +29,6 @@ GRANITE_ENCODER_CONV_LAYERS: list[ConvLayerSpec] = [(0, 2, 2), (0, 2, 2)]
 # (Granite Speech 5.0, Parakeet, Nemotron) are all time-major.
 _TIME_MAJOR_ENCODER_MARKERS = ("granite-speech", "parakeet", "nemotron")
 
-# Decoders that already ship a native audio-placeholder token. Reusing it is
-# strictly better than adding "<audio>" and resizing, above all when the
-# decoder is frozen: masked_scatter overwrites the placeholder's *input*
-# embedding, but Gemma4 also looks the token up in `embed_tokens_per_layer` to
-# build its per-layer embeddings (PLE), and that row is NOT overwritten. A
-# freshly added row would hand every audio position a random, permanently
-# untrainable PLE vector. Gemma's own "<|audio|>" row is pretrained for
-# exactly this placeholder role.
-_NATIVE_AUDIO_TOKENS = {"gemma-4": "<|audio|>"}
-
-
-def native_audio_token(text_model_id: str | None) -> str | None:
-    """Return the decoder's built-in audio placeholder token, if it has one."""
-    lowered = (text_model_id or "").lower()
-    return next((tok for key, tok in _NATIVE_AUDIO_TOKENS.items() if key in lowered), None)
-
 
 def is_time_major_encoder(audio_model_id: str | None) -> bool:
     """Whether `audio_model_id` expects (batch, time, feature) input_features."""
@@ -115,13 +99,6 @@ class ASRConfig(transformers.PretrainedConfig):
         # Default is Whisper/GLM-ASR structure: conv1(k=3,s=1,p=1) + conv2(k=3,s=2,p=1)
         encoder_conv_layers: list[ConvLayerSpec] | None = None,
         audio_sample_rate: int = 16000,
-        # Whether the encoder takes `input_features` as (batch, time, feature)
-        # instead of Whisper/GLM-ASR's (batch, n_mels, mel_len). Only
-        # SpecAugment unpacks all three dims, so this exists to keep
-        # `_mask_input_features` masking the time axis rather than the feature
-        # axis. Left as None it is auto-detected from `audio_model_id`, so a
-        # Granite/Parakeet swap can't silently mask the wrong axis.
-        audio_features_time_major: bool | None = None,
         # Whether to forward the mel padding mask into the audio encoder.
         # This matters a lot for Granite: it uses block attention over fixed
         # 128-frame blocks, so with `padding="longest"` batches the pad frames
@@ -135,16 +112,13 @@ class ASRConfig(transformers.PretrainedConfig):
         # incomparable to those baselines. Flip it explicitly to test.
         encoder_attention_mask: bool | None = None,
         # Placeholder token whose embeddings get replaced by projector output.
-        # Defaults to the decoder's native audio token when it has one (Gemma 4),
-        # otherwise "<audio>", which is added to the tokenizer and requires an
+        # Defaults to "<audio>", which is added to the tokenizer and requires an
         # embedding resize.
         audio_token: str | None = None,
         # dtype for the projector alone. The fp32-master-weights argument only
         # applies to parameters an optimizer actually updates, so pinning the
         # whole stack to float32 to protect a 10M-param projector wastes 2
-        # bytes on every frozen parameter -- 10.4 GiB on a frozen Gemma 4 E2B
-        # (5.12B stored params; "E2B" counts *active* params, and the
-        # per-layer-embedding table alone is 2.35B). Set this to float32 while
+        # bytes on every frozen parameter. Set this to float32 while
         # model_dtype stays bfloat16 to get master-weight precision where it
         # matters at frozen-model memory cost. Defaults to model_dtype, so
         # existing recipes are unchanged.
@@ -164,41 +138,12 @@ class ASRConfig(transformers.PretrainedConfig):
         encoder_dtype: str | None = None,
         projector_pool_stride: int = 4,
         projector_hidden_dim: int | None = None,
-        projector_type: str = "mlp",
-        # Label smoothing applied inside the LM's loss function (not HF Trainer's
-        # LabelSmoother). Train-only — ASRModel.forward zeros it on eval. Routing
-        # smoothing through the loss_function flows through liger's fused linear
-        # CE when apply_liger_kernel_to_qwen3() is active, avoiding the
-        # (B,T,V) fp32 log_softmax materialization that the HF LabelSmoother
-        # path requires (~15GB at B=50/V=152k on Qwen3-0.6B).
-        label_smoothing: float = 0.0,
         # LoRA configuration (for Stage 2 fine-tuning)
         use_lora: bool = False,
         lora_rank: int = 8,  # SALMONN default
         lora_alpha: int = 32,  # SALMONN default (scaling factor 4.0)
         lora_dropout: float = 0.0,
         lora_target_modules: list[str] | None = None,  # Default: all linear layers
-        # Per-module rank/alpha overrides, keyed by the module's leaf name and
-        # matched by PEFT as `(.*\.)?<key>$` against the full module path.
-        #
-        # These exist because `all-linear` is blind to a matrix's shape. On
-        # Qwen3.5 the gated-DeltaNet gates `in_proj_a` / `in_proj_b` are
-        # (16, 2048) -- one scalar per value head -- so a rank-64 adapter on
-        # them is capped at rank 16 by the output dimension and spends
-        # 64*2048 + 16*64 = 132K parameters to express an update that a full
-        # fine-tune of the same matrix would carry in 32K. Measured on the
-        # step-20000 granite_qwen_top4 checkpoint: 4.76M LoRA params across the
-        # 36 gate matrices, 4.03x what full fine-tuning them costs, and the
-        # realised update's effective rank was 6.3 / 7.3 against the 64
-        # allocated.
-        #
-        # PEFT looks up rank_pattern and alpha_pattern INDEPENDENTLY, each
-        # falling back to `r` / `lora_alpha`. Overriding rank alone therefore
-        # changes the scale: alpha/r goes 128/64 = 2.0 to 128/16 = 8.0. Always
-        # set both, and keep the ratio equal to the global one unless the
-        # scale change is the point.
-        lora_rank_pattern: dict[str, int] | None = None,
-        lora_alpha_pattern: dict[str, int] | None = None,
         # Seconds of silence prepended to every clip at INFERENCE. Measured on
         # Peoples (n=500, paired bootstrap): 20.51% -> 19.28% WER, delta -1.22
         # CI [-1.83, -0.64], with utterances losing a leading reference word
@@ -241,23 +186,6 @@ class ASRConfig(transformers.PretrainedConfig):
         # those two carry 33.57M params for 0.27% of the selection's squared
         # gradient -- see unfreeze_encoder_top_layers for the measurement.
         encoder_trainable_post_projections: bool = True,
-        # SpecAugment on mel input (training-only), parameters match
-        # transformers' WhisperConfig / Wav2Vec2 conventions. Most relevant
-        # when the encoder is trainable (`freeze_audio_encoder=False`) —
-        # without augmentation the encoder sees identical mel inputs on
-        # every visit and overfits fast. Standard for ASR encoder fine-
-        # tuning (Whisper, Conformer, wav2vec2 all use it). Applied to
-        # log-mel input where zero is in-distribution (silence);
-        # structurally different from the prior encoder-output ZM which
-        # was removed because zero was OOD for the encoder's emission
-        # distribution. Uses `_compute_mask_indices` from
-        # transformers.models.whisper.modeling_whisper — the same helper
-        # Whisper itself uses, vectorized over the batch and torch.compile
-        # compatible. Default values match Whisper's defaults.
-        apply_spec_augment: bool = False,
-        mask_time_prob: float = 0.05,
-        mask_time_length: int = 10,
-        mask_time_min_masks: int = 2,
         max_new_tokens: int | None = None,
         use_cache: bool | None = None,
         no_repeat_ngram_size: int | None = None,
@@ -270,7 +198,6 @@ class ASRConfig(transformers.PretrainedConfig):
             text_model_id: HuggingFace model ID for text decoder (Qwen)
             attn_implementation: Attention implementation ("flash_attention_2", "sdpa", "eager")
             model_dtype: Model dtype ("bfloat16", "float16", "float32")
-            projector_type: Projector architecture ("mlp")
             use_lora: Enable LoRA adapters for Stage 2 fine-tuning
         """
         # Set default generation parameters (greedy decoding only).
@@ -304,34 +231,23 @@ class ASRConfig(transformers.PretrainedConfig):
         self.encoder_dim = encoder_dim
         self.llm_dim = llm_dim
         self.encoder_conv_layers = encoder_conv_layers or DEFAULT_ENCODER_CONV_LAYERS
-        self.audio_features_time_major = (
-            is_time_major_encoder(audio_model_id)
-            if audio_features_time_major is None
-            else audio_features_time_major
-        )
         self.encoder_attention_mask = (
             is_time_major_encoder(audio_model_id)
             if encoder_attention_mask is None
             else encoder_attention_mask
         )
-        self.audio_token = audio_token or native_audio_token(text_model_id) or "<audio>"
+        self.audio_token = audio_token or "<audio>"
         self.projector_dtype = projector_dtype or model_dtype
         self.encoder_dtype = encoder_dtype or model_dtype
         self.audio_sample_rate = audio_sample_rate
         self.projector_pool_stride = projector_pool_stride
         self.projector_hidden_dim = projector_hidden_dim
-        self.projector_type = projector_type
         self.transcribe_prompt = transcribe_prompt
-        self.label_smoothing = label_smoothing
         # LoRA configuration
         self.use_lora = use_lora
         self.lora_rank = lora_rank
         self.lora_alpha = lora_alpha
         self.lora_dropout = lora_dropout
-        # Plain dicts, never None: PEFT's LoraConfig defaults them to {} and
-        # `get_pattern_key` iterates the keys unconditionally.
-        self.lora_rank_pattern = dict(lora_rank_pattern or {})
-        self.lora_alpha_pattern = dict(lora_alpha_pattern or {})
         self.inference_lead_in_seconds = float(inference_lead_in_seconds)
         self.lora_target_modules = lora_target_modules or [
             "q_proj",
@@ -348,10 +264,6 @@ class ASRConfig(transformers.PretrainedConfig):
         self.freeze_audio_encoder = freeze_audio_encoder
         self.encoder_trainable_top_layers = encoder_trainable_top_layers
         self.encoder_trainable_post_projections = encoder_trainable_post_projections
-        self.apply_spec_augment = apply_spec_augment
-        self.mask_time_prob = mask_time_prob
-        self.mask_time_length = mask_time_length
-        self.mask_time_min_masks = mask_time_min_masks
 
         explicit_generation_args = {
             "max_new_tokens": max_new_tokens,

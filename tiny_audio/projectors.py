@@ -160,12 +160,3 @@ def _frame_stack(x: torch.Tensor, k: int) -> torch.Tensor:
     batch, seq, dim = x.shape
     out_len = _frame_stack_length(seq, k)
     return x[:, : out_len * k, :].reshape(batch, out_len, dim * k)
-
-
-# =============================================================================
-# Projector Registry
-# =============================================================================
-
-PROJECTOR_CLASSES = {
-    "mlp": MLPAudioProjector,
-}

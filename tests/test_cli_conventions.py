@@ -86,7 +86,6 @@ def test_every_subcommand_is_reachable() -> None:
         "deploy",
         "push",
         "runpod",
-        "debug",
         "demo",
         "serve",
         "bench",
@@ -143,9 +142,9 @@ def test_runpod_pod_commands_take_host_and_port_first() -> None:
             assert all(a.required for a in _arguments(command)[:2]), " ".join(path)
 
 
-def test_analysis_and_debug_commands_take_the_model_positionally() -> None:
+def test_analysis_commands_take_the_model_positionally() -> None:
     for path, command in _LEAVES:
-        if path[0] in {"analysis", "debug"}:
+        if path[0] == "analysis":
             where = " ".join(path)
             first = _arguments(command)[0].name
             assert first in {"model", "models"}, f"{where}: first argument is {first}"

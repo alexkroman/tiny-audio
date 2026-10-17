@@ -94,7 +94,6 @@ def no_retry_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
 TINY_ASR_CONFIG_KWARGS: dict[str, Any] = {
     "audio_model_id": "openai/whisper-tiny",
     "text_model_id": "HuggingFaceTB/SmolLM2-135M-Instruct",
-    "projector_type": "mlp",
     "model_dtype": "float32",
     "attn_implementation": "eager",
 }
@@ -137,27 +136,6 @@ def lora_asr_model(lora_asr_config: ASRConfig) -> ASRModel:
 # =============================================================================
 # ASRModel Test Utilities - stubs for test_asr_modeling.py
 # =============================================================================
-
-
-def gemma_decode_loop_stub() -> Any:
-    """Minimal causal LM exposing Gemma's ``prepare_inputs_for_generation`` signature."""
-
-    class Stub:
-        def prepare_inputs_for_generation(
-            self,
-            input_ids: object,
-            inputs_embeds: object = None,
-            per_layer_inputs: object = None,
-            is_first_iteration: bool = False,
-            **kwargs: object,
-        ) -> dict[str, object]:
-            return {
-                "input_ids": input_ids,
-                "inputs_embeds": inputs_embeds,
-                "per_layer_inputs": per_layer_inputs,
-            }
-
-    return Stub()
 
 
 # =============================================================================

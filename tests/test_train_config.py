@@ -17,7 +17,7 @@ from scripts.train_config import ModelConfig, TrainingConfig
 from tiny_audio.asr_config import ASRConfig
 
 CONFIGS = Path(__file__).resolve().parents[1] / "configs"
-EXPERIMENTS = sorted(p.stem for p in (CONFIGS / "experiments").glob("*.yaml"))
+DATA_CONFIGS = sorted(p.stem for p in (CONFIGS / "data").glob("*.yaml"))
 
 # Keys TrainingConfig declares for scripts/train.py itself rather than for
 # TrainingArguments (TRAINING_MODEL_PARAMS go to ASRConfig, the rest are popped
@@ -72,9 +72,18 @@ def test_default_config_composes() -> None:
     assert isinstance(cfg.training.learning_rate, float)
 
 
-@pytest.mark.parametrize("experiment", EXPERIMENTS)
-def test_experiment_composes(experiment: str) -> None:
-    cfg = _compose([f"+experiments={experiment}"])
+def test_default_config_is_the_published_recipe() -> None:
+    cfg = _compose()
+    assert cfg.model.audio_model_id == "ibm-granite/granite-speech-5.0-470m-turboctc-nc"
+    assert cfg.model.text_model_id == "Qwen/Qwen3.5-2B"
+    assert cfg.model.use_lora is True
+    assert cfg.training.freeze_audio_encoder is True
+    assert cfg.training.freeze_language_model is True
+
+
+@pytest.mark.parametrize("data", DATA_CONFIGS)
+def test_data_config_composes(data: str) -> None:
+    cfg = _compose([f"data={data}"])
     # Typed nodes: every dataset entry validated against DatasetConfig.
     for entry in cfg.data.datasets:
         assert entry.path
@@ -115,6 +124,9 @@ class TestHubTokenPreflight:
                 "training.hub_model_id=me/model",
                 "training.report_to=none",
                 "training.use_liger=false",
+                # The offline-fixture model pair, so startup never reaches the Hub.
+                "model.audio_model_id=zai-org/GLM-ASR-Nano-2512",
+                "model.text_model_id=Qwen/Qwen3-0.6B",
                 *overrides,
             ]
         )

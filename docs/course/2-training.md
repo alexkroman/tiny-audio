@@ -2,12 +2,12 @@
 
 **Time:** 1 hour of class time (20 min lecture + 40 min hands-on), then the run continues on its own
 
-**Goal**: Run the training loop locally, size a cloud GPU, write your own experiment config, and
-launch a real training run.
+**Goal**: Size a cloud GPU, write your own experiment config, and launch a real training run.
 
 > **Before you start.** You need the install from Class 1, a Hugging Face **write** token, a W&B
-> account, and a RunPod account with credit. Have `configs/experiments/stage_1.yaml` open; the
-> lecture refers to it.
+> account, and a RunPod account with credit. Have `configs/config.yaml` and
+> `configs/training/production.yaml` open; together they are the default recipe the lecture refers
+> to.
 
 ______________________________________________________________________
 
@@ -21,13 +21,15 @@ Every run has the same two parts, whether it's an afternoon on one rented GPU or
 set up once, then loop. Each pass through the loop takes a batch of clips, lets the model predict
 their transcripts, boils the gap between prediction and truth down to one number (the **loss**, a
 penalty score that's near zero for a perfect transcript), and nudges the weights to lower it: the
-projector a lot, the decoder a little, the encoder not at all. In detail:
+projector a lot, the decoder's LoRA adapters a little, the encoder and the decoder's own weights not
+at all. In detail:
 
-1. **Loads the two pretrained models** from the Hub: the GLM-ASR encoder and Qwen3-0.6B. The
-   decoder's master weights are kept in float32 so tiny updates aren't rounded away; compute runs in
-   bfloat16.
-1. **Builds a fresh projector** and calibrates its output scale against the decoder's embedding
-   table.
+1. **Loads the two pretrained models** from the Hub: the Granite Speech encoder and Qwen3.5-2B. Both
+   are frozen, so their weights are stored in bfloat16 (`model_dtype: bfloat16`). The parts that
+   train, the projector (`projector_dtype: float32`) and the LoRA adapters, keep float32 weights so
+   tiny updates aren't rounded away; compute runs in bfloat16.
+1. **Builds a fresh projector**, calibrates its output scale against the decoder's embedding table,
+   and wraps the decoder's linear layers with LoRA adapters (rank 64, alpha 64, `all-linear`).
 1. **Loads the datasets** listed in the data config. This is a normal `load_dataset()` in map mode,
    not streaming: everything is downloaded and cached to disk, and `datasets` keeps two copies (the
    Hub download plus its own Arrow tables). Budget about twice the download size.
@@ -39,8 +41,8 @@ projector a lot, the decoder a little, the encoder not at all. In detail:
    prompt in the user turn, the transcript in the assistant turn. Loss is computed on the assistant
    turn only.
 1. **Trains** with the Hugging Face `Trainer` and AdamW. Three parameter groups get three learning
-   rates: projector 1e-3, decoder 2e-5, encoder none (frozen). Cosine schedule with warmup, gradient
-   clipping, bf16.
+   rates: projector 1e-3, decoder (the LoRA adapters) 1e-4, encoder none (frozen). 1,000 warmup
+   steps, then a cosine decay to zero, gradient clipping at 1.0, bf16.
 1. **Evaluates and checkpoints** every 2,000 steps. With `push_to_hub: true` every checkpoint is
    uploaded to your Hub repo as it is saved, so you can evaluate mid-run from any machine.
 
@@ -72,7 +74,7 @@ never trains on; that is the only honest test, and it is what the eval loss belo
 | ----------------- | -------------------------------- | ------------------------------------------------------------ |
 | **Training loss** | `train/loss`                     | Cross-entropy on the assistant turn. Falls fast, then slowly |
 | **Eval loss**     | `train/eval_loss` or `eval/loss` | Same quantity on held-out clips. Should track training loss  |
-| **Gradient norm** | `train/grad_norm`                | Starts around 5-10, settles into 1-3 after warmup            |
+| **Gradient norm** | `train/grad_norm`                | Settles after warmup; the default clips at 1.0               |
 | **Learning rate** | `train/learning_rate`            | Ramps up over warmup, then decays along a cosine             |
 
 Signs of trouble:
@@ -87,86 +89,78 @@ Signs of trouble:
 ### What Convergence Looks Like
 
 The projector starts as random noise, so early on the decoder receives garbage and the loss is high.
-In `stage_1` runs on the production mix:
+The curve below was recorded on the earlier GLM-ASR + Qwen3-0.6B recipe (a full decoder fine-tune)
+on the production mix; the default Granite + Qwen3.5-2B + LoRA recipe has not been charted step by
+step here, so treat the numbers as the expected shape rather than targets:
 
 - **Steps 0 to ~500**: loss falls from ~3.5 to under 1.0 as the projector finds the basic
   audio-token-to-word mapping. Transcripts go from gibberish to recognizable within this window.
 - **Steps ~500 to ~1,500**: loss settles toward ~0.4 and the gradient norm stabilizes.
-- **After that**: slow, steady improvement for the rest of the run. The decoder fine-tune is doing
-  most of the work here.
+- **After that**: slow, steady improvement for the rest of the run, as the decoder side (full
+  fine-tune there, LoRA adapters in the default) does most of the work.
 
 Earlier versions of this course described a "cliff" around step 1,500 where the model suddenly
-started working. That was the projector-only recipe. With the decoder unfrozen the transition comes
-much earlier and is less abrupt. On a smaller dataset with a smaller batch, expect the same shape
-stretched or compressed along the step axis.
+started working. That was a projector-only recipe. Once the decoder side trains too, the transition
+comes much earlier and is less abrupt. On a smaller dataset with a smaller batch, expect the same
+shape stretched or compressed along the step axis.
 
-### The Recipes
+### The Recipe
 
-| Experiment            | Encoder                      | Decoder             | What trains                      | Data                |
-| --------------------- | ---------------------------- | ------------------- | -------------------------------- | ------------------- |
-| `stage_1`             | GLM-ASR-Nano (frozen)        | Qwen3-0.6B          | Projector + decoder + embeddings | `multiasr`          |
-| `granite_qwen_frozen` | Granite Speech 470M (frozen) | Qwen3.5-4B (frozen) | Projector + decoder LoRA         | `multiasr`          |
-| `mps_smoke`           | GLM-ASR-Nano (frozen)        | Qwen3-0.6B          | Projector + decoder, 10 steps    | `librispeech_dummy` |
+There is one recipe, and it is the default: `configs/config.yaml` plus
+`configs/training/production.yaml`. No experiment presets ship in the repo.
 
-Every recipe is the same code with different freeze flags and model IDs. The flags:
+| Encoder                      | Decoder             | What trains                     | Data       |
+| ---------------------------- | ------------------- | ------------------------------- | ---------- |
+| Granite Speech 470M (frozen) | Qwen3.5-2B (frozen) | Projector + decoder LoRA (~80M) | `multiasr` |
 
-| Flag                                | Default | Meaning                                                      |
-| ----------------------------------- | ------- | ------------------------------------------------------------ |
-| `training.freeze_audio_encoder`     | `true`  | Encoder weights never change                                 |
-| `training.freeze_language_model`    | `false` | Set `true` for a projector-only run                          |
-| `training.freeze_text_embed_tokens` | `true`  | Keep Qwen3's embedding table fixed (protects rare tokens)    |
-| `training.freeze_projector`         | `false` | Set `true` to train LoRA adapters alone                      |
-| `training.use_lora`                 | `false` | Add LoRA adapters to the decoder instead of full fine-tuning |
+Every variant is the same code with different freeze flags and model IDs. The flags:
+
+| Flag                                | Default | Meaning                                                           |
+| ----------------------------------- | ------- | ----------------------------------------------------------------- |
+| `training.freeze_audio_encoder`     | `true`  | Encoder weights never change                                      |
+| `training.freeze_language_model`    | `true`  | Decoder base weights never change (LoRA adapters still train)     |
+| `training.freeze_text_embed_tokens` | `true`  | Keep the decoder's embedding table fixed (protects rare tokens)   |
+| `training.freeze_projector`         | `false` | Set `true` to train LoRA adapters alone                           |
+| `model.use_lora`                    | `true`  | LoRA adapters on the decoder (`training.use_lora` overrides this) |
 
 **LoRA** (Low-Rank Adaptation) adds small trainable matrices next to the decoder's linear layers and
-leaves the original weights untouched. It is the cheaper alternative to full fine-tuning: ~1-2M
-trainable parameters instead of ~600M. Use it when GPU memory is tight or when you want to preserve
-the decoder exactly:
+leaves the original weights untouched. The default puts rank-64 adapters on every linear layer of
+Qwen3.5-2B: ~67M trainable parameters instead of ~1.9B. The alternatives are one override away:
 
 ```bash
-# Projector + LoRA adapters, original decoder weights frozen
-poetry run python scripts/train.py +experiments=stage_1 training.use_lora=true
+# Projector only: no adapters, decoder fully frozen
+poetry run python scripts/train.py training.use_lora=false
+
+# Full decoder fine-tune instead of LoRA. Needs far more memory than the default sizing, so run
+# `ta runpod plan` with the same overrides first. The default stores the decoder in bf16 because
+# it is frozen; for a trainable decoder, consider `model.model_dtype=float32` so small updates
+# aren't rounded away.
+poetry run python scripts/train.py training.freeze_language_model=false training.use_lora=false
 ```
 
 ______________________________________________________________________
 
 ## Part B: Hands-On (40 min)
 
-### Exercise 1: Local Smoke Test (10 min, free)
+There is no laptop-sized smoke-test recipe: the default config is a 2B decoder sized for one 80 GB
+80GB, so all training in this class happens on a rented GPU. Exercises 1 and 2 (sizing and writing
+your config) still run on your laptop.
 
-Run the complete training loop on your laptop with 73 LibriSpeech clips. This downloads both base
-models (about 6 GB on first run) and trains for 10 steps at batch size 1. It won't produce a useful
-model; it proves that your environment, the data pipeline, and the trainer all work.
-
-```bash
-poetry run python scripts/train.py +experiments=mps_smoke
-```
-
-Watch for:
-
-- The parameter summary: encoder frozen, projector and decoder trainable.
-- The label-normalization log lines.
-- Ten `loss` values. They should be finite and roughly decreasing.
-
-It needs about 12 GB of memory (fp32 master weights plus AdamW state for the decoder). If it dies
-with an out-of-memory error, your machine is still fine for Classes 1 and 3; move on to Exercise 2
-and do your training in the cloud.
-
-### Exercise 2: Size Your Cloud Run (5 min)
+### Exercise 1: Size Your Cloud Run (5 min)
 
 Never guess at GPU size. `ta runpod plan` reads a config, measures the parameter counts and download
 sizes from the Hub without downloading weights, and reports the VRAM and disk you need:
 
 ```bash
-poetry run ta runpod plan --experiment stage_1
+poetry run ta runpod plan
 ```
 
-Read the output. For the production recipe it will tell you that `multiasr` is over a terabyte on
-disk and that full-decoder fine-tuning at batch 100 wants an 80 GB GPU. That's the production-scale
-recipe, on the full data mix. It is not the run you'll do in class — and it is not the recipe behind
-the published model; the published model was trained with `granite_qwen_frozen`.
+With no `--experiment`, it sizes the default config. Read the output: it will tell you that
+`multiasr` is over a terabyte on disk and that Qwen3.5-2B with LoRA at batch 64 wants an 80 GB GPU.
+That's the production-scale recipe, on the full data mix. It is not the run you'll do in class; your
+run keeps the model and trainer settings and swaps in a much smaller dataset.
 
-### Exercise 3: Write Your Experiment (10 min)
+### Exercise 2: Write Your Experiment (10 min)
 
 You'll train on LoquaciousSet `small`: 250 hours, ~107K clips, 23 GB of parquet (about 50 GB on disk
 after caching). It is a balanced mix of read and spontaneous, clean and noisy English, and its
@@ -191,33 +185,28 @@ dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
 max_eval_samples_per_dataset: 200
 ```
 
-**Experiment config.** Create `configs/experiments/my_run.yaml` (also not in the repo) with this
-content:
+**Experiment config.** Create `configs/experiments/my_run.yaml` (the repo ships no experiment
+presets, so this directory may not exist yet) with this content:
 
 ```yaml
 # @package _global_
 defaults:
   - override /data: loquacious_small
 
-model:
-  label_smoothing: 0.0
-
 training:
   hub_model_id: "your-username/tiny-audio-yourname"   # CHANGE THIS
   wandb_project: tiny-audio-course
-  num_train_epochs: 1
-  warmup_steps: 300
+  warmup_steps: 300   # the default 1000 would be half of this short run
   eval_steps: 500
   save_steps: 500
-  per_device_train_batch_size: 32
-  per_device_eval_batch_size: 32
-  gradient_accumulation_steps: 2
 ```
 
 Everything you don't override comes from `configs/config.yaml` and
-`configs/training/production.yaml`: the GLM-ASR encoder, Qwen3-0.6B, the two learning rates, the
-cosine schedule, bf16, and `push_to_hub: true`. One epoch at an effective batch of 64 is roughly
-1,700 steps, so checkpoints every 500 steps gives you four to compare.
+`configs/training/production.yaml`: the frozen Granite Speech encoder, Qwen3.5-2B with LoRA (r=64,
+alpha 64, all-linear), the two learning rates (1e-3 projector, 1e-4 LoRA), one epoch, the cosine
+schedule, batch 64 with no accumulation, bf16, and `push_to_hub: true`. One epoch of ~107K clips at
+an effective batch of 64 is roughly 1,700 steps, so checkpoints every 500 steps give you three to
+compare plus the final push.
 
 LoquaciousSet's transcripts are uppercase without punctuation. The truecaser will restore casing,
 but nothing restores punctuation, so expect your model's output to be lightly punctuated. WER is
@@ -231,7 +220,7 @@ poetry run ta runpod plan --experiment my_run
 
 Note the recommended GPU and the disk figure. Both go into the next step.
 
-### Exercise 4: Set Up RunPod (10 min)
+### Exercise 3: Set Up RunPod (10 min)
 
 1. Sign up at [runpod.io](https://runpod.io) and add credit.
 
@@ -244,8 +233,10 @@ Note the recommended GPU and the disk figure. Both go into the next step.
 
 1. Deploy a pod:
 
-   - GPU: what `ta runpod plan` recommended (an A40 or A6000 class 48 GB card is typical for this
-     run; drop batch size or add `training.use_lora=true` for a 24 GB card)
+   - GPU: what `ta runpod plan` recommended. The default batch of 64 is sized for an 80 GB card. On
+     a smaller card, lower `training.per_device_train_batch_size` and raise
+     `training.gradient_accumulation_steps` to keep the effective batch at 64, and re-run
+     `ta runpod plan` with those overrides to check the fit
    - Template: **RunPod PyTorch** (the code expects the image's CUDA-enabled PyTorch)
    - Container disk: at least the disk figure from the plan, with headroom
 
@@ -263,7 +254,7 @@ poetry run ta runpod deploy <HOST> <PORT>
 
 Re-run with `--skip-setup --skip-deps` after local edits to sync only the files.
 
-### Exercise 5: Train (5 min to launch)
+### Exercise 4: Train (5 min to launch)
 
 ```bash
 export HF_TOKEN='hf_...'        # a WRITE token: checkpoints are pushed to your Hub repo
@@ -279,7 +270,8 @@ choose "use an existing account" and paste the key from
 Hydra overrides pass straight through, so you can adjust without editing the file:
 
 ```bash
-poetry run ta runpod train <HOST> <PORT> --experiment my_run training.per_device_train_batch_size=16
+poetry run ta runpod train <HOST> <PORT> --experiment my_run \
+    training.per_device_train_batch_size=32 training.gradient_accumulation_steps=2
 ```
 
 **Detach** with `Ctrl+B` then `D`. The run keeps going. **Reattach** later:
@@ -290,8 +282,9 @@ poetry run ta runpod attach <HOST> <PORT> --logs --lines 200   # just print rece
 poetry run ta runpod checkpoint <HOST> <PORT>              # path of the newest checkpoint
 ```
 
-**Monitor in W&B**. Within the first few hundred steps `train/loss` should drop below 1.0. If you
-set `eval_steps: 500`, the first eval loss arrives at step 500.
+**Monitor in W&B**. Within the first few hundred steps `train/loss` should fall steeply (see
+[What Convergence Looks Like](#what-convergence-looks-like)). With `eval_steps: 500`, the first eval
+loss arrives at step 500.
 
 **When to stop early** (`Ctrl+C` inside tmux):
 
@@ -299,7 +292,7 @@ set `eval_steps: 500`, the first eval loss arrives at step 500.
 - Eval loss climbing while training loss falls
 - You've seen enough and want to save money
 
-### Exercise 6: Terminate the Pod
+### Exercise 5: Terminate the Pod
 
 **RunPod bills by the hour whether or not the GPU is busy.**
 
@@ -315,15 +308,16 @@ ______________________________________________________________________
 
 ## Local Training (Optional)
 
-The same commands work on a local CUDA GPU. The production recipe needs an 80 GB card; the course
-run from Exercise 3 fits on 48 GB, or on 24 GB with LoRA:
+The same commands work on a local CUDA GPU. The default batch is sized for an 80 GB card; on a
+smaller one, trade batch size for accumulation steps and check the fit with `ta runpod plan` first:
 
 ```bash
 # Your experiment
 poetry run python scripts/train.py +experiments=my_run
 
-# Same, but LoRA instead of full decoder fine-tuning
-poetry run python scripts/train.py +experiments=my_run training.use_lora=true
+# Same effective batch (64) on a smaller card
+poetry run python scripts/train.py +experiments=my_run \
+    training.per_device_train_batch_size=32 training.gradient_accumulation_steps=2
 
 # Resume after an interruption
 poetry run python scripts/train.py +experiments=my_run \
@@ -339,41 +333,48 @@ ______________________________________________________________________
 
 ### Training (`configs/training/production.yaml`)
 
-| Parameter                              | Default              | Description                                                         |
-| -------------------------------------- | -------------------- | ------------------------------------------------------------------- |
-| `training.learning_rate`               | `1e-3`               | Projector learning rate                                             |
-| `training.decoder_learning_rate`       | `2e-5`               | Decoder learning rate (50x lower)                                   |
-| `training.num_train_epochs`            | `2`                  | Epochs over the data config (`stage_1` uses 1)                      |
-| `training.max_steps`                   | `-1`                 | Set a positive number to cap the run regardless of epochs           |
-| `training.per_device_train_batch_size` | `100`                | Clips per step. Size for your GPU                                   |
-| `training.gradient_accumulation_steps` | `1`                  | Effective batch = batch size × this                                 |
-| `training.warmup_steps`                | `2000`               | Linear LR ramp before the cosine decay                              |
-| `training.lr_scheduler_type`           | `cosine_with_min_lr` | Decays to `min_lr_rate` × peak (0.1)                                |
-| `training.max_grad_norm`               | `2.5`                | Gradient clipping                                                   |
-| `training.weight_decay`                | `0.01`               | Decoder weight decay (projector uses `projector_weight_decay: 0.0`) |
-| `training.eval_steps` / `save_steps`   | `2000`               | Evaluate and checkpoint every N steps                               |
-| `training.push_to_hub`                 | `true`               | Upload each checkpoint to `hub_model_id` (public by default)        |
-| `training.bf16`                        | `true`               | Mixed precision. Master weights stay fp32                           |
-| `training.attn_implementation`         | `flash_attention_2`  | Falls back to SDPA where unavailable                                |
+| Parameter                              | Default                                        | Description                                                                 |
+| -------------------------------------- | ---------------------------------------------- | --------------------------------------------------------------------------- |
+| `training.learning_rate`               | `1e-3`                                         | Projector learning rate                                                     |
+| `training.decoder_learning_rate`       | `1e-4`                                         | Decoder group (the LoRA adapters), 10x lower                                |
+| `training.freeze_language_model`       | `true`                                         | Decoder base frozen; only the LoRA adapters train on it                     |
+| `training.num_train_epochs`            | `1`                                            | Epochs over the data config                                                 |
+| `training.max_steps`                   | `-1`                                           | Set a positive number to cap the run regardless of epochs                   |
+| `training.per_device_train_batch_size` | `64`                                           | Clips per step, sized for an 80 GB GPU                                      |
+| `training.per_device_eval_batch_size`  | `32`                                           | Clips per eval step                                                         |
+| `training.gradient_accumulation_steps` | `1`                                            | Effective batch = batch size × this (64)                                    |
+| `training.warmup_steps`                | `1000`                                         | Linear LR ramp before the cosine decay                                      |
+| `training.lr_scheduler_type`           | `cosine`                                       | Decays to zero (no minimum LR)                                              |
+| `training.max_grad_norm`               | `1.0`                                          | Gradient clipping                                                           |
+| `training.weight_decay`                | `0.0`                                          | Decoder (LoRA) weight decay (projector uses `projector_weight_decay: 0.01`) |
+| `training.seed`                        | `44`                                           | Seeds data order and init                                                   |
+| `training.eval_steps` / `save_steps`   | `2000`                                         | Evaluate and checkpoint every N steps                                       |
+| `training.push_to_hub`                 | `true`                                         | Upload each checkpoint to `hub_model_id` (public by default)                |
+| `training.hub_model_id`                | `mazesmazes/tiny-audio-granite-qwen-frozen-nc` | Change this to your own repo                                                |
+| `training.bf16`                        | `true`                                         | bf16 compute                                                                |
+| `training.attn_implementation`         | `sdpa`                                         | PyTorch scaled-dot-product attention                                        |
 
 ### Model (`configs/config.yaml`)
 
-| Parameter                     | Default                     | Description                                                  |
-| ----------------------------- | --------------------------- | ------------------------------------------------------------ |
-| `model.audio_model_id`        | `zai-org/GLM-ASR-Nano-2512` | Audio encoder (only its encoder is used)                     |
-| `model.text_model_id`         | `Qwen/Qwen3-0.6B`           | Decoder                                                      |
-| `model.projector_type`        | `mlp`                       | The only registered projector type                           |
-| `model.projector_pool_stride` | `4`                         | Frame-stacking factor `k`                                    |
-| `model.projector_hidden_dim`  | `1024`                      | Width of the projector's hidden layer                        |
-| `model.label_smoothing`       | `0.1`                       | Applied inside the loss during training (`stage_1` sets 0.0) |
-| `model.model_dtype`           | `float32`                   | Master weight precision                                      |
+| Parameter                        | Default                                           | Description                                       |
+| -------------------------------- | ------------------------------------------------- | ------------------------------------------------- |
+| `model.audio_model_id`           | `ibm-granite/granite-speech-5.0-470m-turboctc-nc` | Audio encoder (frozen)                            |
+| `model.text_model_id`            | `Qwen/Qwen3.5-2B`                                 | Decoder                                           |
+| `model.projector_pool_stride`    | `1`                                               | Frame-stacking factor `k` (1 = no stacking)       |
+| `model.projector_hidden_dim`     | `4096`                                            | Width of the projector's hidden layer             |
+| `model.encoder_conv_layers`      | `[[0, 2, 2], [0, 2, 2]]`                          | Granite's ~4x conv subsampling, sizes `<audio>`   |
+| `model.model_dtype`              | `bfloat16`                                        | Storage precision of the (frozen) encoder/decoder |
+| `model.projector_dtype`          | `float32`                                         | Projector weight precision                        |
+| `model.use_lora`                 | `true`                                            | LoRA adapters on the decoder                      |
+| `model.lora_rank` / `lora_alpha` | `64` / `64`                                       | Adapter rank and scale (alpha/r = 1.0)            |
+| `model.lora_target_modules`      | `all-linear`                                      | Every linear layer in the decoder                 |
 
 ______________________________________________________________________
 
 ## Key Takeaways
 
-1. Training is a normal `Trainer` run with a frozen encoder and two learning rates: hot for the
-   fresh projector, cool for the pretrained decoder.
+1. Training is a normal `Trainer` run with a frozen encoder, a frozen decoder carrying LoRA
+   adapters, and two learning rates: hot for the fresh projector, cooler for the adapters.
 1. The loop is simple; the data decides the result. Mix domains, make every transcript follow one
    style, and remember that whatever the labels lack, the model will lack.
 1. Data is downloaded and cached, not streamed. Plan disk at twice the download size.

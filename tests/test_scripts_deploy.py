@@ -36,7 +36,7 @@ class TestRunpodCLI:
     def test_gitignore_aware_file_list_excludes_gitignored_paths(self) -> None:
         """File list piped into rsync should honor .gitignore (no __pycache__,
         no .git/, no datasets_cache) and drop the suffix blocklist (no
-        .safetensors — Swift bundled weights aren't needed on RunPod)."""
+        .safetensors — local weight files aren't needed on RunPod)."""
         files = _gitignore_aware_file_list(get_project_root()).splitlines()
 
         assert files, "expected at least one file from git ls-files"
@@ -114,21 +114,21 @@ class TestRemoteDiskPreflight:
         monkeypatch.setattr("scripts.deploy.plan.build_plan", _plan_recommending_2500)
 
         with pytest.raises(typer.Exit):
-            runpod._check_remote_disk(self._conn(""), "stage_1", [])
+            runpod._check_remote_disk(self._conn(""), None, [])
 
     def test_proceeds_when_pod_is_big_enough(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(runpod, "_remote_free_gib", _free_gib(3000.0))
         monkeypatch.setattr("scripts.deploy.plan.build_plan", _plan_recommending_2500)
 
         # No exception == training is allowed to start.
-        runpod._check_remote_disk(self._conn(""), "stage_1", [])
+        runpod._check_remote_disk(self._conn(""), None, [])
 
     def test_unreadable_df_does_not_block_training(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(runpod, "_remote_free_gib", _free_gib(None))
 
         # A df we cannot read is not evidence the pod is too small; the
         # preflight must not become a new way for `train` to fail.
-        runpod._check_remote_disk(self._conn(""), "stage_1", [])
+        runpod._check_remote_disk(self._conn(""), None, [])
 
     def test_plan_failure_does_not_block_training(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(runpod, "_remote_free_gib", _free_gib(100.0))
@@ -139,7 +139,7 @@ class TestRemoteDiskPreflight:
 
         monkeypatch.setattr("scripts.deploy.plan.build_plan", boom)
 
-        runpod._check_remote_disk(self._conn(""), "stage_1", [])
+        runpod._check_remote_disk(self._conn(""), None, [])
 
 
 class TestDiskPlan:
@@ -168,22 +168,22 @@ class TestDiskPlan:
         monkeypatch.setattr(plan_module, "safetensors_params", fake_params)
         monkeypatch.setattr(plan_module, "repo_weight_bytes", fake_weight_bytes)
 
-        plan = build_plan(
-            "stage_1",
-            ["training.save_total_limit=1", "data=librispeech_dummy"],
-            512,
-        )
+        # A joint full-decoder fine-tune on the offline-fixture model pair.
+        joint = [
+            "model.audio_model_id=zai-org/GLM-ASR-Nano-2512",
+            "model.text_model_id=Qwen/Qwen3-0.6B",
+            "model.use_lora=false",
+            "training.freeze_language_model=false",
+            "data=librispeech_dummy",
+        ]
+        plan = build_plan(None, ["training.save_total_limit=1", *joint], 512)
         one = next(v for k, v in plan.disk.items() if k.startswith("checkpoints"))
 
-        plan5 = build_plan(
-            "stage_1",
-            ["training.save_total_limit=5", "data=librispeech_dummy"],
-            512,
-        )
+        plan5 = build_plan(None, ["training.save_total_limit=5", *joint], 512)
         five = next(v for k, v in plan5.disk.items() if k.startswith("checkpoints"))
 
         assert five == pytest.approx(one * 5)
-        # stage_1 fine-tunes Qwen3-0.6B, so one checkpoint is GiB-scale.
+        # The full Qwen3-0.6B decoder trains, so one checkpoint is GiB-scale.
         assert one > 1.0
 
 
@@ -295,8 +295,6 @@ class TestPackageImports:
             "scripts.deploy.hf_space",
             "scripts.hub",
             "scripts.hub.push",
-            "scripts.debug",
-            "scripts.debug.cli",
         ],
     )
     def test_module_importable(self, module_path: str) -> None:
@@ -308,6 +306,12 @@ class TestPackageImports:
 def test_generic_training_script_runs_scripts_train() -> None:
     script = build_training_script("granite_qwen", "token", None, None, [])
     assert "python -m scripts.train +experiments=granite_qwen" in script
+
+
+def test_training_script_without_preset_runs_the_default_config() -> None:
+    script = build_training_script(None, "token", None, None, ["training.seed=1"])
+    assert "python -m scripts.train training.seed=1" in script
+    assert "+experiments" not in script
 
 
 @pytest.mark.usefixtures("no_retry_backoff")
