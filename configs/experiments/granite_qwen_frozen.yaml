@@ -2,11 +2,17 @@
 # FROZEN ENCODER + PROJECTOR + LoRA, one epoch.
 #
 #   ibm-granite/granite-speech-5.0-470m-turboctc-nc   FULLY FROZEN (0 trainable)
-#   -> MLP projector (fresh init, 14.7M, lr 1e-3)
-#   -> Qwen/Qwen3.5-4B, base FROZEN + LoRA all-linear r=64 (129.9M, lr 1e-4)
+#   -> MLP projector (fresh init, 12.6M, lr 1e-3)
+#   -> Qwen/Qwen3.5-2B, base FROZEN + LoRA all-linear r=64 (67.3M, lr 1e-4)
 #
-# Trainable: 144.5M of 4.82B (3.0%). Sized for one H100 80GB (see the batch
-# size note under `training`).
+# Trainable: 79.9M (2.39B decoder). Sized for one RTX PRO 6000 96GB (see the
+# batch size note under `training`).
+#
+# DECODER BACK TO 2B (2026-10-16). #90 moved this recipe to Qwen3.5-4B; the
+# published model (mazesmazes/tiny-audio = granite-qwen-frozen-4) is the 2B
+# variant that #99 split out. The 2B run is the baseline the next run is
+# compared against, so the decoder goes back and the changes since it are
+# data and encoder only: VoxPopuli out, NOTSOFAR + EdAcc in, NC encoder.
 #
 #   poetry run python scripts/train.py +experiments=granite_qwen_frozen
 #
@@ -124,7 +130,7 @@ model:
   # Values copied from granite_qwen_lora (closest recipe: same encoder, same
   # LoRA-on-frozen-decoder shape). The deliberate divergences from it --
   # encoder_dtype, lora_rank, lora_alpha -- are documented at their own keys.
-  text_model_id: Qwen/Qwen3.5-4B
+  text_model_id: Qwen/Qwen3.5-2B
   projector_type: mlp
   projector_pool_stride: 1
   encoder_conv_layers: [[0, 2, 2], [0, 2, 2]]
@@ -396,52 +402,46 @@ training:
   # and makes the run non-comparable to anything.
   auto_find_batch_size: false
 
-  # 28 per device x 2 accumulation, sized for Qwen3.5-4B on an H100 80GB.
-  # The H100 is FASTER than the A100 80GB the 2B run used, not bigger:
-  # nvidia-smi reports ~79.6 GiB against the A100's 80.0.
+  # 64 per device x 1 accumulation, sized for Qwen3.5-2B on an RTX PRO 6000
+  # Blackwell 96GB (2026-10-16). This is exactly the shape the published 2B
+  # model trained at (granite-qwen-frozen-4, from #99's 2B variant), so lr
+  # 1e-3 / 1e-4 and max_grad_norm 1.0 mean what they meant there and the run
+  # compares cleanly against it.
   #
-  # Anchor: `ta runpod plan` predicted 77.3 GiB for the 2B run at batch 64,
-  # and W&B es1p5srq measured a 76.4 GiB peak (95.5% of the card, median
-  # 68.6). The planner is calibrated to within ~1 GiB here, so its 4B
-  # numbers are used as-is:
-  #     static      10.9 GiB  (decoder bf16 8.7G, LoRA 129.9M fp32 + Adam)
-  #     activations  2.09 GiB per sample (32 layers x 2560 hidden against
-  #                  24 x 2048: ~1.87x the 2B run's 1.12)
-  #     batch 32 -> 77.8 GiB (~98%)  no headroom for all-19s batches
-  #     batch 30 -> 73.6 GiB (~92%)
-  #     batch 28 -> 69.5 GiB (~87%)  <- this file
+  # MEASURED, not planned: W&B es1p5srq (2B, batch 64, A100 80GB) peaked at
+  # 76.4 GiB (95.5% of the card, median 68.6); `ta runpod plan` predicted
+  # 77.3. Peak is batch x the collator's 19.0s cap regardless of mix: batches
+  # pad to their longest row, and a random 64-row draw nearly always contains
+  # one near 19s. On the RTX PRO 6000 (~95 GiB usable) that is ~80%.
   #
-  # MEASURED (W&B rjid9zj6, H100 80GB HBM3, batch 30): the planner undershoots
-  # the 4B stack by ~5%. The training peak hit 97.3% (77.5 GiB) by step 2,000
-  # and was still rising (96.1% at step 1,600), with expandable_segments
-  # already on, so this is real peak demand, not fragmentation. Eval dips to
-  # ~17% and is not the constraint. 28 scales to ~73.5 GiB (~92%). Step down
-  # BEFORE a run, not after an OOM: the data order is seeded, so resuming at
-  # the same batch replays the batch that failed, and resuming at a new batch
-  # breaks the step-indexed LR schedule and data skip.
+  # Do NOT reuse 64 x 1 on an 80 GB H100: it reports ~79.6 GiB, which puts
+  # the same peak at 96%, and the seeded data order means an OOM replays on
+  # resume. Use 32 x 2 there (same effective batch, throughput cost only).
+  # Step down BEFORE a run, not after an OOM: resuming at a new batch breaks
+  # the step-indexed LR schedule and data skip.
   #
   # No gradient checkpointing. With the base frozen, backward is ~1x forward,
-  # so recompute costs ~+50% per sample. That is a worse trade than a smaller
-  # batch, and 28 x ~260 tokens already keeps an H100 busy.
+  # so recompute costs ~+50% per sample -- a worse trade than a smaller batch.
   #
-  # Eval runs under no_grad but still materialises 248K-vocab logits, so it
-  # halves with the train batch.
-  per_device_train_batch_size: 28
-  per_device_eval_batch_size: 32
-  # 2, so the effective batch is 56, close to the 64 this recipe was tuned
-  # and measured at (max_grad_norm 1.0, lr 1e-3 / 1e-4). The frozen run
-  # showed samples, not optimizer steps, are the currency: eval CE for
-  # y1tulo4j overlaid top4 (jscyrgkt) at matched samples despite ~1.6x the
-  # steps. Halving the batch to 28 without accumulation would only add
-  # gradient noise.
-  gradient_accumulation_steps: 2
+  # 4B history (#90 -> 2026-10-16), kept for a future decoder swap: the 4B
+  # stack needs ~2.09 GiB activations per sample (32 layers x 2560 hidden,
+  # ~1.87x the 2B's 1.12) plus 10.9 GiB static; W&B rjid9zj6 (H100, batch 30)
+  # peaked at 97.3% and the planner undershoots it by ~5%. It ran 28 x 2 on
+  # an H100 and was planned at 32 x 2 on the RTX PRO 6000.
+  per_device_train_batch_size: 64
+  per_device_eval_batch_size: 64
+  # 1: effective batch 64, the batch this recipe was tuned and measured at.
+  # The frozen run showed samples, not optimizer steps, are the currency:
+  # eval CE for y1tulo4j overlaid top4 (jscyrgkt) at matched samples despite
+  # ~1.6x the steps.
+  gradient_accumulation_steps: 1
 
   # ONE pass. `data.epoch_expansion` stays 1; the loader raises if both it
   # and this are >1, because they compound.
   #
-  # ~3.52M loader rows (multiasr, all sources uncapped + Peoples, VoxPopuli
-  # removed 2026-10-09, NOTSOFAR's 6.4K added 2026-10-14) at effective batch
-  # 56 is ~63k optimizer steps
+  # ~3.53M loader rows (multiasr, all sources uncapped + Peoples, VoxPopuli
+  # removed 2026-10-09, NOTSOFAR's 6.4K added 2026-10-14, EdAcc's 6.2K
+  # 2026-10-16) at effective batch 64 is ~55k optimizer steps
   # without showing any row twice. Warmup 1,000 is ~1.5%
   # of the schedule and the modal published value for this architecture
   # class (Granite Speech 1000, Canary-Qwen 1000, SLAM-ASR 1000; Ultravox's
