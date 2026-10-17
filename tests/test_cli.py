@@ -32,7 +32,7 @@ class TestMainCLI:
         result = runner.invoke(app, ["--help"])
         assert result.exit_code == 0
         output = _clean(result.output)
-        expected_commands = ["train", "eval", "deploy", "push", "runpod", "debug", "demo", "dev"]
+        expected_commands = ["train", "eval", "deploy", "push", "runpod", "demo", "dev"]
         for cmd in expected_commands:
             assert cmd in output, f"Expected '{cmd}' in help output"
 
@@ -58,7 +58,6 @@ class TestSubcommandHelp:
             (["deploy"], ["--repo-id", "-r"]),
             (["push"], ["--repo-id", "-r"]),
             (["runpod"], ["deploy", "train", "attach"]),
-            (["debug"], ["check-gradient-flow"]),
             (["demo"], ["--model", "-m", "--port", "-p"]),
             (["dev"], ["lint", "format", "test"]),
         ],
@@ -83,8 +82,6 @@ class TestNestedCommands:
             (["runpod", "train"], "host"),
             (["runpod", "attach"], "host"),
             (["runpod", "checkpoint"], "host"),
-            # Debug subcommands
-            (["debug", "check-gradient-flow"], "model"),
             # Dev subcommands
             (["dev", "lint"], "linter"),
             (["dev", "format"], "format"),

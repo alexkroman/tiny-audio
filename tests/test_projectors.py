@@ -7,10 +7,7 @@ import pytest
 import torch
 from conftest import MockProjectorConfig
 
-from tiny_audio.projectors import (
-    PROJECTOR_CLASSES,
-    MLPAudioProjector,
-)
+from tiny_audio.projectors import MLPAudioProjector
 
 # =============================================================================
 # MLP Projector Tests
@@ -93,39 +90,18 @@ class TestMLPAudioProjector:
 # =============================================================================
 
 
-class TestProjectorRegistry:
-    """Tests for projector registry."""
-
-    def test_core_projectors_registered(self) -> None:
-        """Test that core projector types are in the registry."""
-        assert "mlp" in PROJECTOR_CLASSES
-
-    def test_registry_instantiation(self) -> None:
-        """Test that all registered projectors can be instantiated."""
-        config = MockProjectorConfig()
-        for cls in PROJECTOR_CLASSES.values():
-            projector = cls(config)
-            assert hasattr(projector, "forward")
-            assert hasattr(projector, "get_output_length")
-
-
 # =============================================================================
 # Gradient Flow Tests
 # =============================================================================
 
 
-# Projector types to test
-GRADIENT_TEST_PROJECTORS = ["mlp"]
-
-
 class TestGradientFlow:
     """Tests for gradient flow through projectors."""
 
-    @pytest.mark.parametrize("projector_type", GRADIENT_TEST_PROJECTORS)
-    def test_gradients_flow(self, projector_type: str) -> None:
+    def test_gradients_flow(self) -> None:
         """Test that gradients flow through projector."""
         config = MockProjectorConfig()
-        projector = PROJECTOR_CLASSES[projector_type](config)
+        projector = MLPAudioProjector(config)
         projector.train()
 
         x = torch.randn(2, 100, 256, requires_grad=True)

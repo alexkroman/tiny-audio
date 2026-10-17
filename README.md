@@ -191,20 +191,17 @@ Audio (16 kHz) → speech encoder (frozen) → MLP projector (trained) → LLM d
    space. It is the only part trained from scratch.
 1. The **LLM** reads those projected frames as if they were tokens and writes out the transcript.
 
-Encoder, projector, and decoder are each swappable from config. Two recipes ship with the repo:
+Encoder, projector, and decoder are each swappable from config. The default config
+(`configs/config.yaml`) is the `granite_qwen_frozen` recipe:
 
-| Recipe                                  | Encoder             | Decoder                | Trained                 |
-| --------------------------------------- | ------------------- | ---------------------- | ----------------------- |
-| Published model (`granite_qwen_frozen`) | Granite Speech 470M | Qwen3.5, frozen + LoRA | Projector + LoRA (~80M) |
-| Default / course recipe (`stage_1`)     | GLM-ASR-Nano (635M) | Qwen3-0.6B, fine-tuned | Projector + decoder     |
+| Encoder                      | Decoder                   | Trained                 |
+| ---------------------------- | ------------------------- | ----------------------- |
+| Granite Speech 470M (frozen) | Qwen3.5-2B, frozen + LoRA | Projector + LoRA (~80M) |
 
 ## Train your own
 
-Start on your laptop for free, and rent a GPU only once you know the pipeline works.
-
 | Tier                  | Data                                 | Hardware                     | Cost                |
 | --------------------- | ------------------------------------ | ---------------------------- | ------------------- |
-| **Smoke test**        | 73 LibriSpeech clips                 | Your laptop (CPU, MPS, CUDA) | Free, ~5 minutes    |
 | **Course run**        | LoquaciousSet `small` (~250 hours)   | One rented GPU, a few hours  | A few GPU-hours     |
 | **Production recipe** | ~3M clips across ten corpora (>1 TB) | One 80 GB GPU, a day or more | Hundreds of dollars |
 
@@ -212,14 +209,11 @@ Start on your laptop for free, and rent a GPU only once you know the pipeline wo
 git clone https://github.com/alexkroman/tiny-audio.git && cd tiny-audio
 poetry install
 
-# 1. Smoke test: a real training loop on your laptop
-poetry run python scripts/train.py +experiments=mps_smoke
+# 1. Before renting hardware, estimate the VRAM and disk the config needs
+poetry run ta runpod plan
 
-# 2. Before renting hardware, estimate the VRAM and disk a config needs
-poetry run ta runpod plan -e stage_1
-
-# 3. Full run
-poetry run python scripts/train.py +experiments=stage_1
+# 2. Full run (the default config)
+poetry run python scripts/train.py
 ```
 
 Every setting is a [Hydra](https://hydra.cc/) override, for example
@@ -230,10 +224,10 @@ Space.
 ### Training on RunPod
 
 ```bash
-poetry run ta runpod up -e stage_1              # create a pod with enough GPU for the config
+poetry run ta runpod up                         # create a pod with enough GPU for the config
 poetry run ta runpod wait <POD_ID>              # prints <HOST> <PORT>
 poetry run ta runpod deploy <HOST> <PORT>       # sync the project and install dependencies
-HF_TOKEN=hf_... poetry run ta runpod train <HOST> <PORT> -e stage_1
+HF_TOKEN=hf_... poetry run ta runpod train <HOST> <PORT>
 poetry run ta runpod attach <HOST> <PORT>       # watch the run in tmux
 ```
 
@@ -242,8 +236,8 @@ poetry run ta runpod attach <HOST> <PORT>       # watch the run in tmux
 The **[free 3.5-hour course](https://alexkroman.github.io/tiny-audio/)** walks you through the full
 loop: how the encoder, projector, and decoder fit together (with real tensor shapes), training a
 model, evaluating it against commercial APIs, and publishing it with a live demo. You need Python,
-the command line, and git. The course trains the smaller `stage_1` recipe, not the published model,
-so your WER will be higher than the table above.
+the command line, and git. The course run trains on far less data than the published model, so your
+WER will be higher than the table above.
 
 ## Contributing
 

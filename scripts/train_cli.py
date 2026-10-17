@@ -4,8 +4,9 @@
 Each recipe is a `@hydra.main` script that parses its own argv, so these
 commands do not re-declare its config: everything after the recipe name is
 handed to `python -m <module>` untouched, exactly as `ta runpod` runs it on a
-pod. `--experiment/-e` is the one convenience, spelling the preset override
-(`+experiments=<name>` from configs/experiments/).
+pod. With no arguments it trains the default config (configs/config.yaml).
+`--experiment/-e` is the one convenience, spelling the override for an
+optional preset you add under configs/experiments/ (`+experiments=<name>`).
 """
 
 import subprocess
@@ -24,7 +25,7 @@ app = typer.Typer(
 # (`--cfg job`, `--multirun`) instead of rejecting them as unknown options.
 _PASSTHROUGH = {"allow_extra_args": True, "ignore_unknown_options": True}
 
-EXPERIMENT_HELP = "Preset from configs/experiments/ (adds the +experiments override)"
+EXPERIMENT_HELP = "Optional preset from configs/experiments/ (adds the +experiments override)"
 
 
 @app.callback()
@@ -48,5 +49,5 @@ def asr_cmd(
         str | None, typer.Option("--experiment", "-e", help=EXPERIMENT_HELP)
     ] = None,
 ) -> None:
-    """Encoder + projector + LLM ASR (scripts/train.py, configs/experiments/)."""
+    """Encoder + projector + LLM ASR (scripts/train.py, configs/config.yaml)."""
     _run("scripts.train", "experiments", experiment, ctx.args)

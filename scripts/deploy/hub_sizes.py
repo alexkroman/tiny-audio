@@ -108,21 +108,14 @@ def vocab_table_params(text_cfg: object) -> dict[str, int]:
     """Per-token lookup-table sizes for a decoder, computed from its config.
 
     These can be frozen independently of the rest of the decoder
-    (`freeze_text_embed_tokens`), and on Gemma 4 they are the majority of the
-    checkpoint -- so counting them as trainable overstates AdamW state badly.
-    Empty entries are omitted, so decoders without a per-layer table simply
-    don't report one.
+    (`freeze_text_embed_tokens`), so counting them as trainable overstates
+    AdamW state. Empty when the config does not give both dimensions.
     """
     tables: dict[str, int] = {}
     vocab = int(getattr(text_cfg, "vocab_size", 0) or 0)
     hidden = int(getattr(text_cfg, "hidden_size", 0) or 0)
     if vocab and hidden:
         tables["embed_tokens"] = vocab * hidden
-    ple_vocab = int(getattr(text_cfg, "vocab_size_per_layer_input", 0) or 0)
-    ple_hidden = int(getattr(text_cfg, "hidden_size_per_layer_input", 0) or 0)
-    layers = int(getattr(text_cfg, "num_hidden_layers", 0) or 0)
-    if ple_vocab and ple_hidden and layers:
-        tables["embed_tokens_per_layer"] = ple_vocab * layers * ple_hidden
     return tables
 
 

@@ -2,7 +2,7 @@
 
 Everything here builds `ASRConfig` from inline `audio_config` / `text_config`
 dicts, so no test touches the network. The auto-detection helpers
-(`native_audio_token`, `is_time_major_encoder`) and the conv-length formula are
+(`is_time_major_encoder`) and the conv-length formula are
 pure functions and are exercised directly.
 """
 
@@ -18,7 +18,6 @@ from tiny_audio.asr_config import (
     ASRConfig,
     compute_encoder_output_length,
     is_time_major_encoder,
-    native_audio_token,
 )
 
 # Minimal sub-configs: enough for `AutoConfig.for_model(model_type)` to
@@ -41,24 +40,6 @@ def make_config(**overrides: Any) -> ASRConfig:
     overrides.setdefault("audio_config", dict(AUDIO_CFG))
     overrides.setdefault("text_config", dict(TEXT_CFG))
     return ASRConfig(**overrides)
-
-
-class TestNativeAudioToken:
-    """Decoders with a pretrained audio placeholder reuse it."""
-
-    @pytest.mark.parametrize(
-        ("text_model_id", "expected"),
-        [
-            ("google/gemma-4-e2b-it", "<|audio|>"),
-            ("Google/GEMMA-4-E4B", "<|audio|>"),
-            ("Qwen/Qwen3-0.6B", None),
-            ("HuggingFaceTB/SmolLM2-135M-Instruct", None),
-            ("", None),
-            (None, None),
-        ],
-    )
-    def test_lookup(self, text_model_id: str | None, expected: str | None) -> None:
-        assert native_audio_token(text_model_id) == expected
 
 
 class TestIsTimeMajorEncoder:
@@ -109,23 +90,19 @@ class TestComputeEncoderOutputLength:
 class TestASRConfigAutoDetection:
     """Encoder-layout flags follow `audio_model_id` unless set explicitly."""
 
-    def test_whisper_is_channel_major_without_encoder_mask(self) -> None:
+    def test_whisper_has_no_encoder_mask(self) -> None:
         cfg = make_config(audio_model_id="openai/whisper-tiny")
-        assert cfg.audio_features_time_major is False
         assert cfg.encoder_attention_mask is False
 
-    def test_granite_is_time_major_with_encoder_mask(self) -> None:
+    def test_granite_has_encoder_mask(self) -> None:
         cfg = make_config(audio_model_id="ibm-granite/granite-speech-3.3-2b")
-        assert cfg.audio_features_time_major is True
         assert cfg.encoder_attention_mask is True
 
-    def test_explicit_flags_override_detection(self) -> None:
+    def test_explicit_flag_overrides_detection(self) -> None:
         cfg = make_config(
             audio_model_id="ibm-granite/granite-speech-3.3-2b",
-            audio_features_time_major=False,
             encoder_attention_mask=False,
         )
-        assert cfg.audio_features_time_major is False
         assert cfg.encoder_attention_mask is False
 
     def test_default_conv_layers(self) -> None:
@@ -137,17 +114,13 @@ class TestASRConfigAutoDetection:
 
 
 class TestASRConfigAudioToken:
-    """The placeholder token defaults to the decoder's native one when it has one."""
+    """The placeholder token defaults to "<audio>"."""
 
-    def test_qwen_gets_generic_token(self) -> None:
+    def test_default_token(self) -> None:
         assert make_config(text_model_id="Qwen/Qwen3-0.6B").audio_token == "<audio>"
 
-    def test_gemma_reuses_native_token(self) -> None:
-        assert make_config(text_model_id="google/gemma-4-e2b-it").audio_token == "<|audio|>"
-
     def test_explicit_token_wins(self) -> None:
-        cfg = make_config(text_model_id="google/gemma-4-e2b-it", audio_token="<snd>")
-        assert cfg.audio_token == "<snd>"
+        assert make_config(audio_token="<snd>").audio_token == "<snd>"
 
 
 class TestASRConfigDefaults:
@@ -194,13 +167,12 @@ class TestASRConfigDefaults:
     def test_dict_round_trip_preserves_derived_fields(self) -> None:
         cfg = make_config(
             audio_model_id="ibm-granite/granite-speech-3.3-2b",
-            text_model_id="google/gemma-4-e2b-it",
+            audio_token="<snd>",
             encoder_conv_layers=GRANITE_ENCODER_CONV_LAYERS,
             projector_dtype="float32",
         )
         restored = ASRConfig(**cfg.to_dict())
-        assert restored.audio_token == "<|audio|>"
-        assert restored.audio_features_time_major is True
+        assert restored.audio_token == "<snd>"
         assert restored.encoder_attention_mask is True
         assert [tuple(layer) for layer in restored.encoder_conv_layers] == [
             tuple(layer) for layer in GRANITE_ENCODER_CONV_LAYERS

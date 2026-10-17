@@ -131,18 +131,19 @@ def training_exports(wandb_run_id: str | None, wandb_resume: str | None) -> str:
 
 
 def build_training_script(
-    experiment: str,
+    experiment: str | None,
     hf_token: str,
     wandb_run_id: str | None,
     wandb_resume: str | None,
     extra_args: list[str],
 ) -> str:
     """Generate the training script content."""
-    extra_args_str = shlex.join(extra_args)
+    preset = [f"+experiments={experiment}"] if experiment else []
+    args_str = shlex.join([*preset, *extra_args])
     extra_exports = training_exports(wandb_run_id, wandb_resume)
     body = f"""
 cd /workspace
-python -m scripts.train {shlex.quote(f"+experiments={experiment}")} {extra_args_str}"""
+python -m scripts.train {args_str}"""
     return (
         script_preamble(hf_token, extras=extra_exports)
         + body

@@ -258,12 +258,10 @@ class ASRProcessor(ProcessorMixin):
     tokenizer: PreTrainedTokenizerBase
     feature_extractor_class = "AutoFeatureExtractor"
     tokenizer_class = "AutoTokenizer"
-    # Fallback only. The real value comes from `ASRConfig.audio_token`, which
-    # resolves to the decoder's native placeholder where it has one (Gemma 4's
-    # pretrained "<|audio|>") and to "<audio>" otherwise. Hardcoding the
-    # fallback here fails silently on a native-token decoder: "<audio>" was
-    # never added to that vocab, so it tokenizes into ordinary subwords and
-    # the prompt ends up with zero scatter positions for N audio embeddings.
+    # Fallback only. The real value comes from `ASRConfig.audio_token`; a
+    # config naming a different token must win, or "<audio>" -- never added to
+    # that vocab -- tokenizes into ordinary subwords and the prompt ends up
+    # with zero scatter positions for N audio embeddings.
     AUDIO_TOKEN = "<audio>"
     TRANSCRIBE_PROMPT = DEFAULT_TRANSCRIBE_PROMPT
 

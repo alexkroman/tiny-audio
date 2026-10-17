@@ -164,21 +164,14 @@ the corpus WER from each run's `metrics.txt`:
 grep -H "^wer:" outputs/*_loquacious/metrics.txt
 ```
 
-**Check the gradients.** If a run misbehaved, confirm that the parts you meant to train actually
-receive gradient (and the frozen ones don't):
-
-```bash
-poetry run ta debug check-gradient-flow $MODEL
-```
-
 ### Exercise 3: Check Your Hub Repo (5 min)
 
 Open `https://huggingface.co/$MODEL`. Training pushed each checkpoint there as it was saved, so the
 repo already contains:
 
-- `model.safetensors`: the trained weights only, meaning the projector and the fine-tuned decoder.
-  The frozen encoder is not stored; `config.json` names it and it is downloaded from its own repo at
-  load time
+- `model.safetensors`: the trained projector weights. The frozen encoder and decoder are not stored;
+  `config.json` names them and they are downloaded from their own repos at load time
+- `adapter_model.safetensors` and `adapter_config.json`: the decoder's LoRA adapters
 - `config.json`: the `ASRConfig`, including which encoder and decoder to load
 - `asr_modeling.py`, `projectors.py`, and the other custom code files that make
   `trust_remote_code=True` work
@@ -317,7 +310,7 @@ ______________________________________________________________________
 | High WER everywhere                      | Undertrained                             | Check the loss curve; train longer or on more data                                     |
 | High WER on one domain                   | Domain gap                               | Add that domain's data to your data config                                             |
 | High WER on accented speech              | Training data bias                       | Add CommonVoice or VoxPopuli to the mix                                                |
-| Empty or one-word outputs                | Audio too quiet, or the run collapsed    | Inspect the clips; run `ta debug check-gradient-flow`                                  |
+| Empty or one-word outputs                | Audio too quiet, or the run collapsed    | Inspect the clips and the W&B loss and grad-norm curves                                |
 | Runaway repetition                       | Decoder loop                             | The pipeline truncates repeats; check `max_new_tokens`; more training usually fixes it |
 | Great eval loss, bad WER                 | Mismatch between eval split and test set | Compare label formats; check normalization                                             |
 | Wrong casing or punctuation but good WER | Training labels lacked them              | Expected with LoquaciousSet; add cased, punctuated data                                |
@@ -335,12 +328,14 @@ You now have:
 
 **Where to go next:**
 
-- Retrain with a change and compare: a wider projector (`model.projector_hidden_dim=2048`), a
-  different stride (`model.projector_pool_stride=2`), or LoRA instead of full fine-tuning
+- Retrain with a change and compare: a narrower projector (`model.projector_hidden_dim=2048`), a
+  different stride (`model.projector_pool_stride=2`), or a different LoRA rank
+  (`model.lora_rank=32 model.lora_alpha=32`)
 - Add a second dataset to your data config, targeting the domain where you failed worst
 - Read `configs/data/multiasr.yaml` to see how the production mix was assembled, and why corpora
   were added and removed
-- Try a different encoder or decoder; `granite_qwen_frozen.yaml` shows how little changes
+- Try a different encoder or decoder (`model.audio_model_id`, `model.text_model_id`); the comments
+  in `configs/config.yaml` note what has to change with them, such as `model.encoder_conv_layers`
 
 ______________________________________________________________________
 

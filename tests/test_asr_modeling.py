@@ -4,36 +4,27 @@ import inspect
 import json
 from collections.abc import Sequence
 from pathlib import Path
-from types import ModuleType
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 from unittest.mock import MagicMock
 
 import pytest
 import torch
-from conftest import gemma_decode_loop_stub, make_asr_config, stub
+from conftest import make_asr_config
 from peft.tuners.lora import LoraLayer
 from torch.nn.modules.module import _IncompatibleKeys
 from transformers.modeling_utils import PreTrainedModel
 from transformers.models.whisper.modeling_whisper import WhisperEncoder
 
-import tiny_audio.asr_layers as layers_mod
 from tiny_audio.asr_attention import (
     FLASH_ATTENTION_MAX_HEAD_DIM,
     _max_attention_head_dim,
     resolve_attn_implementation,
-)
-from tiny_audio.asr_config import ASRConfig
-from tiny_audio.asr_layers import (
-    MPS_MAX_TENSOR_ELEMENTS,
-    chunk_oversized_embeddings,
-    mps_unsafe_parameters,
 )
 from tiny_audio.asr_modeling import (
     VOCAB_PAD_MULTIPLE,
     ASRModel,
     TensorNoRepeatNGram,
     _assert_projector_loaded,
-    _patch_gemma_decode_loop,
 )
 from tiny_audio.asr_processing import ASRProcessor
 from tiny_audio.projectors import MLPAudioProjector
@@ -42,17 +33,11 @@ if TYPE_CHECKING:
     from tiny_audio.asr_types import GenerativeDecoder
 
 
-class TestProjectorDispatch:
-    """_create_projector should dispatch on projector_type."""
+class TestProjector:
+    """_create_projector builds the MLP projector."""
 
-    def test_default_mlp_projector(self, base_asr_model: ASRModel) -> None:
+    def test_builds_mlp_projector(self, base_asr_model: ASRModel) -> None:
         assert isinstance(base_asr_model.projector, MLPAudioProjector)
-
-    def test_unknown_projector_type_raises(self) -> None:
-        # Dims are given, so _create_projector never touches the (stub) model.
-        bad_config = ASRConfig(projector_type="not_a_real_projector", encoder_dim=384, llm_dim=576)
-        with pytest.raises(ValueError, match="Unknown projector_type"):
-            ASRModel._create_projector(stub(), bad_config, torch.float32)
 
 
 class TestTokenizerInit:
@@ -564,42 +549,6 @@ class TestFlashAttentionHeadDimGuard:
         assert FLASH_ATTENTION_MAX_HEAD_DIM == 256
 
 
-class TestGemmaDecodeLoopPatch:
-    """Gemma 4's causal LM needs two things patched for audio generation to
-    work at all, and both failed in ways that only showed up at inference:
-    `per_layer_inputs` must be dropped after the first decode step, and the
-    wrapper must not hide `inputs_embeds` from signature introspection."""
-
-    def test_keeps_per_layer_inputs_on_first_step(self) -> None:
-        stub = gemma_decode_loop_stub()
-        _patch_gemma_decode_loop(stub)
-        out = stub.prepare_inputs_for_generation(
-            None, inputs_embeds="E", per_layer_inputs="PLE", is_first_iteration=True
-        )
-        assert out["per_layer_inputs"] == "PLE"
-
-    def test_drops_per_layer_inputs_on_later_steps(self) -> None:
-        # Step 2+ passes input_ids, and Gemma's forward raises if PLE comes
-        # along with it.
-
-        stub = gemma_decode_loop_stub()
-        _patch_gemma_decode_loop(stub)
-        out = stub.prepare_inputs_for_generation(
-            [[1]], per_layer_inputs="PLE", is_first_iteration=False
-        )
-        assert "per_layer_inputs" not in out
-
-    def test_wrapper_preserves_inputs_embeds_in_signature(self) -> None:
-        # generation._prepare_model_inputs gates inputs_embeds support on this
-        # exact introspection; a bare *args wrapper makes generate() reject
-        # inputs_embeds, which is the only way audio reaches the decoder.
-
-        stub = gemma_decode_loop_stub()
-        _patch_gemma_decode_loop(stub)
-        params = set(inspect.signature(stub.prepare_inputs_for_generation).parameters)
-        assert "inputs_embeds" in params
-
-
 class TestEosTokenResolution:
     """generation_config.eos_token_id must hold only real vocab entries."""
 
@@ -738,92 +687,6 @@ class TestStateDictTrainableModules:
         assert torch.allclose(actual, expected), "encoder updates lost on reload"
 
 
-class TestMpsUnsafeParameters:
-    """MPS indexes tensor storage with 32-bit offsets.
-
-    A gather into a parameter holding more than INT32_MAX elements wraps around
-    and returns the wrong rows with no error. Gemma 4 E2B's 2.35B-element
-    per-layer embedding table hits this, and the only symptom is fluent, wrong
-    output -- so the oversize has to be detected, never inferred from results.
-    """
-
-    def test_flags_a_parameter_past_int32(self) -> None:
-        # `meta` gives a parameter with real shape metadata and no allocation,
-        # so the test states the 2GB+ case without needing 2GB+.
-        module = torch.nn.Module()
-        module.big = torch.nn.Parameter(
-            torch.empty(MPS_MAX_TENSOR_ELEMENTS + 1, device="meta"), requires_grad=False
-        )
-        flagged = mps_unsafe_parameters(module)
-        assert [name for name, _ in flagged] == ["big"]
-        assert flagged[0][1] > MPS_MAX_TENSOR_ELEMENTS
-
-    def test_passes_a_parameter_at_the_limit(self) -> None:
-        module = torch.nn.Module()
-        module.ok = torch.nn.Parameter(
-            torch.empty(MPS_MAX_TENSOR_ELEMENTS, device="meta"), requires_grad=False
-        )
-        assert mps_unsafe_parameters(module) == []
-
-    def test_ordinary_model_is_safe(self, base_asr_model: ASRModel) -> None:
-        assert mps_unsafe_parameters(base_asr_model) == []
-
-
-class TestChunkedEmbedding:
-    """Splitting an oversized table must not change what it returns.
-
-    The MPS fix is a workaround, so the bar is exactness: chunked lookup has to
-    equal the single-tensor lookup element for element on every backend, or it
-    trades a loud bug for a quiet one.
-    """
-
-    def _forced(self, monkeypatch: pytest.MonkeyPatch, limit: int) -> ModuleType:
-        """Lower the element cap so a test-sized table counts as oversized."""
-        monkeypatch.setattr(layers_mod, "MPS_MAX_TENSOR_ELEMENTS", limit)
-        return layers_mod
-
-    def test_matches_the_unchunked_lookup(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        mod = self._forced(monkeypatch, 64)
-        torch.manual_seed(0)
-        emb = torch.nn.Embedding(50, 8)
-        ids = torch.tensor([[0, 7, 49, 23]])
-        expected = emb(ids)
-
-        chunked = mod.ChunkedEmbedding(emb)
-        assert len(chunked.chunks) > 1, "table should have been split"
-        assert torch.equal(chunked(ids), expected)
-
-    def test_preserves_the_gemma_embed_scale(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        mod = self._forced(monkeypatch, 64)
-        torch.manual_seed(0)
-        emb = torch.nn.Embedding(50, 8)
-        # Gemma4TextScaledWordEmbedding multiplies the lookup by embed_scale;
-        # dropping it would shrink every per-layer embedding by sqrt(dim).
-        emb.embed_scale = torch.tensor(16.0)
-        ids = torch.tensor([[1, 2, 3]])
-        expected = torch.nn.functional.embedding(ids, emb.weight) * 16.0
-        assert torch.equal(mod.ChunkedEmbedding(emb)(ids), expected)
-
-    def test_chunk_oversized_embeddings_reports_and_is_idempotent(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        mod = self._forced(monkeypatch, 64)
-        root = torch.nn.Module()
-        root.inner = torch.nn.Module()
-        root.inner.table = torch.nn.Embedding(50, 8)
-
-        assert mod.chunk_oversized_embeddings(root) == ["inner.table"]
-        assert isinstance(root.inner.table, mod.ChunkedEmbedding)
-        # Second pass finds nothing: ChunkedEmbedding is not an nn.Embedding.
-        assert mod.chunk_oversized_embeddings(root) == []
-
-    def test_leaves_small_tables_alone(self) -> None:
-        root = torch.nn.Module()
-        root.table = torch.nn.Embedding(10, 4)
-        assert chunk_oversized_embeddings(root) == []
-        assert isinstance(root.table, torch.nn.Embedding)
-
-
 class TestAttnImplementationOnMps:
     """MPS sdpa miscomputes cached single-token decode against a sliding-window mask.
 
@@ -943,17 +806,16 @@ class TestAssertProjectorLoaded:
             self._keys(
                 missing=["audio_tower.encoder.layers.0.weight", "language_model.norm.weight"]
             ),
-            "mlp",
         )
 
     def test_raises_on_missing_projector_key(self) -> None:
         """A projector left at random init must not load silently."""
         with pytest.raises(RuntimeError, match=r"projector\.linear_1\.weight"):
-            _assert_projector_loaded(self._keys(missing=["projector.linear_1.weight"]), "mlp")
+            _assert_projector_loaded(self._keys(missing=["projector.linear_1.weight"]))
 
     def test_raises_on_unexpected_projector_key(self) -> None:
         with pytest.raises(RuntimeError, match=r"projector\.stale\.weight"):
-            _assert_projector_loaded(self._keys(unexpected=["projector.stale.weight"]), "mlp")
+            _assert_projector_loaded(self._keys(unexpected=["projector.stale.weight"]))
 
     def test_legacy_layout_gets_an_actionable_hint(self) -> None:
         """norm_2 in the checkpoint means it predates the layout change."""
@@ -963,7 +825,6 @@ class TestAssertProjectorLoaded:
                     missing=["projector.input_norm.weight"],
                     unexpected=["projector.norm.weight", "projector.norm_2.weight"],
                 ),
-                "mlp",
             )
 
 

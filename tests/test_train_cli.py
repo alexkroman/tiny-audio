@@ -25,19 +25,19 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
 @pytest.mark.parametrize(
     ("recipe", "module", "preset"),
     [
-        ("asr", "scripts.train", "+experiments=stage_1"),
+        ("asr", "scripts.train", "+experiments=my_run"),
     ],
 )
 def test_experiment_flag_spells_each_trees_preset_key(
     calls: list[list[str]], recipe: str, module: str, preset: str
 ) -> None:
-    result = runner.invoke(app, ["train", recipe, "-e", "stage_1", "training.max_steps=5"])
+    result = runner.invoke(app, ["train", recipe, "-e", "my_run", "training.max_steps=5"])
     assert result.exit_code == 0, result.output
     assert calls == [[sys.executable, "-m", module, preset, "training.max_steps=5"]]
 
 
 def test_hydra_flags_and_plus_overrides_pass_through(calls: list[list[str]]) -> None:
-    args = ["+experiments=mps_smoke", "--cfg", "job", "hub_model_id=null"]
+    args = ["data=librispeech_dummy", "--cfg", "job", "hub_model_id=null"]
     result = runner.invoke(app, ["train", "asr", *args])
     assert result.exit_code == 0, result.output
     assert calls == [[sys.executable, "-m", "scripts.train", *args]]

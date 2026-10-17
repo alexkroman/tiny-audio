@@ -184,8 +184,8 @@ class Evaluator:
 
         `audio_field` / `text_field` override the column names given at
         construction, for the duration of this call onward. They exist so one
-        evaluator -- and therefore one loaded model, one Swift subprocess, one
-        authorized SFSpeechRecognizer -- can be reused across datasets whose
+        evaluator -- and therefore one loaded model or one authorized
+        SFSpeechRecognizer -- can be reused across datasets whose
         columns differ (`wav` vs `audio`, `text` vs `sentence` vs
         `transcript`). Omit both to keep the constructor's values.
 

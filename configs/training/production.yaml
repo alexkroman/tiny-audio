@@ -1,98 +1,131 @@
-# Production training configuration — joint from-scratch tiny-audio recipe.
+# Production training configuration -- the granite_qwen_frozen recipe.
 #
-# Projector (fresh init) + Qwen3-0.6B decoder train jointly from step 0;
-# encoder stays frozen via ASRModel default. Single-stage replacement for
-# the prior projector-only → joint two-stage recipe: audio→text via
-# Whisper-style encoders is a narrow enough semantic gap that LLaVA-style
-# projector warmup isn't load-bearing — the joint gradient signal is what
-# moves eval/loss after the first few hundred steps.
+# Encoder fully frozen, fresh MLP projector + LoRA on a frozen Qwen3.5-2B,
+# one pass over the data on one RTX PRO 6000 96GB.
 
 ---
 output_dir: ./outputs/production_model
 
-# Freeze policy: encoder stays frozen (ASRModel default). Projector and
-# decoder train jointly. embed_tokens is frozen on top of that: tying via
-# Qwen3's tie_word_embeddings=True would otherwise let common-token gradients
-# rewrite the lm_head while rare tokens (CJK / niche Unicode / code syntax)
-# get only the WD pull and drift uncontrolled. Audio embeddings flow through
-# the projector via masked_scatter, so freezing the text-vocab table doesn't
-# block the audio path. Matches Baichuan-Audio stage-2.
-freeze_language_model: false
+# Freeze policy. `freeze_audio_encoder: true` with
+# `encoder_trainable_top_layers: 0` is a total freeze -- 0 of 472.9M encoder
+# params train. Backward never enters the encoder, and _apply_train_mode keeps
+# the encoder's 16 BatchNorm1d modules in eval mode (the failure that once cost
+# 25 WER points on Earnings22 when the encoder was put in train mode at
+# construction). A frozen encoder also keeps its own CTC head valid as a
+# mid-run sanity check.
+#
+# Why frozen: a top-4 partial unfreeze random-walked to its weight-decay
+# equilibrium radius (0.95% drift, orthogonal successive displacements) and
+# learned nothing directional, while the projector and LoRA co-adapted to
+# that random endpoint.
+#
+# The decoder base is frozen too; only the LoRA adapters (model.use_lora)
+# train on it. embed_tokens stays frozen.
+freeze_language_model: true
 freeze_projector: false
 freeze_text_embed_tokens: true
+freeze_audio_encoder: true
+encoder_trainable_top_layers: 0
+encoder_trainable_post_projections: false
 
 # Optimizer
 optim: adamw_torch_fused
-# Asymmetric LR for joint from-scratch training (50× gap):
-#   - Projector (fresh init): 1e-3. Needs the high LR to converge quickly
-#     through warmup; observed ||grad_proj|| starts at ~9 and stabilizes
-#     around 0.4–0.6 once the bridge function is learned.
-#   - Decoder (Qwen3-0.6B base): 2e-5. With freeze_text_embed_tokens=true
-#     the tied embed/lm_head drift channel is closed entirely, so the LR
-#     can sit above the 1e-5 derived from earlier loquacious_plus probes
-#     without reintroducing rare-token embedding drift. attn/mlp/RMSNorm
-#     showed only 1–4% relative drift at step 11,650; tighten back toward
-#     1e-5 if attn/mlp drift accelerates past 8% by step ~20k.
+# Projector (fresh init) at 1e-3; LoRA adapters (the decoder group) at 1e-4.
 learning_rate: 1e-3
-decoder_learning_rate: 2e-5
+decoder_learning_rate: 1e-4
+# INERT under a total freeze: the encoder param group resolves to an empty
+# parameter list, which fused AdamW accepts. Kept so a future partial unfreeze
+# does not silently inherit `learning_rate` (1e-3) as its encoder LR.
+encoder_learning_rate: 1e-5
 
-# WD damps unbounded rare-token embedding drift under tie_word_embeddings=True.
-# 0.01 is LLaVA/Qwen-Audio/LLaMA standard. WD is correctly routed to non-norm
-# params only — ASRTrainer.create_optimizer adds Qwen3RMSNorm + LlamaRMSNorm
-# to the forbidden-layers set so RMSNorm gains land in the no-decay group
-# (HF's ALL_LAYERNORM_LAYERS only contains torch.nn.LayerNorm and misses
-# them silently).
-weight_decay: 0.01
-# Projector overrides base WD to 0. Rare-token drift (the reason base WD
-# exists) only affects the decoder's tied embedding matrix; pulling projector
-# linear weights toward zero would just bias the projection magnitude away
-# from whatever scale the LM actually wants.
-projector_weight_decay: 0.0
+# 0.0, and this key is effectively "the LoRA weight decay". scripts/train.py
+# sets `dec_wd = base_wd` -- there is no `decoder_weight_decay` knob the way
+# there is for the encoder and the projector -- and LoRA tensors are named
+# `language_model.base_model...`, so they route to the decoder group and
+# survive every no-decay filter. Standard LoRA practice is 0.0 (QLoRA, the HF
+# alignment handbook, PEFT's own examples), because decoupled decay hits BOTH
+# factors of B@A and the pull on the realised dW is roughly 2x nominal. This
+# makes alpha the only thing controlling adapter magnitude. If dW comes back
+# hot, the levers are decoder_learning_rate 1e-4 -> 5e-5 or wiring up a real
+# `decoder_weight_decay`.
+weight_decay: 0.0
+# The projector is the ONLY group carrying decay. ~15% shrink over this
+# schedule at lr 1e-3, and it is the only force opposing the projector's
+# output-scale growth (~48x embed_tokens RMS by step 13k on an earlier run,
+# then plateaued, with no measured loss cost).
+projector_weight_decay: 0.01
+encoder_weight_decay: 0.0
 
 # Adam eps: bf16 default 1e-8 can underflow in `1 / sqrt(v_hat + eps)` once
 # second moments get small. 1e-6 stays well within bf16's ~7-bit mantissa
 # range. Matches LLaMA / Mistral / Qwen pretraining convention for bf16.
 adam_epsilon: 1e-6
 
-# Empirically grounded against run xxy2327u (same recipe with
-# max_grad_norm=1.0): post-warmup grad-norm distribution over 184 logged
-# steps was median=1.18, p90=1.40, p95=1.50, p99=2.19, max=2.24 — so a 1.0
-# cap clipped 90% of post-warmup steps and scaled the median update down by
-# ~15%. 2.5 sits comfortably above the observed p99 while still catching
-# genuine blow-up spikes. Re-check on the next run.
-max_grad_norm: 2.5
+# 1.0, the HF Trainer default. Post-warmup grad norm on this stack ran median
+# 0.634 / max 2.268 at batch 96, so 1.0 clips the tail, not the median, and at
+# effective batch 64 the noisier per-step gradient is where a tighter cap earns
+# its keep. 1.0 is also what the surveyed LoRA recipes run (Trainer/TRL
+# default). Read the clip fraction off `grad_norm` over the first 2k
+# post-warmup steps: if the MEDIAN sits above 1.0 the cap is scaling the
+# signal, not the spikes.
+max_grad_norm: 1.0
 
-# Warmup tuned from prior run zot1zdu9: projector noise→signal transition
-# completes at step 488; loss plateaus by ~step 1500 and grad_norm settles
-# into the 1.5–2.5 operating range by step 2000. The 5000-step warmup in
-# that run had a flat 0.39 loss for its last 3500 steps. Under the new
-# (1e-3 / 2e-5) decoder LR the peak update is 2e-5 × 87 ≈ 1.7e-3, so the
-# long warmup-tail decoder protection is no longer load-bearing.
-warmup_steps: 2000
-
-# Cosine-with-min-lr: peak LR while projector is actively learning, decay
-# to 10% floor so late-stage tied-embedding rare-token refinement (which
-# carries the dominant late-stage decoder gradient) stays productive.
-# Plain cosine→0 would effectively halt that refinement in the final ~5%.
-lr_scheduler_type: cosine_with_min_lr
-lr_scheduler_kwargs:
-  min_lr_rate: 0.1
-
-# Label smoothing is routed through model.label_smoothing so it rides
-# liger's fused linear CE and auto-disables on eval. Keep HF Trainer's
-# label_smoothing_factor at 0 — >0 would double-smooth and materialize
-# the (B,T,V) fp32 log_softmax tensor (~15GB at B=50/V=152k) that capped
-# batch size on prior runs.
-label_smoothing_factor: 0.0
+# ~1.5% of the schedule and the modal published value for this architecture
+# class (Granite Speech 1000, Canary-Qwen 1000, SLAM-ASR 1000).
+warmup_steps: 1000
+# Plain cosine to ZERO. This is a recipe expected to reach the end of its
+# schedule rather than being cut off mid-descent, so annealing to zero lets the
+# run actually settle.
+lr_scheduler_type: cosine
 
 # Training
 max_steps: -1
-num_train_epochs: 2
-seed: 43
-per_device_train_batch_size: 100
-per_device_eval_batch_size: 100
+# ONE pass. `data.epoch_expansion` (configs/data/multiasr.yaml) stays 1; the
+# loader raises if both it and this are >1, because they compound.
+#
+# ~3.53M loader rows (multiasr, EdAcc's 6.2K added 2026-10-16) at effective
+# batch 64 is ~55k optimizer steps
+# without showing any row twice.
+num_train_epochs: 1
+seed: 44
+
+# 64 per device x 1 accumulation, sized for Qwen3.5-2B on an RTX PRO 6000
+# Blackwell 96GB (2026-10-16). This is exactly the shape the published 2B
+# model trained at (granite-qwen-frozen-4, from #99's 2B variant), so lr
+# 1e-3 / 1e-4 and max_grad_norm 1.0 mean what they meant there and the run
+# compares cleanly against it.
+#
+# MEASURED, not planned: W&B es1p5srq (2B, batch 64, A100 80GB) peaked at
+# 76.4 GiB (95.5% of the card, median 68.6); `ta runpod plan` predicted
+# 77.3. Peak is batch x the collator's 19.0s cap regardless of mix: batches
+# pad to their longest row, and a random 64-row draw nearly always contains
+# one near 19s. On the RTX PRO 6000 (~95 GiB usable) that is ~80%.
+#
+# Do NOT reuse 64 x 1 on an 80 GB H100: it reports ~79.6 GiB, which puts
+# the same peak at 96%, and the seeded data order means an OOM replays on
+# resume. Use 32 x 2 there (same effective batch, throughput cost only).
+# Step down BEFORE a run, not after an OOM: resuming at a new batch breaks
+# the step-indexed LR schedule and data skip.
+#
+# No gradient checkpointing. With the base frozen, backward is ~1x forward,
+# so recompute costs ~+50% per sample -- a worse trade than a smaller batch.
+#
+# 4B history (#90 -> 2026-10-16), kept for a future decoder swap: the 4B
+# stack needs ~2.09 GiB activations per sample (32 layers x 2560 hidden,
+# ~1.87x the 2B's 1.12) plus 10.9 GiB static; W&B rjid9zj6 (H100, batch 30)
+# peaked at 97.3% and the planner undershoots it by ~5%. It ran 28 x 2 on
+# an H100 and was planned at 32 x 2 on the RTX PRO 6000.
+per_device_train_batch_size: 64
+per_device_eval_batch_size: 64
+# 1: effective batch 64, the batch this recipe was tuned and measured at.
+# The frozen run showed samples, not optimizer steps, are the currency:
+# eval CE for y1tulo4j overlaid top4 (jscyrgkt) at matched samples despite
+# ~1.6x the steps.
 gradient_accumulation_steps: 1
 eval_accumulation_steps: 3
+# Deliberately false. HF's auto_find_batch_size halves
+# per_device_train_batch_size on OOM WITHOUT touching
+# gradient_accumulation_steps, so it silently changes the effective batch.
 auto_find_batch_size: false
 
 # Logging
@@ -116,7 +149,7 @@ greater_is_better: false
 
 # Hub
 push_to_hub: true
-hub_model_id: "mazesmazes/tiny-audio-next-multiasr"
+hub_model_id: "mazesmazes/tiny-audio-granite-qwen-frozen-nc"
 # `end`, not `every_save`: scripts/train.py's PushToHubCallback already pushes
 # on every save via ASRModel.push_to_hub, which is the push that matters -- it
 # ships preprocessor_config.json and the custom modeling code, which Trainer's
@@ -137,12 +170,9 @@ tf32: true
 # decompose_triton_kernel_wrapper_functional pass asserts on liger's wrapped
 # triton kernels (RMSNorm / SwiGLU / RoPE / fused-linear-CE), crashing the
 # compile step. liger's kernels don't need torch.compile to deliver their
-# wins — the fused linear CE (the load-bearing one for label_smoothing
-# memory) is invoked directly from Qwen3ForCausalLM.forward after
-# apply_liger_kernel_to_qwen3 patches it. Re-enable once liger v0.9+ ships
-# improved Inductor compat.
+# wins.
 torch_compile: false
-attn_implementation: flash_attention_2
+attn_implementation: sdpa
 
 # Load-bearing, and NOT the same knob as the decoder's training-time cache.
 # transformers' Trainer.__init__ does
@@ -160,9 +190,14 @@ attn_implementation: flash_attention_2
 use_cache: true
 
 # Data loading. EPYC 9355 has 32 cores / 64 threads; 16 workers + prefetch 8
-# keep up with batch_size=100 (ftfy + truecase label normalization is the
-# dominant per-row cost) while leaving cores for the main process, GPU sync,
-# tokenizer thread pool, and OS page cache.
+# keep up with the loader (ftfy + truecase label normalization is the dominant
+# per-row cost) while leaving cores for the main process, GPU sync, tokenizer
+# thread pool, and OS page cache.
+#
+# The remaining throughput lever is length-grouped batching: batches are drawn
+# at random from a 0.8-19.0s duration range and padded to the longest row, so
+# a large share of compute goes to padding. That is a loader change, not a
+# recipe change.
 dataloader_num_workers: 16
 dataloader_prefetch_factor: 8
 dataloader_pin_memory: true

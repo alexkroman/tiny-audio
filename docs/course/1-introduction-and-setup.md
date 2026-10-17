@@ -30,7 +30,7 @@ understands language, and train a small bridge between them.
 
 ```text
 Audio → Log-mel spectrogram → Encoder → Projector → Decoder → Text
-        (preprocessing)       (frozen)  (trained)   (fine-tuned)
+        (preprocessing)       (frozen)  (trained)   (frozen + LoRA)
 ```
 
 | Piece       | Role                | Job                                                              |
@@ -43,35 +43,35 @@ Audio → Log-mel spectrogram → Encoder → Projector → Decoder → Text
 **Log-mel spectrogram**: a fixed recipe, nothing learned. See
 [From Sound to a Spectrogram](#from-sound-to-a-spectrogram).
 
-**Encoder (GLM-ASR-Nano-2512, encoder only)**: a 32-layer Transformer that turns a spectrogram into
-one 1280-dimensional vector every 20 ms. It already knows what speech sounds like. We keep it
-frozen: its weights never change.
+**Encoder (Granite Speech 5.0 470M, `ibm-granite/granite-speech-5.0-470m-turboctc-nc`)**: a speech
+encoder that turns audio features into one 1024-dimensional vector every 80 ms (12.5 frames per
+second). It already knows what speech sounds like. We keep it frozen: its weights never change.
 
 **Projector (MLP)**: the bridge. It compresses the encoder's frames and maps them into the decoder's
 embedding space so they look like word embeddings. This is the one component we build from scratch.
 
-**Decoder (Qwen3-0.6B)**: a language model. Given the projected audio "tokens" and a short text
-prompt, it writes the transcript, handling spelling, punctuation, and grammar. We fine-tune it
-gently so it learns to read the projector's output.
+**Decoder (Qwen3.5-2B)**: a language model. Given the projected audio "tokens" and a short text
+prompt, it writes the transcript, handling spelling, punctuation, and grammar. Its own weights stay
+frozen; small LoRA adapters on every linear layer learn to read the projector's output.
 
 ### Why This Works
 
-| Component          | Params | During training      | Learning rate |
-| ------------------ | ------ | -------------------- | ------------- |
-| GLM-ASR encoder    | ~635M  | Frozen               | none          |
-| MLP projector      | ~6.3M  | Trained from scratch | 1e-3          |
-| Qwen3-0.6B decoder | ~600M  | Fine-tuned           | 2e-5          |
+| Component                  | Params       | During training                 | Learning rate |
+| -------------------------- | ------------ | ------------------------------- | ------------- |
+| Granite Speech encoder     | ~473M        | Frozen                          | none          |
+| MLP projector              | ~12.6M       | Trained from scratch            | 1e-3          |
+| Qwen3.5-2B decoder (+LoRA) | ~1.9B + ~67M | Base frozen, LoRA r=64 adapters | 1e-4          |
 
 - The encoder was already trained for ASR, so its features carry nearly everything we need.
 - The gap between "audio features" and "text embeddings" is narrow enough that a two-layer MLP can
   bridge it.
-- The decoder's learning rate is 50x lower than the projector's. It nudges, it doesn't relearn. That
-  keeps Qwen3's language knowledge intact while it adapts to the new input.
+- The decoder's base weights never change, so Qwen3.5's language knowledge stays intact. The LoRA
+  adapters (rank 64, alpha 64, on all linear layers) train at 1e-4, 10x below the projector, and
+  learn the adjustment the decoder needs to read audio tokens. About 3% of the model trains.
 
-An earlier version of this recipe froze the decoder too and trained only the projector. The current
-default trains both jointly because the joint gradient is what keeps improving the loss after the
-first few hundred steps. You can still run the frozen-decoder variant with one flag
-(`training.freeze_language_model=true`).
+The other variants are one flag away: `training.use_lora=false` trains the projector alone, and
+`training.freeze_language_model=false training.use_lora=false` fully fine-tunes the decoder (far
+more memory than the default sizing assumes; run `ta runpod plan` first).
 
 ### From Sound to a Spectrogram
 
@@ -96,14 +96,15 @@ That is no coincidence: speech models borrowed their tools from image models.
 
 ### What the Encoder Produces
 
-![Encoder turning each 20 ms spectrogram slice into one vector](images/encoder.png)
+![Encoder turning each spectrogram slice into one vector](images/encoder.png)
 
-For every 20 ms slice (two spectrogram frames), the encoder emits one **vector**: a list of 1280
-numbers. That length is the model's *width*: every layer inside the encoder reads a list of 1280 and
-writes a list of 1280, so the output vector is the model's working unit, not something bolted on at
-the end.
+For every 80 ms slice (eight spectrogram frames), the Granite encoder emits one **vector**: a list
+of 1024 numbers. That length is the model's *width*: every layer inside the encoder reads a list of
+1024 and writes a list of 1024, so the output vector is the model's working unit, not something
+bolted on at the end. (The picture shows a faster encoder that emits one vector per 20 ms; the idea
+is the same.)
 
-No single number means anything on its own; the pattern across all 1280 is a fingerprint of that
+No single number means anything on its own; the pattern across all 1024 is a fingerprint of that
 moment of sound. The useful property is in the right-hand panel: the same speech sound gets nearly
 the same vector whoever says it and whatever the microphone, while different sounds get different
 vectors. The encoder has learned to ignore *who* and *how*, and keep *what*.
@@ -112,34 +113,52 @@ vectors. The encoder has learned to ignore *who* and *how*, and keep *what*.
 
 ![One layer as a grid of weights, and the model as a stack of layers](images/weights.png)
 
-"635M parameters" and "1280-dimensional vectors" are different numbers, and it's worth being clear
+"473M parameters" and "1024-dimensional vectors" are different numbers, and it's worth being clear
 about why.
 
-- **A weight is a learned number.** A layer holds grids of them, each roughly 1280 × 1280.
+- **A weight is a learned number.** A layer holds grids of them, each roughly 1024 × 1024.
 - **Each row of a grid is a recipe.** To make one output number, multiply every input number by the
   weight in that row and add them up. Do that for every row and you have a new vector. This is the
   matrix multiplication from high-school algebra, just enormous: `nn.Linear` in PyTorch.
-- **Layers stack.** The encoder has 32 layers, each with several grids. Every vector passes through
+- **Layers stack.** The encoder has 16 blocks, each with several grids. Every vector passes through
   all of them in order; the output of layer 1 is the input to layer 2.
 
-One 1280 × 1280 grid is about 1.6M weights. Several grids per layer, 32 layers, and you reach
-hundreds of millions. The vectors stay 1280 numbers wide the whole way; there are just a lot of
-grids to pass through. Training is how weights get their values. Once trained (or frozen, like our
-encoder) they are the same for every clip. **Weights stay; vectors flow.**
+One 1024 × 1024 grid is about 1M weights. Several grids per block, 16 blocks, and you reach hundreds
+of millions. The vectors stay 1024 numbers wide the whole way; there are just a lot of grids to pass
+through. Training is how weights get their values. Once trained (or frozen, like our encoder) they
+are the same for every clip. **Weights stay; vectors flow.**
 
 ### How the Projector Works
 
 ![Projector: stack 4 encoder frames, then a small network makes audio tokens](images/projector.png)
 
 The encoder and decoder were trained separately, so their vectors don't match: different lengths
-(1280 vs 1024) and different number ranges. The projector is the adapter. It makes the sequence
-**fewer** (stack 4 neighbors), **reshapes** each stacked vector to the decoder's width with a small
-learned network, and **scales** it to the magnitude the decoder expects. Each resulting **audio
-token** covers about 80 ms of sound, roughly a syllable: not a word, not a letter, but a chunk of
-sound written in the decoder's language of numbers. Nobody designed what an audio token means;
-training settles on whatever packing helps the decoder write the right words.
+(1024 vs 2048 in the default config) and different number ranges. The projector is the adapter. It
+**reshapes** each encoder vector to the decoder's width with a small learned network and **scales**
+it to the magnitude the decoder expects; with a faster encoder it also makes the sequence **fewer**
+by stacking neighbors, as the picture shows. Each resulting **audio token** covers about 80 ms of
+sound, roughly a syllable: not a word, not a letter, but a chunk of sound written in the decoder's
+language of numbers. Nobody designed what an audio token means; training settles on whatever packing
+helps the decoder write the right words.
 
-Follow a 10-second clip through the pipeline:
+With the default config, a 10-second clip flows through like this:
+
+| Stage            | Rate             | Shape for 10 s | Notes                                        |
+| ---------------- | ---------------- | -------------- | -------------------------------------------- |
+| Waveform         | 16,000 samples/s | 160,000        | Resampled to 16 kHz if needed                |
+| Encoder output   | 12.5 frames/s    | 125 × 1024     | Granite's conv layers subsample the features |
+| Projector output | 12.5 tokens/s    | 125 × 2048     | `projector_pool_stride: 1`, so no stacking   |
+
+```text
+RMSNorm(1024) → Linear(1024 → 4096) → GELU → Linear(4096 → 2048) → × fixed output scale
+```
+
+That is about 12.6M parameters, and 2048 is Qwen3.5-2B's embedding size.
+
+The default doesn't stack frames, because Granite already emits one frame per ~80 ms. Frame stacking
+is easier to see with an encoder that runs faster, so the walkthrough below uses the earlier
+GLM-ASR-Nano + Qwen3-0.6B pairing (50 encoder frames/s, `k = 4`). The idea is the same for any
+encoder; only the numbers change.
 
 | Stage                        | Rate             | Shape for 10 s | Notes                                |
 | ---------------------------- | ---------------- | -------------- | ------------------------------------ |
@@ -172,16 +191,16 @@ Two ideas to remember:
    word embeddings. Without it the audio tokens arrive about 13x too "loud" and the decoder's layers
    barely modify them.
 
-Parameter count with the defaults: about 5.2M in the first linear layer, about 1.05M in the second,
-plus a 5120-element norm. Roughly 6.3M total.
+Parameter count for that GLM-ASR + Qwen3-0.6B projector: about 5.2M in the first linear layer, about
+1.05M in the second, plus a 5120-element norm. Roughly 6.3M total, against ~12.6M for the default.
 
 ### How the Decoder Sees Audio
 
 ![Audio tokens and word tokens as same-size vectors feeding the decoder](images/decoder.png)
 
 A language model never sees words either. Text is first split into **tokens** (a word or part of
-one), and each token ID is looked up in the **embedding table** (`embed_tokens`, 151,936 rows × 1024
-columns for Qwen3-0.6B). What the first layer actually receives is a row of 1024-number vectors. The
+one), and each token ID is looked up in the **embedding table** (`embed_tokens`, 248,320 rows × 2048
+columns for Qwen3.5-2B). What the first layer actually receives is a row of 2048-number vectors. The
 projector emits vectors of exactly that width, so audio tokens slot into the same row as word
 tokens, and the decoder has no way to tell them apart.
 
@@ -202,8 +221,8 @@ handful happen to be text. It answers one token at a time, the way it answers an
 spelling, punctuation, and grammar it already knows. Training loss is computed only on the assistant
 turn.
 
-This is why the chat template matters: Qwen3-0.6B ships with one, and the training collator depends
-on it.
+This is why the chat template matters: Qwen3.5 ships with one, and the training collator depends on
+it.
 
 ______________________________________________________________________
 
@@ -302,7 +321,6 @@ The `ta` command (short for `tiny-audio`) groups every tool in the repo:
 ```bash
 poetry run ta --help            # all command groups
 poetry run ta eval --help       # evaluation options
-poetry run ta debug --help      # gradient-flow check
 poetry run ta runpod --help     # cloud training (Class 2)
 poetry run ta dev --help        # lint, test, format
 ```
@@ -321,8 +339,8 @@ poetry run ta dev test
 
 `docs/course/examples/trace_data.py` pushes one LibriSpeech clip through the published model and
 records the tensor at every stage: waveform, spectrogram, encoder output, projector output. It also
-finds, for each projected audio token, the nearest real word embedding in Qwen3's vocabulary, which
-shows how "text-like" the projector's output has become.
+finds, for each projected audio token, the nearest real word embedding in the decoder's vocabulary,
+which shows how "text-like" the projector's output has become.
 
 ```bash
 poetry run python docs/course/examples/trace_data.py
@@ -354,36 +372,33 @@ Worth reading in this order: the `MLPAudioProjector` class, then `ASRModel.forwa
 
 ### Configuration System
 
-Training is configured with [Hydra](https://hydra.cc/). The main file is `configs/config.yaml`.
-Experiments layer overrides on top of it, and you can override any single value on the command line
-with `key=value` syntax (not `--key value`):
+Training is configured with [Hydra](https://hydra.cc/). The main file is `configs/config.yaml`, and
+on its own it is the full recipe: no experiment preset is needed. You can override any single value
+on the command line with `key=value` syntax (not `--key value`), or put a set of overrides in your
+own `configs/experiments/<name>.yaml` and add `+experiments=<name>` (Class 2 does this):
 
 ```bash
-# Run the production recipe
-poetry run python scripts/train.py +experiments=stage_1
+# Run the default recipe
+poetry run python scripts/train.py
 
 # Same recipe, different projector width
-poetry run python scripts/train.py +experiments=stage_1 model.projector_hidden_dim=2048
-
-# Local smoke test on a tiny dataset
-poetry run python scripts/train.py +experiments=mps_smoke
+poetry run python scripts/train.py model.projector_hidden_dim=2048
 ```
 
 ```text
 configs/
-├── config.yaml               # Model defaults: GLM-ASR encoder, Qwen3-0.6B, MLP projector
+├── config.yaml               # Model defaults: Granite Speech encoder, Qwen3.5-2B + LoRA, MLP projector
 ├── training/production.yaml  # Trainer defaults: LRs, batch size, schedule, checkpointing
-├── data/
-│   ├── multiasr.yaml         # Production mix: 10 corpora, ~3M clips
-│   └── librispeech_dummy.yaml  # 73 clips, for smoke tests
-└── experiments/
-    ├── stage_1.yaml          # Production recipe (frozen encoder, joint projector + decoder)
-    ├── granite_qwen_frozen.yaml  # Published model: Granite Speech encoder + LoRA on Qwen3.5
-    └── mps_smoke.yaml        # 10 steps on a laptop
+└── data/
+    ├── multiasr.yaml         # Production mix: 10 corpora, ~3M clips
+    └── librispeech_dummy.yaml  # 73 clips, for quick pipeline checks
 ```
 
+No experiment presets ship in the repo; `configs/experiments/` holds only the files you create.
+
 The comments in these YAML files are unusually detailed. They record why each value is what it is
-and which experiment changed it. Read `configs/experiments/stage_1.yaml` before Class 2.
+and which experiment changed it. Read `configs/config.yaml` and `configs/training/production.yaml`
+before Class 2.
 
 ______________________________________________________________________
 
@@ -405,10 +420,11 @@ ______________________________________________________________________
 
 1. **Two skills, two parts**: the encoder is the ear, the decoder is the language expert. Most
    errors are a hearing mistake or a language mistake, and each lives in one part.
-1. **Architecture**: frozen encoder, projector trained from scratch, decoder fine-tuned gently.
+1. **Architecture**: frozen encoder, projector trained from scratch, frozen decoder with LoRA
+   adapters.
 1. **Weights stay, vectors flow**: parameter count measures the grids of weights, not the width of
    the vectors passing through them.
-1. **Shapes**: 50 encoder frames/s at 1280 dims become 12.5 audio tokens/s at 1024 dims.
+1. **Shapes**: 12.5 encoder frames/s at 1024 dims become 12.5 audio tokens/s at 2048 dims.
 1. **The trick**: the decoder sees a chat whose user turn is audio tokens plus a prompt.
 1. **Tools**: the `ta` CLI wraps evaluation, analysis, training, and deployment.
 
@@ -422,7 +438,7 @@ You should leave this class with:
 
 To prepare:
 
-- [ ] Read the comment block at the top of `configs/experiments/stage_1.yaml`
+- [ ] Read the comment blocks in `configs/config.yaml` and `configs/training/production.yaml`
 - [ ] Create a RunPod account and add credit for a few GPU-hours
 - [ ] Create a Hugging Face **write** token (Settings → Access Tokens); Class 2 pushes checkpoints
   to your account

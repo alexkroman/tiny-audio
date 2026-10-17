@@ -31,7 +31,6 @@ SUBCOMMANDS: dict[str, str] = {
     "deploy": "scripts.deploy.hf_space",
     "push": "scripts.hub.push",
     "runpod": "scripts.deploy.runpod",
-    "debug": "scripts.debug.cli",
     "demo": "demo.app",
     "serve": "scripts.serve",
     "bench": "scripts.bench_serve",

@@ -80,14 +80,6 @@ def test_lora_named_targets_match_module_suffix(fake_metadata: list[str]) -> Non
 def test_vocab_table_params_reports_only_present_tables() -> None:
     plain = SimpleNamespace(vocab_size=100, hidden_size=8)
     assert vocab_table_params(plain) == {"embed_tokens": 800}
-    gemma = SimpleNamespace(
-        vocab_size=100,
-        hidden_size=8,
-        vocab_size_per_layer_input=50,
-        hidden_size_per_layer_input=2,
-        num_hidden_layers=3,
-    )
-    assert vocab_table_params(gemma) == {"embed_tokens": 800, "embed_tokens_per_layer": 300}
     assert vocab_table_params(SimpleNamespace()) == {}
 
 

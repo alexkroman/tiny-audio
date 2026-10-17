@@ -17,19 +17,18 @@ print(pipe("audio.wav")["text"])
 git clone https://github.com/alexkroman/tiny-audio.git && cd tiny-audio
 poetry install
 
-# Smoke test: 10 steps on a 73-clip LibriSpeech sample, runs on CPU or Apple Silicon
-poetry run python scripts/train.py +experiments=mps_smoke
-
 # Size the full run (VRAM, disk, pod command) before renting a GPU
-poetry run ta runpod plan -e stage_1
+poetry run ta runpod plan
 
-# Full training: frozen GLM-ASR encoder + MLP projector + Qwen3-0.6B decoder, jointly
-poetry run python scripts/train.py +experiments=stage_1
+# Full training (the default config): frozen Granite Speech 470M encoder + MLP projector
+# + frozen Qwen3.5-2B decoder with LoRA adapters
+poetry run python scripts/train.py
 ```
 
-The `stage_1` recipe trains on the `multiasr` mix (about 3M utterances across ten corpora, over a
-terabyte on disk) at batch size 100, which needs an 80 GB GPU. See
-[Training on RunPod](../README.md#training-on-runpod) for the remote workflow.
+The default recipe (`configs/config.yaml` + `configs/training/production.yaml`) trains on the
+`multiasr` mix (about 3M utterances across ten corpora, over a terabyte on disk) at batch 64, sized
+for one 80 GB GPU. There is no laptop-sized recipe; run `ta runpod plan` to size any config before
+renting hardware. See [Training on RunPod](../README.md#training-on-runpod) for the remote workflow.
 
 ## Evaluate
 

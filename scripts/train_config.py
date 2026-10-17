@@ -82,23 +82,18 @@ class ModelConfig:
     # list of (padding, kernel_size, stride) triples
     encoder_conv_layers: list[list[int]] | None = None
     audio_sample_rate: int | None = None
-    audio_features_time_major: bool | None = None
     encoder_attention_mask: bool | None = None
     audio_token: str | None = None
     projector_dtype: str | None = None
     encoder_dtype: str | None = None
     projector_pool_stride: int | None = None
     projector_hidden_dim: int | None = None
-    projector_type: str | None = None
-    label_smoothing: float | None = None
     use_lora: bool | None = None
     lora_rank: int | None = None
     lora_alpha: int | None = None
     lora_dropout: float | None = None
     # "all-linear" or an explicit list of module names
     lora_target_modules: Any = None
-    lora_rank_pattern: dict[str, int] | None = None
-    lora_alpha_pattern: dict[str, int] | None = None
     inference_lead_in_seconds: float | None = None
     freeze_projector: bool | None = None
     freeze_language_model: bool | None = None
@@ -106,10 +101,6 @@ class ModelConfig:
     freeze_audio_encoder: bool | None = None
     encoder_trainable_top_layers: int | None = None
     encoder_trainable_post_projections: bool | None = None
-    apply_spec_augment: bool | None = None
-    mask_time_prob: float | None = None
-    mask_time_length: int | None = None
-    mask_time_min_masks: int | None = None
     max_new_tokens: int | None = None
     use_cache: bool | None = None
     no_repeat_ngram_size: int | None = None
@@ -135,8 +126,6 @@ class TrainingConfig:
     lora_alpha: int | None = None
     lora_dropout: float | None = None
     lora_target_modules: Any = None
-    lora_rank_pattern: dict[str, int] | None = None
-    lora_alpha_pattern: dict[str, int] | None = None
     freeze_projector: bool | None = None
     freeze_language_model: bool | None = None
     freeze_text_embed_tokens: bool | None = None

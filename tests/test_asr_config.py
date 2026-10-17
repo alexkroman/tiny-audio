@@ -12,9 +12,6 @@ from tiny_audio.asr_config import ASRConfig
 class TestASRConfigDefaults:
     """ASRConfig with no overrides should produce a valid config."""
 
-    def test_default_projector_type_is_mlp(self, base_asr_config: ASRConfig) -> None:
-        assert base_asr_config.projector_type == "mlp"
-
     def test_default_lora_disabled(self, base_asr_config: ASRConfig) -> None:
         assert base_asr_config.use_lora is False
 
@@ -43,7 +40,6 @@ class TestASRConfigSerialization:
         cfg2 = ASRConfig(**d)
         assert cfg2.audio_model_id == base_asr_config.audio_model_id
         assert cfg2.text_model_id == base_asr_config.text_model_id
-        assert cfg2.projector_type == base_asr_config.projector_type
 
     def test_to_json_string_is_valid_json(self, base_asr_config: ASRConfig) -> None:
         s = base_asr_config.to_json_string()
@@ -63,7 +59,6 @@ class TestASRConfigSerialization:
         loaded = ASRConfig.from_pretrained(save_dir)
         assert loaded.audio_model_id == base_asr_config.audio_model_id
         assert loaded.text_model_id == base_asr_config.text_model_id
-        assert loaded.projector_type == base_asr_config.projector_type
         assert loaded.use_lora == base_asr_config.use_lora
 
 
@@ -79,10 +74,6 @@ class TestASRConfigOverrides:
         assert cfg.use_lora is True
         assert cfg.lora_rank == 16
         assert cfg.lora_alpha == 32
-
-    def test_custom_projector_type(self) -> None:
-        cfg = make_asr_config(projector_type="mosa")
-        assert cfg.projector_type == "mosa"
 
 
 class TestAutoConfigRegistration:

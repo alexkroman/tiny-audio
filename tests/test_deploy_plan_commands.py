@@ -31,7 +31,7 @@ from scripts.deploy.pods import (
     provision_serve_command,
 )
 from tiny_audio.asr_config import ASRConfig
-from tiny_audio.projectors import PROJECTOR_CLASSES
+from tiny_audio.projectors import MLPAudioProjector
 
 IMAGE = "img:1"
 
@@ -361,12 +361,9 @@ AUDIO_ID = "zai-org/GLM-ASR-Nano-2512"
 TEXT_ID = "Qwen/Qwen3-0.6B"
 
 
-@pytest.mark.parametrize("projector_type", sorted(PROJECTOR_CLASSES))
-def test_projector_meta_count_matches_materialized(projector_type: str) -> None:
+def test_projector_meta_count_matches_materialized() -> None:
     """_add_projector counts on the meta device; the count must equal a real build."""
-    model = OmegaConf.create(
-        {"projector_type": projector_type, "projector_pool_stride": 4, "projector_hidden_dim": 96}
-    )
+    model = OmegaConf.create({"projector_pool_stride": 4, "projector_hidden_dim": 96})
     plan = Plan()
     plan_module._add_projector(plan, model, 64, 80, AUDIO_ID, TEXT_ID)
 
@@ -375,10 +372,9 @@ def test_projector_meta_count_matches_materialized(projector_type: str) -> None:
         text_model_id=TEXT_ID,
         encoder_dim=64,
         llm_dim=80,
-        projector_type=projector_type,
         projector_pool_stride=4,
         projector_hidden_dim=96,
     )
-    real = PROJECTOR_CLASSES[projector_type](shim)
+    real = MLPAudioProjector(shim)
     assert all(p.device.type == "cpu" for p in real.parameters())
     assert plan.components[-1].params == sum(p.numel() for p in real.parameters()) > 0

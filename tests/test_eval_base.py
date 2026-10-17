@@ -189,7 +189,7 @@ class TestEvaluatorReuseAcrossDatasets:
     """One evaluator instance must serve a whole `ta eval -d a -d b` sweep.
 
     `scripts/eval/cli._build_evaluator` now runs once before the dataset
-    loop, so the model / Swift subprocess / API client is set up a single
+    loop, so the model / API client is set up a single
     time. That only works if per-dataset state travels through `evaluate`.
     """
 

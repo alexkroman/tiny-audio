@@ -34,7 +34,7 @@ HostArg = Annotated[str, typer.Argument(help="RunPod instance IP address or host
 PortArg = Annotated[int, typer.Argument(help="SSH port for the RunPod instance")]
 
 # Shared option help, so sibling commands describe the same flag the same way.
-EXPERIMENT_HELP = "Experiment config under configs/experiments/ to run"
+EXPERIMENT_HELP = "Optional preset under configs/experiments/ to layer on the default config"
 SEQ_LEN_HELP = "Assumed tokens per sample when sizing memory"
 IMAGE_HELP = "RunPod container image"
 OVERRIDES_HELP = "Extra Hydra overrides (key=value)"
@@ -312,8 +312,8 @@ def install_dependencies(conn: Connection) -> None:
 @app.command(name="plan")
 def plan(
     experiment: Annotated[
-        str, typer.Option("--experiment", "-e", help=EXPERIMENT_HELP)
-    ] = "granite_qwen_frozen",
+        str | None, typer.Option("--experiment", "-e", help=EXPERIMENT_HELP)
+    ] = None,
     # 320, not 512: the measured granite_qwen sequence is 237 audio tokens at
     # the 19s collator ceiling plus prompt and transcript. This default
     # shadows plan_command's own, so the two have to be kept in sync -- it was
@@ -345,8 +345,8 @@ def plan(
 @app.command(name="up")
 def up(
     experiment: Annotated[
-        str, typer.Option("--experiment", "-e", help=EXPERIMENT_HELP)
-    ] = "granite_qwen_frozen",
+        str | None, typer.Option("--experiment", "-e", help=EXPERIMENT_HELP)
+    ] = None,
     seq_len: Annotated[int, typer.Option("--seq-len", help=SEQ_LEN_HELP)] = 512,
     name: Annotated[
         str | None, typer.Option("--name", help="Pod name (default: derived from the experiment)")
@@ -464,7 +464,7 @@ def _remote_used_gib(conn: Connection, paths: tuple[str, ...]) -> float:
     return total_kb / (1024**2)
 
 
-def _check_remote_disk(conn: Connection, experiment: str, overrides: list[str]) -> None:
+def _check_remote_disk(conn: Connection, experiment: str | None, overrides: list[str]) -> None:
     """Refuse to start a run that /workspace cannot physically hold.
 
     ENOSPC does not surface at launch. It surfaces hours later as an xet
@@ -472,9 +472,9 @@ def _check_remote_disk(conn: Connection, experiment: str, overrides: list[str]) 
     dataset prep, after the pod has been billed for the whole time. The plan
     already knows what a recipe needs and `df` knows what the pod has, so
     there is no reason to find out the expensive way. The usual trigger is a
-    pod sized for one experiment then handed a different one to train --
+    pod sized for one config then handed a different one to train --
     `up` and `train` share a default, but either can be pointed elsewhere
-    with -e.
+    with -e or overrides.
     """
     free = _remote_free_gib(conn)
     if free is None:
@@ -493,7 +493,8 @@ def _check_remote_disk(conn: Connection, experiment: str, overrides: list[str]) 
     cached = _remote_used_gib(conn, _REMOTE_CACHE_DIRS)
     remaining = max(need - cached, 0.0)
     print(
-        f"/workspace has {free:,.0f} GiB free; {experiment} needs ~{need:,.0f} GiB total, "
+        f"/workspace has {free:,.0f} GiB free; {experiment or 'the run'} needs "
+        f"~{need:,.0f} GiB total, "
         f"~{cached:,.0f} GiB already cached -> ~{remaining:,.0f} GiB still to write."
     )
     if free < remaining:
@@ -502,7 +503,8 @@ def _check_remote_disk(conn: Connection, experiment: str, overrides: list[str]) 
             "the downloaded parquet and its generated arrow tables at the same time, and\n"
             "checkpoints scale with the trainable stack, so this run would die with\n"
             "ENOSPC mid-prep. Levers, cheapest first: lower `save_total_limit`, provision\n"
-            f"a bigger pod (see `ta runpod plan -e {experiment}`), or pass\n"
+            f"a bigger pod (see `ta runpod plan{f' -e {experiment}' if experiment else ''}`), "
+            "or pass\n"
             "--skip-disk-check to override."
         )
         raise typer.Exit(1)
@@ -513,8 +515,8 @@ def train(
     host: HostArg,
     port: PortArg,
     experiment: Annotated[
-        str, typer.Option("--experiment", "-e", help=EXPERIMENT_HELP)
-    ] = "granite_qwen_frozen",
+        str | None, typer.Option("--experiment", "-e", help=EXPERIMENT_HELP)
+    ] = None,
     session_name: Annotated[
         str | None, typer.Option("--session-name", help=SESSION_NAME_HELP)
     ] = None,
@@ -547,10 +549,14 @@ def train(
         _check_remote_disk(conn, experiment, overrides)
 
     session_name = _prepare_session(
-        conn, session_name or _auto_session_name(f"train_{experiment}"), force, hf_token
+        conn,
+        session_name or _auto_session_name(f"train_{experiment or 'default'}"),
+        force,
+        hf_token,
     )
 
-    print(f"\nStarting training session '{session_name}' with experiment '{experiment}'...")
+    preset = f" with experiment '{experiment}'" if experiment else ""
+    print(f"\nStarting training session '{session_name}'{preset}...")
     if overrides:
         print(f"Hydra overrides: {' '.join(overrides)}")
 

@@ -369,10 +369,6 @@ DEP004 = ["elevenlabs", "fla"]
 [tool.coverage.run]
 branch = true
 source = ["tiny_audio", "scripts"]
-omit = [
-  # A __main__ probe against a live checkpoint; no unit-testable surface.
-  "scripts/debug/check_gradient_flow.py",
-]
 
 [tool.coverage.report]
 # Ratchet: `ta dev test` fails below this. Raise it as coverage grows; never

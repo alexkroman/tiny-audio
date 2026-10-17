@@ -273,13 +273,13 @@ class TestProcessorAudioToken:
 
         assert processor.audio_token == ASRProcessor.AUDIO_TOKEN
 
-    def test_accepts_native_decoder_token(
+    def test_accepts_a_configured_token(
         self,
         mock_feature_extractor: MagicMock,
         mock_tokenizer: MagicMock,
         mock_projector: MagicMock,
     ) -> None:
-        """Gemma 4's placeholder is its own pretrained "<|audio|>", not "<audio>"."""
+        """A token named by the config wins over the "<audio>" fallback."""
         processor = ASRProcessor(
             mock_feature_extractor,
             mock_tokenizer,

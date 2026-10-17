@@ -804,3 +804,14 @@ dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
 # cap binds hard there; the bump
 # matters most for CV / Gigaspeech dev / SPGI where eval splits are huge.
 max_eval_samples_per_dataset: 500
+
+# ONE physical pass, exactly the rows the mix table above describes.
+#
+# Set to 2 for a second pass. It is the right way to get one -- NOT
+# `training.num_train_epochs: 2`: _resample_to_target runs once inside
+# DatasetLoader.load(), so a Trainer epoch replays the identical subsets
+# instead of drawing fresh rows from capped sources. With expansion=2 each
+# capped source draws every eligible row first and repeat-pads only the
+# shortfall; uncapped sources are repeated 2x, as a second epoch would have.
+# Per-step mix share is unchanged. The loader raises if both are set.
+epoch_expansion: 1
