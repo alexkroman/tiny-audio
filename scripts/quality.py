@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Quality ratchets: file length, per-file coverage floors, tests that assert.
+"""Quality ratchets: file length, coverage, assertions, escape hatches, module tests, types.
 
 Each check holds a line rather than demanding the codebase already meet it:
 files that predate a rule are recorded in a committed baseline under
@@ -9,6 +9,11 @@ current tree; review its diff like any other change.
     ta dev quality file-length [--update]
     ta dev quality coverage-floors [--update]   # after `ta dev test`
     ta dev quality test-assertions
+    ta dev quality escape-hatches [--update]    # --update only lowers budgets
+    ta dev quality module-tests [--update]      # --update only shrinks the list
+    ta dev quality type-completeness [--update]
+    ta dev quality tracked-ignored
+    ta dev quality invariants                   # scripts/invariants.py
 """
 
 from __future__ import annotations
@@ -18,16 +23,20 @@ import json
 import math
 import re
 import subprocess
+import sys
+import tokenize
+from io import StringIO
 from pathlib import Path
 from typing import Annotated, Any
 
 import typer
 
+from scripts import invariants
 from scripts.utils import get_project_root
 
 app = typer.Typer(
     name="quality",
-    help="Ratchets on file length, per-file coverage and test assertions.",
+    help="Ratchets on file length, coverage, assertions, escape hatches and typing.",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -37,6 +46,9 @@ BASELINE_DIR = ROOT / "quality"
 FILE_LENGTH_BASELINE = BASELINE_DIR / "file_length.json"
 COVERAGE_BASELINE = BASELINE_DIR / "coverage_floors.json"
 COVERAGE_REPORT = ROOT / "coverage.json"
+ESCAPE_HATCH_BASELINE = BASELINE_DIR / "escape_hatches.json"
+UNTESTED_MODULES_BASELINE = BASELINE_DIR / "untested_modules.json"
+TYPE_COMPLETENESS_BASELINE = BASELINE_DIR / "type_completeness.json"
 
 # Code lines (non-blank, not comment-only) a Python file may have. Long files
 # are where complexity hides and where reviewers stop reading.
@@ -45,6 +57,20 @@ MAX_CODE_LINES = 600
 NEW_FILE_COVERAGE_FLOOR = 50.0
 
 UPDATE_HELP = "Rewrite the baseline from the current tree instead of checking"
+
+# Comments that switch a checker off for one line. Each is sometimes right,
+# and each is free to add, so the count per file is budgeted and only shrinks.
+ESCAPE_HATCHES = {
+    "noqa": re.compile(r"#\s*noqa\b"),
+    "type: ignore": re.compile(r"#\s*type:\s*ignore\b"),
+    "pyright: ignore": re.compile(r"#\s*pyright:\s*ignore\b"),
+    "nosec": re.compile(r"#\s*nosec\b"),
+    "pragma: no cover": re.compile(r"#\s*pragma:\s*no cover\b"),
+}
+# The packages whose modules must each be reached by name from tests/.
+TESTED_PACKAGES = ("tiny_audio", "scripts")
+# The published package `pyright --verifytypes` scores (it ships py.typed).
+TYPED_PACKAGE = "tiny_audio"
 
 # A call to one of these counts as an assertion: the code under test is itself
 # a guard, so "it did not raise" is the claim (`_assert_audio_token_counts`,
@@ -222,6 +248,214 @@ def test_assertions() -> None:
     if problems:
         raise typer.Exit(1)
     typer.echo(f"test-assertions: every test in {len(tests)} files asserts")
+
+
+# ---------------------------------------------------------------- escape hatches
+
+
+def count_escape_hatches(source: str) -> dict[str, int]:
+    """Escape-hatch comments in `source`, by kind; only real comments count, not strings."""
+    counts: dict[str, int] = {}
+    for token in tokenize.generate_tokens(StringIO(source).readline):
+        if token.type != tokenize.COMMENT:
+            continue
+        for kind, pattern in ESCAPE_HATCHES.items():
+            if pattern.search(token.string):
+                counts[kind] = counts.get(kind, 0) + 1
+    return counts
+
+
+def escape_hatch_counts() -> dict[str, dict[str, int]]:
+    """`{kind: {file: count}}` over every tracked Python file."""
+    out: dict[str, dict[str, int]] = {}
+    for path in _tracked_python_files():
+        for kind, n in count_escape_hatches((ROOT / path).read_text()).items():
+            out.setdefault(kind, {})[path] = n
+    return out
+
+
+def escape_hatch_violations(
+    counts: dict[str, dict[str, int]], budget: dict[str, dict[str, int]]
+) -> list[str]:
+    """Files holding more of a kind than their budget (no entry means a budget of 0)."""
+    problems: list[str] = []
+    for kind, files in sorted(counts.items()):
+        for path, n in sorted(files.items()):
+            allowed = budget.get(kind, {}).get(path, 0)
+            if n > allowed:
+                problems.append(f"{path}: {n} `# {kind}` comments, budget is {allowed}")
+    return problems
+
+
+@app.command("escape-hatches")
+def escape_hatches(
+    update: Annotated[
+        bool, typer.Option("--update", help="Lower budgets to the current tree")
+    ] = False,
+) -> None:
+    """Per-file budgets for `# noqa`, `# pyright: ignore` and friends; they only go down.
+
+    `--update` lowers budgets and refuses to raise one: an increase is a hand
+    edit of quality/escape_hatches.json, so it shows up in review.
+    """
+    counts = escape_hatch_counts()
+    problems = escape_hatch_violations(counts, _load(ESCAPE_HATCH_BASELINE))
+    for problem in problems:
+        typer.echo(problem, err=True)
+    if problems:
+        typer.echo("Fix the finding instead of silencing it.", err=True)
+        raise typer.Exit(1)
+    if update:
+        _save(ESCAPE_HATCH_BASELINE, counts)
+        typer.echo(f"Recorded {ESCAPE_HATCH_BASELINE.relative_to(ROOT)}")
+        return
+    total = sum(sum(files.values()) for files in counts.values())
+    typer.echo(f"escape-hatches: {total} within budget")
+
+
+# ------------------------------------------------------------------ module tests
+
+
+def _modules_in_scope() -> list[str]:
+    """Dotted names of every non-`__init__` module under TESTED_PACKAGES."""
+    return sorted(
+        f.removesuffix(".py").replace("/", ".")
+        for f in _tracked_python_files()
+        if f.split("/", 1)[0] in TESTED_PACKAGES and not f.endswith("__init__.py")
+    )
+
+
+def referenced_names(source: str) -> set[str]:
+    """Dotted names a test file reaches: its imports and any dotted string literal.
+
+    Strings count because `monkeypatch.setattr("scripts.x.subprocess.call", ...)`
+    and `importlib.import_module("scripts.x")` are how a test reaches a module
+    that is loaded lazily.
+    """
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            names.add(node.module)
+            names.update(f"{node.module}.{alias.name}" for alias in node.names)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            names.add(node.value)
+    return names
+
+
+def untested_modules(modules: list[str], references: set[str]) -> list[str]:
+    """Modules no test names directly (incidental coverage does not count)."""
+    return [m for m in modules if not any(r == m or r.startswith(f"{m}.") for r in references)]
+
+
+@app.command("module-tests")
+def module_tests(
+    update: Annotated[
+        bool, typer.Option("--update", help="Drop modules that now have tests from the list")
+    ] = False,
+) -> None:
+    """Every module must be imported (or named) by some test, not just run through.
+
+    Per-file coverage can be met by a test written for another module walking
+    through this one. A test that names the module is a claim about it.
+    """
+    references: set[str] = set()
+    for path in sorted((ROOT / "tests").rglob("*.py")):
+        references |= referenced_names(path.read_text())
+    untested = untested_modules(_modules_in_scope(), references)
+    allowed = set(json.loads(UNTESTED_MODULES_BASELINE.read_text()))
+    new = [m for m in untested if m not in allowed]
+    for module in new:
+        typer.echo(f"{module}: no test imports it; add tests/test_<name>.py", err=True)
+    if new:
+        raise typer.Exit(1)
+    if update:
+        UNTESTED_MODULES_BASELINE.write_text(json.dumps(untested, indent=2) + "\n")
+        typer.echo(f"Recorded {UNTESTED_MODULES_BASELINE.relative_to(ROOT)}")
+        return
+    stale = sorted(allowed - set(untested))
+    if stale:
+        typer.echo(f"Now tested, run `--update` to drop them: {', '.join(stale)}", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"module-tests: {len(untested)} grandfathered modules without a test")
+
+
+# ------------------------------------------------------------- type completeness
+
+
+def completeness_percent(report: dict[str, Any]) -> float:
+    """`pyright --verifytypes --outputjson`'s completeness score, as a percent."""
+    return 100.0 * float(report["typeCompleteness"]["completenessScore"])
+
+
+@app.command("type-completeness")
+def type_completeness(
+    update: Annotated[bool, typer.Option("--update", help=UPDATE_HELP)] = False,
+) -> None:
+    """Share of tiny_audio's public symbols with a fully known type; it may only rise.
+
+    The package ships `py.typed`, so its annotations are an API. Strict mode
+    turns off the `reportUnknown*` rules, which this measures instead.
+    """
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pyright",
+            "--verifytypes",
+            TYPED_PACKAGE,
+            "--ignoreexternal",
+            "--outputjson",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    try:
+        score = completeness_percent(json.loads(proc.stdout))
+    except (json.JSONDecodeError, KeyError) as exc:
+        typer.echo(f"pyright --verifytypes gave no score: {exc}\n{proc.stderr}", err=True)
+        raise typer.Exit(1) from exc
+    if update:
+        _save(TYPE_COMPLETENESS_BASELINE, {TYPED_PACKAGE: math.floor(score * 10) / 10})
+        typer.echo(f"Recorded {TYPE_COMPLETENESS_BASELINE.relative_to(ROOT)}")
+        return
+    floor = float(_load(TYPE_COMPLETENESS_BASELINE).get(TYPED_PACKAGE, 0.0))
+    if score + 1e-9 < floor:
+        typer.echo(f"{TYPED_PACKAGE}: {score:.1f}% type-complete, below {floor:.1f}%", err=True)
+        typer.echo("Annotate the new public symbols; never lower the floor.", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"type-completeness: {TYPED_PACKAGE} {score:.1f}% (floor {floor:.1f}%)")
+
+
+# --------------------------------------------------------------- tracked-ignored
+
+
+@app.command("tracked-ignored")
+def tracked_ignored() -> None:
+    """No tracked file may match a .gitignore rule.
+
+    Such a file stays tracked but drops out of `git status`, so later edits to
+    it are never noticed or committed.
+    """
+    out = subprocess.run(
+        ["git", "ls-files", "--cached", "--ignored", "--exclude-standard"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    shadowed = out.stdout.split()
+    for path in shadowed:
+        typer.echo(f"{path}: tracked but matched by a .gitignore rule", err=True)
+    if shadowed:
+        raise typer.Exit(1)
+    typer.echo("tracked-ignored: no tracked file is ignored")
+
+
+app.command("invariants")(invariants.check)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -114,3 +115,154 @@ class TestTestsWithoutAssertions:
     def test_the_repository_suite_passes(self) -> None:
         result = runner.invoke(quality.app, ["test-assertions"])
         assert result.exit_code == 0, result.output
+
+
+class TestEscapeHatches:
+    def test_only_real_comments_count(self) -> None:
+        source = (
+            "import os  # noqa: F401\n"
+            "x = f()  # pyright: ignore[reportUnknownVariableType]\n"
+            "y = 1  # type: ignore\n"
+            's = "# noqa inside a string"\n'
+            "def g():  # pragma: no cover\n    run()  # nosec B603\n"
+        )
+        assert quality.count_escape_hatches(source) == {
+            "noqa": 1,
+            "pyright: ignore": 1,
+            "type: ignore": 1,
+            "pragma: no cover": 1,
+            "nosec": 1,
+        }
+
+    def test_new_file_has_no_budget(self) -> None:
+        (problem,) = quality.escape_hatch_violations({"noqa": {"a.py": 1}}, {})
+        assert "budget is 0" in problem
+
+    def test_budget_may_be_met_but_not_exceeded(self) -> None:
+        budget = {"noqa": {"a.py": 2}}
+        assert quality.escape_hatch_violations({"noqa": {"a.py": 2}}, budget) == []
+        assert quality.escape_hatch_violations({"noqa": {"a.py": 1}}, budget) == []
+        assert quality.escape_hatch_violations({"noqa": {"a.py": 3}}, budget)
+
+    def test_update_lowers_budgets_but_refuses_to_raise(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        baseline = tmp_path / "escape_hatches.json"
+        monkeypatch.setattr(quality, "ESCAPE_HATCH_BASELINE", baseline)
+        monkeypatch.setattr(quality, "ROOT", tmp_path)
+        counts = {"noqa": {"a.py": 1}}
+        monkeypatch.setattr(quality, "escape_hatch_counts", lambda: counts)
+
+        baseline.write_text(json.dumps({"noqa": {"a.py": 3, "gone.py": 1}}))
+        assert runner.invoke(quality.app, ["escape-hatches", "--update"]).exit_code == 0
+        assert json.loads(baseline.read_text()) == counts
+
+        counts = {"noqa": {"a.py": 2}}
+        result = runner.invoke(quality.app, ["escape-hatches", "--update"])
+        assert result.exit_code == 1
+        assert json.loads(baseline.read_text()) == {"noqa": {"a.py": 1}}
+
+    def test_the_repository_is_within_budget(self) -> None:
+        assert runner.invoke(quality.app, ["escape-hatches"]).exit_code == 0
+
+
+class TestModuleTests:
+    def test_imports_and_dotted_strings_are_references(self) -> None:
+        source = (
+            "import scripts.a\n"
+            "from scripts import b\n"
+            "from tiny_audio.c import thing\n"
+            'monkeypatch.setattr("scripts.d.subprocess.call", f)\n'
+        )
+        refs = quality.referenced_names(source)
+        modules = ["scripts.a", "scripts.b", "tiny_audio.c", "scripts.d", "scripts.e"]
+        assert quality.untested_modules(modules, refs) == ["scripts.e"]
+
+    def test_a_prefix_is_not_a_reference(self) -> None:
+        assert quality.untested_modules(["scripts.ab"], {"scripts.a"}) == ["scripts.ab"]
+
+    def _run(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, allowed: list[str]
+    ) -> tuple[int, Path]:
+        baseline = tmp_path / "untested.json"
+        baseline.write_text(json.dumps(allowed))
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_a.py").write_text("from scripts import a\n")
+        monkeypatch.setattr(quality, "UNTESTED_MODULES_BASELINE", baseline)
+        monkeypatch.setattr(quality, "ROOT", tmp_path)
+        monkeypatch.setattr(quality, "_modules_in_scope", lambda: ["scripts.a", "scripts.b"])
+        return runner.invoke(quality.app, ["module-tests"]).exit_code, baseline
+
+    def test_new_untested_module_fails(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        assert self._run(monkeypatch, tmp_path, [])[0] == 1
+
+    def test_grandfathered_module_passes(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        assert self._run(monkeypatch, tmp_path, ["scripts.b"])[0] == 0
+
+    def test_a_newly_tested_module_must_leave_the_list(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        code, baseline = self._run(monkeypatch, tmp_path, ["scripts.a", "scripts.b"])
+        assert code == 1
+        assert runner.invoke(quality.app, ["module-tests", "--update"]).exit_code == 0
+        assert json.loads(baseline.read_text()) == ["scripts.b"]
+
+    def test_the_repository_passes(self) -> None:
+        assert runner.invoke(quality.app, ["module-tests"]).exit_code == 0
+
+
+class TestTypeCompleteness:
+    @staticmethod
+    def fake_pyright(monkeypatch: pytest.MonkeyPatch, stdout: str) -> None:
+        def run(*_args: object, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(stdout=stdout, stderr="")
+
+        monkeypatch.setattr(quality.subprocess, "run", run)
+
+    @staticmethod
+    def report(score: float) -> str:
+        return json.dumps({"typeCompleteness": {"completenessScore": score}})
+
+    def test_floor_is_enforced(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        baseline = tmp_path / "type_completeness.json"
+        baseline.write_text(json.dumps({quality.TYPED_PACKAGE: 80.0}))
+        monkeypatch.setattr(quality, "TYPE_COMPLETENESS_BASELINE", baseline)
+        self.fake_pyright(monkeypatch, self.report(0.81))
+        assert runner.invoke(quality.app, ["type-completeness"]).exit_code == 0
+        self.fake_pyright(monkeypatch, self.report(0.79))
+        assert runner.invoke(quality.app, ["type-completeness"]).exit_code == 1
+
+    def test_update_records_a_floor_the_same_run_passes(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        baseline = tmp_path / "type_completeness.json"
+        monkeypatch.setattr(quality, "TYPE_COMPLETENESS_BASELINE", baseline)
+        monkeypatch.setattr(quality, "ROOT", tmp_path)
+        self.fake_pyright(monkeypatch, self.report(0.83279))
+        assert runner.invoke(quality.app, ["type-completeness", "--update"]).exit_code == 0
+        assert json.loads(baseline.read_text()) == {quality.TYPED_PACKAGE: 83.2}
+        assert runner.invoke(quality.app, ["type-completeness"]).exit_code == 0
+
+    def test_no_score_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.fake_pyright(monkeypatch, "not json")
+        result = runner.invoke(quality.app, ["type-completeness"])
+        assert result.exit_code == 1
+        assert "no score" in result.output
+
+
+class TestTrackedIgnored:
+    def test_a_tracked_ignored_file_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def run(*_args: object, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(stdout="results.json\n")
+
+        monkeypatch.setattr(quality.subprocess, "run", run)
+        result = runner.invoke(quality.app, ["tracked-ignored"])
+        assert result.exit_code == 1
+        assert "results.json" in result.output
+
+    def test_the_repository_passes(self) -> None:
+        assert runner.invoke(quality.app, ["tracked-ignored"]).exit_code == 0

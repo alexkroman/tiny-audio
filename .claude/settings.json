@@ -1,5 +1,29 @@
 {
   "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && poetry run python -m scripts.claude_hooks lint-edit",
+            "timeout": 60,
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit|Write|MultiEdit"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && poetry run python -m scripts.claude_hooks protect",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit"
+      }
+    ],
     "SessionStart": [
       {
         "hooks": [

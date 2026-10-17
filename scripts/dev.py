@@ -8,7 +8,7 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
-from scripts import quality
+from scripts import mutate, quality
 
 app = typer.Typer(
     name="dev",
@@ -17,6 +17,7 @@ app = typer.Typer(
     add_completion=False,
 )
 app.add_typer(quality.app)
+app.command("mutate")(mutate.main)
 console = Console()
 
 # Every Python tree in the repo: the package, its CLI, the tests, the Space
@@ -65,6 +66,11 @@ DEPS_COMMAND = ["deptry", "."]
 QUALITY = [sys.executable, "-m", "scripts.quality"]
 FILE_LENGTH_COMMAND = [*QUALITY, "file-length"]
 TEST_ASSERTIONS_COMMAND = [*QUALITY, "test-assertions"]
+ESCAPE_HATCHES_COMMAND = [*QUALITY, "escape-hatches"]
+MODULE_TESTS_COMMAND = [*QUALITY, "module-tests"]
+TYPE_COMPLETENESS_COMMAND = [*QUALITY, "type-completeness"]
+TRACKED_IGNORED_COMMAND = [*QUALITY, "tracked-ignored"]
+INVARIANTS_COMMAND = [*QUALITY, "invariants"]
 # Reads the coverage.json TEST_COMMAND writes, so it runs after the tests.
 COVERAGE_FLOORS_COMMAND = [*QUALITY, "coverage-floors"]
 # Copy-pasted blocks of 4+ lines across tiny_audio/ and scripts/ (comments,
@@ -114,6 +120,11 @@ ANALYSIS_COMMANDS = [
     DUPLICATION_COMMAND,
     FILE_LENGTH_COMMAND,
     TEST_ASSERTIONS_COMMAND,
+    ESCAPE_HATCHES_COMMAND,
+    MODULE_TESTS_COMMAND,
+    TYPE_COMPLETENESS_COMMAND,
+    TRACKED_IGNORED_COMMAND,
+    INVARIANTS_COMMAND,
     DEPS_COMMAND,
     *DOCSTRINGS_COMMANDS,
 ]
@@ -226,10 +237,49 @@ def run_all(*commands: list[str]) -> int:
     return 0
 
 
+def run_each(*commands: list[str]) -> int:
+    """Run every command, then list the failures; returns the first failing exit code.
+
+    For independent read-only checks: stopping at the first failure hides
+    what the rest would say, so their findings arrive one red run at a time.
+    """
+    failed = [(cmd, code) for cmd in commands if (code := run(*cmd)) != 0]
+    if failed:
+        console.print(f"[red]{len(failed)} of {len(commands)} checks failed:[/red]")
+        for cmd, code in failed:
+            console.print(f"[red]  exit {code}: {' '.join(cmd)}[/red]")
+    return failed[0][1] if failed else 0
+
+
+def git(*args: str) -> subprocess.CompletedProcess[str]:
+    """Run git quietly; the caller reads the exit code and output."""
+    return subprocess.run(["git", *args], capture_output=True, text=True, check=False)
+
+
+def prepush_problems() -> list[str]:
+    """Why this push would fail review: on main, behind main, or conflicting with it.
+
+    Fails open (no problem) when origin/main cannot be fetched, so an offline
+    push is not blocked on a check it cannot run.
+    """
+    branch = git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    if branch in {"main", "master"}:
+        return [f"direct pushes to {branch} are not allowed; push a branch and open a PR"]
+    if git("fetch", "--quiet", "origin", "main").returncode != 0:
+        console.print("[yellow]could not fetch origin/main; skipping the freshness checks[/yellow]")
+        return []
+    # `merge-tree --write-tree` (git >= 2.38) merges in memory: exit 1 means conflicts.
+    if git("merge-tree", "--write-tree", "HEAD", "origin/main").returncode == 1:
+        return ["this branch conflicts with origin/main; merge it and resolve the conflicts"]
+    if git("merge-base", "--is-ancestor", "origin/main", "HEAD").returncode != 0:
+        return ["this branch is behind origin/main; run `git merge origin/main` and re-check"]
+    return []
+
+
 @app.command()
 def lint() -> None:
     """Run linters (Poetry + Python + YAML + TOML + GitHub Actions + Markdown + JSON)."""
-    raise typer.Exit(run_all(*lint_commands()))
+    raise typer.Exit(run_each(*lint_commands()))
 
 
 @app.command("format")
@@ -268,8 +318,11 @@ def coverage() -> None:
 
 @app.command()
 def check() -> None:
-    """Run all checks (lint, types, security, dead code, duplication, ratchets, deps, docs)."""
-    raise typer.Exit(run_all(*check_commands()))
+    """Run all checks (lint, types, security, dead code, duplication, ratchets, deps, docs).
+
+    Every check runs even after one fails; the failures are listed at the end.
+    """
+    raise typer.Exit(run_each(*check_commands()))
 
 
 @app.command()
@@ -283,13 +336,24 @@ def precommit() -> None:
     """Pre-commit quality gate (format, check, test with coverage floor, build)."""
     format_code()
     raise typer.Exit(
-        run_all(*check_commands(), TEST_COMMAND, COVERAGE_FLOORS_COMMAND) or build_and_check()
+        run_each(*check_commands())
+        or run_all(TEST_COMMAND, COVERAGE_FLOORS_COMMAND)
+        or build_and_check()
     )
+
+
+@app.command()
+def prepush() -> None:
+    """Pre-push gate: not on main, up to date with origin/main, no conflicts with it."""
+    problems = prepush_problems()
+    for problem in problems:
+        console.print(f"[red]{problem}[/red]")
+    raise typer.Exit(1 if problems else 0)
 
 
 @app.command("install-hooks")
 def install_hooks() -> None:
-    """Install pre-commit hooks."""
+    """Install the git hooks (`default_install_hook_types`: pre-commit and pre-push)."""
     raise typer.Exit(run("pre-commit", "install"))
 
 

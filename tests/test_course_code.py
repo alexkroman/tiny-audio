@@ -1,4 +1,4 @@
-"""The course's code examples, checked by docs/site/course_code.py."""
+"""The course's and the docs' code examples, checked by docs/site/course_code.py."""
 
 from pathlib import Path
 
@@ -17,6 +17,21 @@ class TestCourseExamples:
 
     def test_course_has_examples_of_every_checked_language(self) -> None:
         assert {"python", "yaml", "bash"} <= {block.lang for block in self.BLOCKS}
+
+    @pytest.mark.parametrize("block", BLOCKS, ids=lambda block: block.where)
+    def test_block_compiles(self, block: course_code.CodeBlock) -> None:
+        assert course_code.check_block(block) == []
+
+
+class TestDocExamples:
+    """README, MODEL_CARD, CONTRIBUTING, docs/*.md and the agent guides, same checks."""
+
+    BLOCKS = course_code.doc_blocks()
+
+    def test_covers_the_top_level_pages_and_skips_the_course(self) -> None:
+        pages = {block.path.relative_to(course_code.ROOT).as_posix() for block in self.BLOCKS}
+        assert {"README.md", "MODEL_CARD.md", "CONTRIBUTING.md"} <= pages
+        assert not any(page.startswith("docs/course/") for page in pages)
 
     @pytest.mark.parametrize("block", BLOCKS, ids=lambda block: block.where)
     def test_block_compiles(self, block: course_code.CodeBlock) -> None:

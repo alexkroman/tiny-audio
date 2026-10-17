@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Check that every code example in the course still compiles.
+"""Check that every code example in the course and the docs still compiles.
 
-Each fenced block in docs/course/*.md is checked by its language:
+Each fenced block in docs/course/*.md, and in every other tracked Markdown
+file (README.md, MODEL_CARD.md, CONTRIBUTING.md, docs/*.md, the agent guides),
+is checked by its language:
 
 - `python`: compiled with `compile()`.
 - `yaml`: parsed with `yaml.safe_load`.
@@ -85,6 +87,18 @@ def extract_blocks(path: Path) -> list[CodeBlock]:
 def course_blocks() -> list[CodeBlock]:
     """Every tagged code block across the course pages."""
     return [block for page in sorted(COURSE_DIR.glob("*.md")) for block in extract_blocks(page)]
+
+
+def doc_blocks() -> list[CodeBlock]:
+    """Every tagged code block in tracked Markdown outside the course.
+
+    These are what a reader copies first, and nothing else runs them.
+    """
+    listed = subprocess.run(
+        ["git", "ls-files", "*.md"], cwd=ROOT, capture_output=True, text=True, check=True
+    ).stdout.split()
+    pages = [ROOT / p for p in listed if not (ROOT / p).is_relative_to(COURSE_DIR)]
+    return [block for page in pages for block in extract_blocks(page)]
 
 
 def fill_placeholders(code: str) -> str:
@@ -206,9 +220,9 @@ def check_block(block: CodeBlock, *, syntax_only: bool = False) -> list[str]:
 
 
 def main() -> int:
-    """Check every course code block and report failures."""
+    """Check every course and doc code block and report failures."""
     parser = argparse.ArgumentParser(
-        description="Check that every code example in the course still compiles."
+        description="Check that every code example in the course and the docs still compiles."
     )
     parser.add_argument(
         "--syntax-only", action="store_true", help="Skip parsing `ta` commands with the CLI"
@@ -217,11 +231,11 @@ def main() -> int:
     if not opts.syntax_only:
         sys.path.insert(0, str(ROOT))
 
-    blocks = course_blocks()
+    blocks = course_blocks() + doc_blocks()
     errors = [e for block in blocks for e in check_block(block, syntax_only=opts.syntax_only)]
     for error in errors:
         print(error, file=sys.stderr)
-    print(f"course code: {len(blocks)} blocks checked, {len(errors)} problems")
+    print(f"course and doc code: {len(blocks)} blocks checked, {len(errors)} problems")
     return 1 if errors else 0
 
 

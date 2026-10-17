@@ -173,27 +173,63 @@ poetry run pytest -k "test_forward" -v    # By name pattern
 ### Code Quality
 
 ```bash
-poetry run ta dev format      # Format code (black, ruff, mdformat)
-poetry run ta dev lint        # Lint + format check (poetry check --lock, ruff, black, yamllint, taplo,
-                              #   actionlint, zizmor, mdformat --check)
-poetry run ta dev type-check  # Type check (pyright, strict)
-poetry run ta dev check       # Lint + type-check + security + dead code + duplication + ratchets
-                              #   + deptry + docstrings
-poetry run ta dev precommit   # Full quality gate
+poetry run ta dev format       # Format code (black, ruff, mdformat)
+poetry run ta dev lint         # Lint + format check (poetry check --lock, ruff, black, yamllint, taplo,
+                               #   actionlint, zizmor, mdformat --check)
+poetry run ta dev type-check   # Type check (pyright, strict)
+poetry run ta dev check        # Lint + type-check + security + dead code + duplication + ratchets
+                               #   + invariants + deptry + docstrings
+poetry run ta dev precommit    # Full quality gate
+poetry run ta dev install-hooks  # Install the pre-commit and pre-push git hooks
 ```
 
-`ta dev check` and `ta dev test` also run three ratchets (`scripts/quality.py`), each against a
-baseline committed under `quality/` that may only improve:
+`ta dev check` runs every check even after one fails and lists the failures at the end, so one run
+reports everything.
+
+`ta dev check` and `ta dev test` also run ratchets (`scripts/quality.py`), each against a baseline
+committed under `quality/` that may only improve:
 
 - **File length:** Python files are capped at 600 code lines; files already over it may not grow.
 - **Per-file coverage:** each file keeps its recorded line coverage, and new files need 50%. Runs
   after the tests, from `coverage.json`.
 - **Test assertions:** every test must assert something (an `assert`, `pytest.raises`, a mock
   `assert_*`, or a call to a guard such as `_require_*`).
+- **Escape hatches:** each file has a budget of `# noqa`, `# pyright: ignore`, `# type: ignore`,
+  `# nosec` and `# pragma: no cover` comments that may only shrink.
+- **Module tests:** every module under `tiny_audio/` and `scripts/` is imported (or named, for a
+  `monkeypatch` target) by a test; coverage reached through another module's test does not count.
+- **Type completeness:** the share of `tiny_audio`'s public API with fully known types
+  (`pyright --verifytypes`) may only rise.
+- **Tracked-ignored:** no tracked file may match a `.gitignore` rule.
 
-After an intended improvement, refresh a baseline with `ta dev quality file-length --update` or
-`ta dev quality coverage-floors --update` (record coverage floors from a run with Hub access) and
-commit the diff.
+After an intended improvement, refresh a baseline with `ta dev quality <check> --update` (record
+coverage floors from a run with Hub access) and commit the diff. `--update` for escape hatches and
+module tests only records improvements; raising a budget is a hand edit, visible in review.
+
+`ta dev quality invariants` (`scripts/invariants.py`) checks facts restated in several files (the
+transformers commit, the torch and Poetry versions) and settled decisions recorded in
+`pyproject.toml` comments (the liger-kernel floor, the nltk ceiling, the optional hybrid-attention
+kernels). If a decision changes, change its rule in the same diff. The docs' code blocks (README,
+model card, this file, `docs/`) are compiled and their `ta` commands parsed by
+`tests/test_course_code.py`, the same as the course's.
+
+The pre-push hook (`ta dev prepush`) refuses a push from `main`, from a branch behind `origin/main`,
+or from one that conflicts with it.
+
+For modules already near full coverage, mutation testing shows which lines run without their result
+being checked. It is opt-in and slow:
+
+```bash
+poetry run ta dev mutate tiny_audio/projectors.py --max 40
+```
+
+Each surviving mutant is a behaviour change no test noticed; some are equivalent (they cannot change
+behaviour), so treat the list as a to-do list, not a gate.
+
+Claude Code sessions load `.claude/CLAUDE.md` and the `project-guardrails` skill, and
+`.claude/settings.json` runs two hooks: edits to `poetry.lock` and `quality/*.json` are refused, and
+each edited Python file is formatted and linted with ruff. The `guardrails-reviewer` agent reviews a
+diff against the settled decisions.
 
 ### Adding a New Projector
 

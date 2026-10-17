@@ -66,6 +66,26 @@ class TestRunHelpers:
         assert dev.run_all(["a"], ["b"], ["c"]) == 3
         assert executed == [("a",), ("b",)]
 
+    def test_run_each_runs_everything_and_returns_the_first_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        codes = iter([0, 3, 4])
+        executed: list[tuple[str, ...]] = []
+
+        def fake_run(*args: str) -> int:
+            executed.append(args)
+            return next(codes)
+
+        monkeypatch.setattr(dev, "run", fake_run)
+        assert dev.run_each(["a"], ["b"], ["c"]) == 3
+        assert executed == [("a",), ("b",), ("c",)]
+
+    def test_run_each_succeeds_when_everything_passes(
+        self, recorded_runs: list[tuple[str, ...]]
+    ) -> None:
+        assert dev.run_each(["a"], ["b"]) == 0
+        assert recorded_runs == [("a",), ("b",)]
+
     def test_run_all_succeeds_when_everything_passes(
         self, recorded_runs: list[tuple[str, ...]]
     ) -> None:
@@ -164,6 +184,84 @@ class TestCommandWiring:
         monkeypatch.setattr(dev, "run", failing_run)
         assert runner.invoke(dev.app, ["lint"]).exit_code == 5
 
+    def test_check_reports_every_failure_not_just_the_first(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[str, ...]] = []
+
+        def failing_run(*args: str) -> int:
+            calls.append(args)
+            return 1
+
+        monkeypatch.setattr(dev, "run", failing_run)
+        result = runner.invoke(dev.app, ["check"])
+        assert result.exit_code == 1
+        assert len(calls) == len(dev.check_commands())
+        assert f"{len(calls)} of {len(calls)} checks failed" in result.output
+
+    def test_precommit_stops_before_tests_when_a_check_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[str, ...]] = []
+
+        def failing_run(*args: str) -> int:
+            calls.append(args)
+            return 1
+
+        monkeypatch.setattr(dev, "run", failing_run)
+        monkeypatch.setattr(dev, "format_code", lambda: None)
+        assert runner.invoke(dev.app, ["precommit"]).exit_code == 1
+        assert tuple(dev.TEST_COMMAND) not in calls
+
+
+class TestPrepush:
+    """`ta dev prepush`: refuse main, a stale branch, or one that conflicts with main."""
+
+    @staticmethod
+    def fake_git(
+        monkeypatch: pytest.MonkeyPatch, branch: str = "feature", **codes: int
+    ) -> list[tuple[str, ...]]:
+        calls: list[tuple[str, ...]] = []
+
+        def git(*args: str) -> SimpleNamespace:
+            calls.append(args)
+            stdout = f"{branch}\n" if args[0] == "rev-parse" else ""
+            return SimpleNamespace(
+                returncode=codes.get(args[0].replace("-", "_"), 0), stdout=stdout
+            )
+
+        monkeypatch.setattr(dev, "git", git)
+        return calls
+
+    def test_up_to_date_branch_passes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.fake_git(monkeypatch)
+        assert dev.prepush_problems() == []
+        assert runner.invoke(dev.app, ["prepush"]).exit_code == 0
+
+    def test_main_is_refused_without_fetching(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls = self.fake_git(monkeypatch, branch="main")
+        (problem,) = dev.prepush_problems()
+        assert "main" in problem
+        assert all(call[0] != "fetch" for call in calls)
+
+    def test_behind_main_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.fake_git(monkeypatch, merge_base=1)
+        (problem,) = dev.prepush_problems()
+        assert "behind origin/main" in problem
+        assert runner.invoke(dev.app, ["prepush"]).exit_code == 1
+
+    def test_conflicts_are_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.fake_git(monkeypatch, merge_tree=1, merge_base=1)
+        (problem,) = dev.prepush_problems()
+        assert "conflicts" in problem
+
+    def test_offline_push_is_not_blocked(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.fake_git(monkeypatch, fetch=128, merge_base=1)
+        assert dev.prepush_problems() == []
+
+    def test_git_runs_git(self) -> None:
+        assert dev.git("--version").stdout.startswith("git version")
+
 
 class TestFormatCode:
     """`ta dev format` rewrites every tracked Markdown and JSON file."""
@@ -226,6 +324,11 @@ class TestQualityGateContents:
         assert dev.DUPLICATION_COMMAND in dev.check_commands()
         assert dev.FILE_LENGTH_COMMAND in dev.check_commands()
         assert dev.TEST_ASSERTIONS_COMMAND in dev.check_commands()
+        assert dev.ESCAPE_HATCHES_COMMAND in dev.check_commands()
+        assert dev.MODULE_TESTS_COMMAND in dev.check_commands()
+        assert dev.TYPE_COMPLETENESS_COMMAND in dev.check_commands()
+        assert dev.TRACKED_IGNORED_COMMAND in dev.check_commands()
+        assert dev.INVARIANTS_COMMAND in dev.check_commands()
         for cmd in dev.DOCSTRINGS_COMMANDS:
             assert cmd in dev.check_commands()
 
@@ -271,6 +374,11 @@ class TestPrecommitHookIsTheGate:
     def test_hook_calls_ta_dev_precommit(self) -> None:
         hook = (get_project_root() / ".pre-commit-config.yaml").read_text()
         assert "ta dev precommit" in hook
+
+    def test_pre_push_hook_is_installed_by_default(self) -> None:
+        hook = (get_project_root() / ".pre-commit-config.yaml").read_text()
+        assert "ta dev prepush" in hook
+        assert "default_install_hook_types: [pre-commit, pre-push]" in hook
 
     def test_ci_runs_check_and_test(self) -> None:
         ci = (get_project_root() / ".github" / "workflows" / "ci.yml").read_text()

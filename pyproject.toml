@@ -65,8 +65,8 @@ torch = "~2.8.0"
 soundfile = ">=0.12.1"
 librosa = ">=0.10.0"
 # transformers main after 5.17: Nemotron-3-Diarization (nemotron3_diarization)
-# is not in a release yet. Same commit as requirements.txt and
-# demo/requirements.txt, the one the diarization pipeline was verified on.
+# is not in a release yet. Same commit as requirements.txt (enforced by
+# `ta dev quality invariants`), the one the diarization pipeline was verified on.
 transformers = { git = "https://github.com/huggingface/transformers.git", rev = "91ea1192a00e0ebb684400434375fbd2345c8449" }
 datasets = { extras = ["audio"], version = ">=3.0.0,<4.0.0" }
 jiwer = "*"
