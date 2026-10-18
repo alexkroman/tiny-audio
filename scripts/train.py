@@ -39,7 +39,7 @@ from transformers.trainer_pt_utils import (
 )
 
 from scripts.labels import TEXT_CASE_CASED, TEXT_CASE_MONO
-from scripts.train_collator import TRANSCRIBE_PROMPT_PUNCT, DataCollator
+from scripts.train_collator import TRANSCRIBE_PROMPT_PUNCT, DataCollator, build_collators
 from scripts.train_config import register_configs
 from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
@@ -93,6 +93,12 @@ def _resolve_transcribe_prompt(
         )
         return TRANSCRIBE_PROMPT_PUNCT
     return None
+
+
+def _source_keys(dataset_cfg: DictConfig) -> tuple[str, str]:
+    """What a source answers to in data.source_weights / verbatim_sources."""
+    path = str(dataset_cfg.get("path"))
+    return f"{path}:{dataset_cfg.get('name')}", path
 
 
 def _add_constant_column(ds: Dataset, name: str, value: object) -> Dataset:
@@ -245,6 +251,9 @@ class DatasetLoader:
         # zero-copy horizontal concat and the filters below simply carry the
         # new columns along. Same rows, same values, nothing written.
         ds = _add_source_policy_columns(ds, dataset_cfg, dataset_path)
+        if verbatim := self.config.get("verbatim_sources"):
+            tagged = any(key in verbatim for key in _source_keys(dataset_cfg))
+            ds = _add_constant_column(ds, "_text_verbatim", tagged)
         ds = self._filter_common_voice_down_votes(ds, dataset_path)
 
         # Declarative row filter on a source-metadata column, e.g.
@@ -361,7 +370,7 @@ class DatasetLoader:
         # Preserve the declared casing policy so normalize_label can use it, and
         # the declared punctuation policy so _build_sample can pick the
         # matching prompt.
-        keep_cols = {"audio", "text", "_text_case", "_text_punct"}
+        keep_cols = {"audio", "text", "_text_case", "_text_punct", "_text_verbatim"}
         # Iterate ds.column_names, not keep_cols: select_columns orders the
         # result by its argument, and this keeps the source's column order.
         kept = [c for c in ds.column_names if c in keep_cols]
@@ -503,6 +512,10 @@ class DatasetLoader:
                     ds = self._resample_to_target(ds, target_samples * expansion)
                 else:
                     ds = self._expand_epochs(ds, expansion)
+                weights = self.config.get("source_weights") or {}
+                weight = next((weights[k] for k in _source_keys(d_cfg) if k in weights), 1)
+                if weight != 1:
+                    ds = self._resample_to_target(ds, round(len(ds) * weight))
                 train_datasets.append(ds)
 
             # Per-dataset eval cap applied here (pre-concat) so each eval
@@ -677,14 +690,25 @@ class ASRTrainer(Trainer):
         projector_weight_decay: float | None = None,
         encoder_learning_rate: float | None = None,
         encoder_weight_decay: float | None = None,
+        eval_data_collator: DataCollator | None = None,
         **kwargs: Any,
     ) -> None:
         """Pass `args`/`kwargs` to Trainer; keep per-group LR/decay overrides (None = global)."""
         super().__init__(*args, **kwargs)
+        self.eval_data_collator = eval_data_collator
         self.decoder_learning_rate = decoder_learning_rate
         self.projector_weight_decay = projector_weight_decay
         self.encoder_learning_rate = encoder_learning_rate
         self.encoder_weight_decay = encoder_weight_decay
+
+    def get_eval_dataloader(self, eval_dataset: Any = None) -> Any:
+        """Eval batches through the non-augmenting collator, when one was given."""
+        train_collator = self.data_collator
+        self.data_collator = self.eval_data_collator or train_collator
+        try:
+            return super().get_eval_dataloader(eval_dataset)
+        finally:
+            self.data_collator = train_collator
 
     def create_optimizer(self, model: torch.nn.Module | None = None) -> torch.optim.Optimizer:
         """Optimizer with separate LR / weight decay per component.
@@ -1030,7 +1054,14 @@ def main(cfg: DictConfig) -> None:
     if cfg.training.get("use_liger", True):
         _apply_liger_kernels(cfg)
 
-    model = ASRModel(build_asr_config(cfg))
+    # init_from: start from a trained checkpoint's projector + LoRA with a
+    # fresh optimizer and schedule (resume_from_checkpoint restores both).
+    init_from, asr_config = cfg.training.get("init_from"), build_asr_config(cfg)
+    model = (
+        ASRModel.from_pretrained(init_from, config=asr_config)
+        if init_from
+        else ASRModel(asr_config)
+    )
 
     _require_fused_cross_entropy(model, cfg)
 
@@ -1049,14 +1080,7 @@ def main(cfg: DictConfig) -> None:
 
     train_dataset, val_dataset = DatasetLoader(cfg).load()
 
-    data_collator = DataCollator(
-        tokenizer=model.tokenizer,
-        feature_extractor=model.feature_extractor,
-        sample_rate=cfg.data.sample_rate,
-        projector=model.projector,
-        encoder_conv_layers=model.config.encoder_conv_layers,
-        audio_token=model.audio_token,
-    )
+    data_collator, eval_collator = build_collators(model, cfg.data, cfg.training.get("seed"))
 
     callbacks: list[TrainerCallback] = []
     if push_to_hub:
@@ -1094,6 +1118,7 @@ def main(cfg: DictConfig) -> None:
         projector_weight_decay=projector_weight_decay,
         encoder_learning_rate=encoder_learning_rate,
         encoder_weight_decay=encoder_weight_decay,
+        eval_data_collator=eval_collator,
     )
 
     trainer.train(resume_from_checkpoint=cfg.training.get("resume_from_checkpoint"))

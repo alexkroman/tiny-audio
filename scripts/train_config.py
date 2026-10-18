@@ -71,6 +71,28 @@ class DataConfig:
     epoch_expansion: int = 1
     max_eval_samples: int | None = None
     max_eval_samples_per_dataset: int | None = None
+    # Sources are named "path" (every config of it) or "path:name".
+    # Row-count multiplier, applied after target_samples (>1 repeat-pads).
+    source_weights: dict[str, float] = field(default_factory=dict[str, float])
+    # Sources whose labels are word-for-word: they train under the verbatim
+    # prompts (scripts/train_collator.py) instead of the plain/punct ones.
+    verbatim_sources: list[str] = field(default_factory=list[str])
+    # Training-batch degradation (scripts/train_augment.py); probabilities of 0 disable.
+    noise_prob: float = 0.0
+    noise_snr_db: list[float] = field(default_factory=lambda: [-5.0, 20.0])
+    # Local dir or Hub dataset id of noise recordings, and the files to use.
+    noise_corpus: str | None = None
+    noise_corpus_glob: str = "**/*.wav"
+    bandlimit_prob: float = 0.0
+    bandlimit_hz: list[float] = field(default_factory=lambda: [4000.0])
+    clip_prob: float = 0.0
+    clip_low_quantile: list[float] = field(default_factory=lambda: [0.0, 0.1])
+    clip_high_quantile: list[float] = field(default_factory=lambda: [0.9, 1.0])
+    reverb_prob: float = 0.0
+    reverb_rt60: list[float] = field(default_factory=lambda: [0.2, 1.0])
+    # Local dir or Hub dataset id of measured room responses (synthetic if unset).
+    reverb_corpus: str | None = None
+    reverb_corpus_glob: str = "**/*.wav"
 
 
 @dataclass
@@ -193,6 +215,8 @@ class TrainingConfig:
     ignore_data_skip: bool | None = None
     # A checkpoint path, or true to resume from the latest in output_dir.
     resume_from_checkpoint: Any = None
+    # Path or Hub id: initialize projector + LoRA from it, fresh optimizer/schedule.
+    init_from: str | None = None
     remove_unused_columns: bool | None = None
     label_names: list[str] | None = None
 

@@ -8,15 +8,17 @@ batch ASRModel.forward consumes.
 import logging
 import warnings
 from collections.abc import Sequence
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import numpy.typing as npt
 import torch
+from omegaconf import DictConfig
 from transformers import PreTrainedTokenizerBase, SequenceFeatureExtractor
 from trl.import_utils import TRLExperimentalWarning
 
 from scripts.labels import has_edge_content_tag, normalize_label
+from scripts.train_augment import AudioCorpus, BatchAugmenter
 from tiny_audio.asr_config import (
     DEFAULT_ENCODER_CONV_LAYERS,
     ConvLayerSpec,
@@ -24,6 +26,9 @@ from tiny_audio.asr_config import (
 )
 from tiny_audio.asr_processing import DEFAULT_TRANSCRIBE_PROMPT as TRANSCRIBE_PROMPT
 from tiny_audio.asr_types import AudioFeatureExtractor, OutputLengthProjector
+
+if TYPE_CHECKING:
+    from tiny_audio.asr_modeling import ASRModel
 
 # trl.experimental warns (TRLExperimentalWarning) the first time it is
 # imported; DataCollatorForChatML is the only thing used from it.
@@ -59,6 +64,13 @@ logger: logging.Logger = logging.getLogger(__name__)
 # only in orthographic_wer, the same blind spot that hid the %-stripping bug.
 # Measure before acting.
 TRANSCRIBE_PROMPT_PUNCT = "Transcribe the speech with proper punctuation and capitalization"
+# Sources in `data.verbatim_sources` (word-for-word labels: repeats, false
+# starts, "yeah" not "yes") get their own prompts, so that style is asked for
+# by name rather than riding on whether the labels carry punctuation.
+TRANSCRIBE_PROMPT_VERBATIM = "Transcribe the speech verbatim"
+TRANSCRIBE_PROMPT_VERBATIM_PUNCT = (
+    "Transcribe the speech verbatim with proper punctuation and capitalization"
+)
 
 
 ChatSample = dict[str, list[dict[str, str]]]
@@ -75,8 +87,11 @@ class DataCollator:
         projector: OutputLengthProjector,
         encoder_conv_layers: Sequence[ConvLayerSpec] | None = None,
         audio_token: str = "<audio>",
+        augmenter: BatchAugmenter | None = None,
     ) -> None:
         """Keep the tokenizer, feature extractor and projector a batch is built from."""
+        # Training batches only: the eval collator is built without one.
+        self.augmenter = augmenter
         self.tokenizer = tokenizer
         # `SequenceFeatureExtractor` declares no `__call__`, but every concrete
         # one (Whisper, GLM-ASR) has it; no library type names that surface.
@@ -224,7 +239,11 @@ class DataCollator:
         # Prompt carries the label convention, so the punctuated and
         # unpunctuated halves of the mix stop competing for the same
         # conditioning. Undeclared sources keep the plain prompt.
-        prompt = TRANSCRIBE_PROMPT_PUNCT if feature.get("_text_punct") else TRANSCRIBE_PROMPT
+        punct = bool(feature.get("_text_punct"))
+        if feature.get("_text_verbatim"):
+            prompt = TRANSCRIBE_PROMPT_VERBATIM_PUNCT if punct else TRANSCRIBE_PROMPT_VERBATIM
+        else:
+            prompt = TRANSCRIBE_PROMPT_PUNCT if punct else TRANSCRIBE_PROMPT
         return self._make_messages(num_audio_tokens, prompt, text)
 
     def _make_messages(self, num_audio_tokens: int, prompt: str, response: str) -> ChatSample:
@@ -242,6 +261,8 @@ class DataCollator:
         Rows whose audio is unusable (see `_extract_audio_arrays`) are dropped first.
         """
         audio_arrays, valid_features = self._extract_audio_arrays(features)
+        if self.augmenter is not None:
+            audio_arrays, valid_features = self.augmenter(audio_arrays, valid_features)
 
         audio_out = self.feature_extractor(
             audio_arrays,
@@ -268,3 +289,47 @@ class DataCollator:
         batch["audio_attention_mask"] = audio_attention_mask
         batch["audio_token_counts"] = token_counts_tensor
         return batch
+
+
+def build_collators(
+    model: "ASRModel", data_cfg: DictConfig, seed: int | None
+) -> tuple[DataCollator, DataCollator]:
+    """The training collator (augmenting when `data_cfg` asks) and a plain eval one."""
+    args: dict[str, Any] = {
+        "tokenizer": model.tokenizer,
+        "feature_extractor": model.feature_extractor,
+        "sample_rate": data_cfg.sample_rate,
+        "projector": model.projector,
+        "encoder_conv_layers": model.config.encoder_conv_layers,
+        "audio_token": model.audio_token,
+    }
+
+    def corpus(key: str) -> AudioCorpus | None:
+        source = data_cfg.get(key)
+        if not source:
+            return None
+        found = AudioCorpus(source, data_cfg.get(f"{key}_glob") or "**/*.wav")
+        found.files()  # download/list once here, not in every forked DataLoader worker
+        return found
+
+    def pair(key: str, default: tuple[float, float]) -> tuple[float, float]:
+        low, high = data_cfg.get(key) or default
+        return float(low), float(high)
+
+    augmenter = BatchAugmenter(
+        data_cfg.sample_rate,
+        noise_prob=data_cfg.get("noise_prob") or 0.0,
+        noise_snr_db=pair("noise_snr_db", (-5.0, 20.0)),
+        corpus=corpus("noise_corpus"),
+        bandlimit_prob=data_cfg.get("bandlimit_prob") or 0.0,
+        bandlimit_hz=tuple(float(h) for h in data_cfg.get("bandlimit_hz") or (4000.0,)),
+        clip_prob=data_cfg.get("clip_prob") or 0.0,
+        clip_low_quantile=pair("clip_low_quantile", (0.0, 0.1)),
+        clip_high_quantile=pair("clip_high_quantile", (0.9, 1.0)),
+        reverb_prob=data_cfg.get("reverb_prob") or 0.0,
+        reverb_rt60=pair("reverb_rt60", (0.2, 1.0)),
+        reverb_corpus=corpus("reverb_corpus"),
+        seed=seed,
+    )
+    train = DataCollator(**args, augmenter=augmenter if augmenter.enabled else None)
+    return train, DataCollator(**args)

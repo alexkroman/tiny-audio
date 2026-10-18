@@ -9,7 +9,7 @@ import pytest
 from datasets import Audio, ClassLabel, Dataset
 from omegaconf import DictConfig, OmegaConf
 
-from scripts.train import DatasetLoader, _not_excluded
+from scripts.train import ASRTrainer, DatasetLoader, _not_excluded
 
 
 def _make_cfg(
@@ -491,3 +491,68 @@ class TestNoFullRewrite:
         assert ds["text"] == ["a", "c"]
         assert ds["_text_case"] == ["cased", "cased"]
         assert ds["_text_punct"] == [True, True]
+
+
+class TestSourcePolicies:
+    """data.verbatim_sources and data.source_weights name sources by path or path:name."""
+
+    @staticmethod
+    def _rows(n: int) -> Dataset:
+        return Dataset.from_dict(
+            {
+                "audio": [{"array": np.zeros(16000, dtype=np.float32), "sampling_rate": 16000}] * n,
+                "text": [f"r{i}" for i in range(n)],
+            }
+        ).cast_column("audio", Audio(sampling_rate=16000))
+
+    @staticmethod
+    def _entry(name: str | None = None) -> dict[str, Any]:
+        return {
+            "path": "org/corpus",
+            "name": name,
+            "audio_column": "audio",
+            "text_column": "text",
+            "train_splits": ["train"],
+            "eval_splits": [],
+        }
+
+    def _load(self, n: int, entry: dict[str, Any], **data: Any) -> Dataset:
+        cfg = _make_cfg([entry])
+        for key, value in data.items():
+            cfg.data[key] = value
+        with patch("scripts.train.load_dataset", return_value=self._rows(n)):
+            train, _ = DatasetLoader(cfg).load()
+        assert train is not None
+        return train
+
+    @pytest.mark.parametrize("key", ["org/corpus", "org/corpus:ihm"])
+    def test_verbatim_tag_by_path_or_config(self, key: str) -> None:
+        train = self._load(3, self._entry("ihm"), verbatim_sources=[key])
+        assert train["_text_verbatim"] == [True] * 3
+
+    def test_untagged_source_gets_false_when_any_source_is_tagged(self) -> None:
+        train = self._load(3, self._entry("sdm"), verbatim_sources=["org/corpus:ihm"])
+        assert train["_text_verbatim"] == [False] * 3
+
+    def test_no_column_without_verbatim_sources(self) -> None:
+        assert "_text_verbatim" not in self._load(3, self._entry()).column_names
+
+    @pytest.mark.parametrize(("weight", "rows"), [(2.0, 20), (0.5, 5), (1.0, 10)])
+    def test_weight_scales_the_row_count(self, weight: float, rows: int) -> None:
+        train = self._load(10, self._entry("m"), source_weights={"org/corpus:m": weight})
+        assert len(train) == rows
+
+
+class TestEvalCollator:
+    """ASRTrainer builds eval batches with the non-augmenting collator."""
+
+    def test_eval_dataloader_uses_the_eval_collator(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        trainer = cast("Any", object.__new__(ASRTrainer))
+        trainer.data_collator, trainer.eval_data_collator = "train", "eval"
+
+        def parent(self: Any, _eval_dataset: object = None) -> object:
+            return self.data_collator
+
+        monkeypatch.setattr("transformers.Trainer.get_eval_dataloader", parent)
+        assert trainer.get_eval_dataloader() == "eval"
+        assert trainer.data_collator == "train"
