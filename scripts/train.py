@@ -1054,7 +1054,14 @@ def main(cfg: DictConfig) -> None:
     if cfg.training.get("use_liger", True):
         _apply_liger_kernels(cfg)
 
-    model = ASRModel(build_asr_config(cfg))
+    # init_from: start from a trained checkpoint's projector + LoRA with a
+    # fresh optimizer and schedule (resume_from_checkpoint restores both).
+    init_from, asr_config = cfg.training.get("init_from"), build_asr_config(cfg)
+    model = (
+        ASRModel.from_pretrained(init_from, config=asr_config)
+        if init_from
+        else ASRModel(asr_config)
+    )
 
     _require_fused_cross_entropy(model, cfg)
 

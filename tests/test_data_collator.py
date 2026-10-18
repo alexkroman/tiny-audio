@@ -372,10 +372,10 @@ class TestPromptChoice:
         assert user.endswith(" " + prompt)
 
 
-class TestNoiseOnlyRows:
-    """A noise-only row (target "") still teaches the model to stop."""
+class TestAugmentedBatch:
+    """A degraded training batch keeps its targets."""
 
-    def test_empty_target_labels_only_the_stop_token(
+    def test_targets_survive_degradation(
         self,
         tokenizer: PreTrainedTokenizerBase,
         feature_extractor: WhisperFeatureExtractor,
@@ -386,14 +386,15 @@ class TestNoiseOnlyRows:
             feature_extractor=feature_extractor,
             sample_rate=16000,
             projector=projector,
-            augmenter=BatchAugmenter(16000, noise_only_prob=1.0, seed=0),
+            augmenter=BatchAugmenter(
+                16000, noise_prob=1.0, bandlimit_prob=1.0, clip_prob=1.0, seed=0
+            ),
         )
         batch = collator([create_sample("first row"), create_sample("second row")])
-        im_end = tokenizer.convert_tokens_to_ids("<|im_end|>")
-        for labels in batch["labels"].tolist():
-            kept = [t for t in labels if t != -100]
-            assert im_end in kept
-            assert "row" not in tokenizer.decode(kept)
+        for labels, text in zip(batch["labels"].tolist(), ("first row", "second row"), strict=True):
+            decoded = tokenizer.decode([t for t in labels if t != -100])
+            assert isinstance(decoded, str)
+            assert text in decoded.lower()
 
 
 class TestBuildCollators:
@@ -412,7 +413,7 @@ class TestBuildCollators:
                 audio_token="<audio>",
             ),
         )
-        on = OmegaConf.create({"sample_rate": 16000, "babble_prob": 0.1, "noise_only_prob": 0.02})
+        on = OmegaConf.create({"sample_rate": 16000, "noise_prob": 0.3, "clip_prob": 0.1})
         train, evaluation = build_collators(model, on, seed=0)
         assert train.augmenter is not None
         assert evaluation.augmenter is None

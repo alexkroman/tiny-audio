@@ -18,7 +18,7 @@ from transformers import PreTrainedTokenizerBase, SequenceFeatureExtractor
 from trl.import_utils import TRLExperimentalWarning
 
 from scripts.labels import has_edge_content_tag, normalize_label
-from scripts.train_augment import BatchAugmenter
+from scripts.train_augment import BatchAugmenter, NoiseCorpus
 from tiny_audio.asr_config import (
     DEFAULT_ENCODER_CONV_LAYERS,
     ConvLayerSpec,
@@ -303,12 +303,23 @@ def build_collators(
         "encoder_conv_layers": model.config.encoder_conv_layers,
         "audio_token": model.audio_token,
     }
-    snr = data_cfg.get("babble_snr_db") or (0.0, 15.0)
+    corpus_id = data_cfg.get("noise_corpus")
+    corpus = (
+        NoiseCorpus(corpus_id, data_cfg.get("noise_corpus_glob") or "**/*.wav")
+        if corpus_id
+        else None
+    )
+    snr = data_cfg.get("noise_snr_db") or (-5.0, 20.0)
+    clip_frac = data_cfg.get("clip_fraction") or (0.007, 0.09)
     augmenter = BatchAugmenter(
         data_cfg.sample_rate,
-        babble_prob=data_cfg.get("babble_prob") or 0.0,
-        babble_snr_db=(float(snr[0]), float(snr[1])),
-        noise_only_prob=data_cfg.get("noise_only_prob") or 0.0,
+        noise_prob=data_cfg.get("noise_prob") or 0.0,
+        noise_snr_db=(float(snr[0]), float(snr[1])),
+        corpus=corpus,
+        bandlimit_prob=data_cfg.get("bandlimit_prob") or 0.0,
+        bandlimit_hz=tuple(float(h) for h in data_cfg.get("bandlimit_hz") or (4000.0,)),
+        clip_prob=data_cfg.get("clip_prob") or 0.0,
+        clip_fraction=(float(clip_frac[0]), float(clip_frac[1])),
         seed=seed,
     )
     train = DataCollator(**args, augmenter=augmenter if augmenter.enabled else None)

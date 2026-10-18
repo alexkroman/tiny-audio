@@ -33,6 +33,7 @@ TRAIN_SCRIPT_KEYS = {
     "encoder_learning_rate",
     "encoder_weight_decay",
     "use_cache",
+    "init_from",
     *TRAINING_MODEL_PARAMS,
 }
 

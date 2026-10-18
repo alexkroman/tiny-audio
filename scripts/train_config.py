@@ -77,12 +77,16 @@ class DataConfig:
     # Sources whose labels are word-for-word: they train under the verbatim
     # prompts (scripts/train_collator.py) instead of the plain/punct ones.
     verbatim_sources: list[str] = field(default_factory=list[str])
-    # Training-batch augmentation (scripts/train_augment.py); 0 disables.
-    # babble: mix another row of the batch in at an SNR drawn from babble_snr_db.
-    babble_prob: float = 0.0
-    babble_snr_db: list[float] = field(default_factory=lambda: [0.0, 15.0])
-    # noise_only: replace the row with noise or many-talker babble, target "".
-    noise_only_prob: float = 0.0
+    # Training-batch degradation (scripts/train_augment.py); probabilities of 0 disable.
+    noise_prob: float = 0.0
+    noise_snr_db: list[float] = field(default_factory=lambda: [-5.0, 20.0])
+    # Local dir or Hub dataset id of noise recordings, and the files to use.
+    noise_corpus: str | None = None
+    noise_corpus_glob: str = "**/*.wav"
+    bandlimit_prob: float = 0.0
+    bandlimit_hz: list[float] = field(default_factory=lambda: [4000.0])
+    clip_prob: float = 0.0
+    clip_fraction: list[float] = field(default_factory=lambda: [0.007, 0.09])
 
 
 @dataclass
@@ -205,6 +209,8 @@ class TrainingConfig:
     ignore_data_skip: bool | None = None
     # A checkpoint path, or true to resume from the latest in output_dir.
     resume_from_checkpoint: Any = None
+    # Path or Hub id: initialize projector + LoRA from it, fresh optimizer/schedule.
+    init_from: str | None = None
     remove_unused_columns: bool | None = None
     label_names: list[str] | None = None
 

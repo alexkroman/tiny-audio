@@ -15,9 +15,12 @@
 #    cancel in row count (AMI ~148K x2, TEDLIUM ~195K x1.5, NOTSOFAR x2, Giga M
 #    ~657K x0.5). An earlier reweighting of this mix (the "tilt") was rolled
 #    back for cross-eval regressions, so read every set, not just the targets.
-# 3. Babble and noise-only augmentation (scripts/train_augment.py). On URGENT
-#    the decoder loops for 100+ words on audio it cannot make out; noise-only
-#    rows with an empty target show it that stopping is the answer.
+# 3. Degradation matched to URGENT 2024 (scripts/train_augment.py), from the
+#    noisy-vs-clean analysis of 2026-10-17: SNR is uniform -5..20 dB there and
+#    SNR < 0 is 66% of the excess errors; 34% of clips are clipped (median 3.7%
+#    of samples, 0.7-9%); 23% are band-limited below 8 kHz, mostly at 4 kHz.
+#    Noise comes from MUSAN's noise set (not one of URGENT's noise sources, so
+#    no test noise leaks in), synthetic broadband noise, or batch babble.
 #
 # Baseline to beat (2026-10-17, granite-qwen-frozen-nc, leaderboard
 # normalizer): mean of 9 = 5.711, #28/56. AMI 8.01, E22 8.37, Giga 7.86,
@@ -37,9 +40,16 @@ data:
     "sanchit-gandhi/tedlium-data": 1.5
     "mazesmazes/notsofar-train": 2.0
     "speechcolab/gigaspeech:m": 0.5
-  babble_prob: 0.15
-  babble_snr_db: [0.0, 15.0]
-  noise_only_prob: 0.02
+  noise_prob: 0.35
+  noise_snr_db: [-5.0, 20.0]
+  noise_corpus: FluidInference/musan
+  noise_corpus_glob: "noise/**/*.wav"
+  bandlimit_prob: 0.2
+  # Uniform over the list: 4 kHz three times matches its share of URGENT's
+  # sub-8 kHz cutoffs (121 at 4 kHz, 16 at 5 kHz, 51 at 7 kHz).
+  bandlimit_hz: [4000, 4000, 4000, 5512, 7000]
+  clip_prob: 0.15
+  clip_fraction: [0.007, 0.09]
 
 training:
   hub_model_id: "mazesmazes/tiny-audio-granite-qwen-frozen-nc-verbatim"
