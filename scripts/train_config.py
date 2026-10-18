@@ -90,6 +90,9 @@ class DataConfig:
     clip_high_quantile: list[float] = field(default_factory=lambda: [0.9, 1.0])
     reverb_prob: float = 0.0
     reverb_rt60: list[float] = field(default_factory=lambda: [0.2, 1.0])
+    # Local dir or Hub dataset id of measured room responses (synthetic if unset).
+    reverb_corpus: str | None = None
+    reverb_corpus_glob: str = "**/*.wav"
 
 
 @dataclass

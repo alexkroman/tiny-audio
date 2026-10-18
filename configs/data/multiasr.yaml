@@ -826,13 +826,19 @@ epoch_expansion: 1
 # U(0, 0.1) and above one U(0.9, 1.0)). Measured on the leaderboard pair
 # (2026-10-17, granite-qwen-frozen-nc): the degradation costs 8.07 WER pts
 # (13.10 noisy vs 5.03 clean), SNR < 0 is 66% of it. Mirrored here without
-# URGENT's data: synthetic room responses instead of DNS5 RIRs, MUSAN noise
+# URGENT's data: measured rooms from the MIT IR Survey (plus some synthetic
+# ones) instead of DNS5 RIRs, MUSAN noise
 # plus synthetic broadband noise and batch babble instead of DNS5/WHAM!, so no
 # test noise or rooms reach training. Degradations are drawn independently
 # (URGENT's bandwidth-limit/clipping are exclusive). Targets are unchanged and
 # eval batches are never degraded. Not yet measured in a training run: read
 # URGENT against 13.09 and check that clean sets (LS, SPGI, E22) hold.
 reverb_prob: 0.5
+# MIT Acoustical Reverberation Scene Statistics Survey (Traer & McDermott
+# 2016): 270 measured responses from everyday places, CC BY 4.0, 16 kHz mirror.
+reverb_corpus: TaterTotterson/MIT_environmental_impulse_responses
+reverb_corpus_glob: "16khz/*.wav"
+# RT60 range of the synthetic rooms (scripts/train_augment.py SYNTHETIC_REVERB_SHARE).
 reverb_rt60: [0.2, 1.0]
 noise_prob: 0.35
 noise_snr_db: [-5.0, 20.0]

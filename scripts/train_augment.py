@@ -9,8 +9,10 @@ same 1,000 utterances; granite-qwen-frozen-nc, 2026-10-17), SNR below 0 dB is
 66% of the excess errors and clipping and a sub-8 kHz bandwidth each add
 several WER points. So each training row independently may get, in this order:
 
-- reverberation (`data.reverb_prob`) from a synthetic room response with an
-  RT60 drawn from `data.reverb_rt60` (URGENT's own RIRs are DNS5's, kept out);
+- reverberation (`data.reverb_prob`) through a measured room response from
+  `data.reverb_corpus` (the MIT IR Survey: 270 everyday places, not one of
+  URGENT's DNS5 RIR sources) or, `SYNTHETIC_REVERB_SHARE` of the time, a
+  synthetic one with an RT60 drawn from `data.reverb_rt60`;
 - noise (`data.noise_prob`) at an SNR drawn from `data.noise_snr_db`, from a
   noise corpus (`data.noise_corpus`, e.g. MUSAN's noise set, which URGENT did
   not draw from), synthetic white/pink/brown noise, or another row of the batch;
@@ -38,6 +40,11 @@ from scipy.signal import fftconvolve, resample_poly
 # Noise source mix when a row gets noise: corpus, synthetic broadband, batch babble.
 # Without a corpus its share goes to synthetic noise.
 SOURCE_WEIGHTS = {"corpus": 0.5, "synthetic": 0.3, "babble": 0.2}
+# Share of reverberated rows that use a synthetic room even when a corpus of
+# measured rooms is configured: 270 rooms alone repeat quickly.
+SYNTHETIC_REVERB_SHARE = 0.2
+# Measured responses are cut to this long after their direct path.
+MAX_RIR_SECONDS = 1.5
 _EPS = 1e-8
 
 
@@ -110,17 +117,23 @@ def room_response(
     return rir.astype(np.float32)
 
 
-def reverberate(
-    audio: npt.NDArray[Any], rt60: float, sample_rate: int, rng: np.random.Generator
-) -> npt.NDArray[np.float32]:
-    """`audio` through a synthetic room with reverberation time `rt60`, same length and level."""
+def reverberate(audio: npt.NDArray[Any], rir: npt.NDArray[Any]) -> npt.NDArray[np.float32]:
+    """`audio` convolved with room response `rir`, same length and level."""
     x = audio.astype(np.float32, copy=False)
-    wet = fftconvolve(x, room_response(rt60, sample_rate, rng))[: x.size].astype(np.float32)
+    wet = fftconvolve(x, rir)[: x.size].astype(np.float32)
     return _peak_safe(wet * np.float32(_rms(x) / _rms(wet)))
 
 
-class NoiseCorpus:
-    """Random excerpts from a folder (or Hub dataset) of noise recordings."""
+def align_rir(rir: npt.NDArray[Any], sample_rate: int) -> npt.NDArray[np.float32]:
+    """A measured response from 1 ms before its direct path (its peak), cut to
+    `MAX_RIR_SECONDS` and scaled so the direct path is 1."""
+    start = max(0, int(np.argmax(np.abs(rir))) - sample_rate // 1000)
+    out = rir[start : start + int(MAX_RIR_SECONDS * sample_rate)].astype(np.float32)
+    return out / (float(np.abs(out).max()) + _EPS)
+
+
+class AudioCorpus:
+    """Recordings from a folder (or Hub dataset): noise excerpts or whole room responses."""
 
     def __init__(self, source: str, pattern: str = "**/*.wav") -> None:
         """`source`: a local directory, or a Hub dataset id downloaded on first use."""
@@ -139,20 +152,25 @@ class NoiseCorpus:
                 )
             self._files = sorted(root.glob(self.pattern))
             if not self._files:
-                msg = f"no noise files match {self.pattern!r} under {root}"
+                msg = f"no audio files match {self.pattern!r} under {root}"
                 raise FileNotFoundError(msg)
         return self._files
+
+    def recording(self, sample_rate: int, rng: np.random.Generator) -> npt.NDArray[np.float32]:
+        """A random whole recording, mono, at `sample_rate`."""
+        path = self.files()[int(rng.integers(len(self.files())))]
+        data, sr = sf.read(io.BytesIO(path.read_bytes()), dtype="float32", always_2d=True)
+        audio = data.mean(axis=1)
+        if sr != sample_rate:
+            ratio = Fraction(sample_rate, sr).limit_denominator(1000)
+            audio = resample_poly(audio, ratio.numerator, ratio.denominator).astype(np.float32)
+        return audio
 
     def excerpt(
         self, size: int, sample_rate: int, rng: np.random.Generator
     ) -> npt.NDArray[np.float32]:
         """`size` samples at `sample_rate` from a random recording at a random offset."""
-        path = self.files()[int(rng.integers(len(self.files())))]
-        data, sr = sf.read(io.BytesIO(path.read_bytes()), dtype="float32", always_2d=True)
-        noise = data.mean(axis=1)
-        if sr != sample_rate:
-            ratio = Fraction(sample_rate, sr).limit_denominator(1000)
-            noise = resample_poly(noise, ratio.numerator, ratio.denominator).astype(np.float32)
+        noise = self.recording(sample_rate, rng)
         if noise.size > size:
             start = int(rng.integers(noise.size - size))
             noise = noise[start : start + size]
@@ -167,7 +185,7 @@ class BatchAugmenter:
         sample_rate: int,
         noise_prob: float = 0.0,
         noise_snr_db: tuple[float, float] = (-5.0, 20.0),
-        corpus: NoiseCorpus | None = None,
+        corpus: AudioCorpus | None = None,
         bandlimit_prob: float = 0.0,
         bandlimit_hz: tuple[float, ...] = (4000.0,),
         clip_prob: float = 0.0,
@@ -175,6 +193,7 @@ class BatchAugmenter:
         clip_high_quantile: tuple[float, float] = (0.9, 1.0),
         reverb_prob: float = 0.0,
         reverb_rt60: tuple[float, float] = (0.2, 1.0),
+        reverb_corpus: AudioCorpus | None = None,
         seed: int | None = None,
     ) -> None:
         """Keep the rates; the RNG is created per process (see `_rng`)."""
@@ -183,7 +202,11 @@ class BatchAugmenter:
         self.bandlimit_prob, self.bandlimit_hz = bandlimit_prob, bandlimit_hz
         self.clip_prob = clip_prob
         self.clip_low_quantile, self.clip_high_quantile = clip_low_quantile, clip_high_quantile
-        self.reverb_prob, self.reverb_rt60 = reverb_prob, reverb_rt60
+        self.reverb_prob, self.reverb_rt60, self.reverb_corpus = (
+            reverb_prob,
+            reverb_rt60,
+            reverb_corpus,
+        )
         self._seed = seed
         self._pid: int | None = None
         self._generator: np.random.Generator | None = None
@@ -221,12 +244,18 @@ class BatchAugmenter:
             return _fit(others[int(rng.integers(len(others)))], size)
         return colored_noise(size, float(rng.choice([0.0, 1.0, 2.0])), rng)
 
+    def room(self, rng: np.random.Generator) -> npt.NDArray[np.float32]:
+        """A measured room response, or a synthetic one (see `SYNTHETIC_REVERB_SHARE`)."""
+        if self.reverb_corpus is not None and rng.random() >= SYNTHETIC_REVERB_SHARE:
+            return align_rir(self.reverb_corpus.recording(self.sample_rate, rng), self.sample_rate)
+        return room_response(float(rng.uniform(*self.reverb_rt60)), self.sample_rate, rng)
+
     def degrade(self, audio: npt.NDArray[Any], others: list[npt.NDArray[Any]]) -> npt.NDArray[Any]:
         """One row through reverb, noise, a bandwidth limit and clipping, each by chance."""
         rng = self._rng()
         out = audio
         if rng.random() < self.reverb_prob:
-            out = reverberate(out, float(rng.uniform(*self.reverb_rt60)), self.sample_rate, rng)
+            out = reverberate(out, self.room(rng))
         if rng.random() < self.noise_prob:
             out = mix_at_snr(
                 out, self.noise(out.size, others), float(rng.uniform(*self.noise_snr_db))

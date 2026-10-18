@@ -9,8 +9,10 @@ import pytest
 import soundfile as sf
 
 from scripts.train_augment import (
+    MAX_RIR_SECONDS,
+    AudioCorpus,
     BatchAugmenter,
-    NoiseCorpus,
+    align_rir,
     bandlimit,
     clip,
     colored_noise,
@@ -114,28 +116,54 @@ class TestReverb:
 
     def test_reverberate_keeps_length_and_level(self) -> None:
         tone = _tone(1.0)
-        out = reverberate(tone, 0.6, 16000, np.random.default_rng(0))
+        out = reverberate(tone, room_response(0.6, 16000, np.random.default_rng(0)))
         assert out.shape == tone.shape
         assert np.sqrt(np.mean(out**2)) == pytest.approx(np.sqrt(np.mean(tone**2)), rel=0.02)
         assert not np.allclose(out, tone)
 
 
-class TestNoiseCorpus:
-    """NoiseCorpus draws excerpts of the requested length at the requested rate."""
+class TestAudioCorpus:
+    """AudioCorpus draws excerpts of the requested length at the requested rate."""
 
     def test_excerpts_are_resampled_and_fitted(self, tmp_path: Path) -> None:
         rng = np.random.default_rng(0)
         (tmp_path / "noise").mkdir()
         sf.write(tmp_path / "noise" / "a.wav", rng.standard_normal(8000) * 0.1, 8000)
         sf.write(tmp_path / "noise" / "b.wav", rng.standard_normal(48000) * 0.1, 16000)
-        corpus = NoiseCorpus(str(tmp_path), "noise/*.wav")
+        corpus = AudioCorpus(str(tmp_path), "noise/*.wav")
         assert len(corpus.files()) == 2
         for _ in range(4):
             assert corpus.excerpt(24000, 16000, rng).shape == (24000,)
 
     def test_empty_corpus_fails_loudly(self, tmp_path: Path) -> None:
-        with pytest.raises(FileNotFoundError, match="no noise files"):
-            NoiseCorpus(str(tmp_path)).files()
+        with pytest.raises(FileNotFoundError, match="no audio files"):
+            AudioCorpus(str(tmp_path)).files()
+
+
+class TestMeasuredRooms:
+    """Measured responses start at their direct path; the augmenter mixes in synthetic rooms."""
+
+    def test_align_rir_starts_at_the_direct_path(self) -> None:
+        rir = np.zeros(48000, dtype=np.float32)
+        rir[800] = -0.5  # direct path after 50 ms of pre-delay
+        rir[801:] = 0.01 * np.exp(-np.arange(47199) / 3000)
+        out = align_rir(rir, 16000)
+        assert int(np.argmax(np.abs(out))) == 16  # 1 ms of lead kept
+        assert float(np.abs(out).max()) == pytest.approx(1.0)
+        assert out.size == int(MAX_RIR_SECONDS * 16000)
+
+    def test_room_draws_measured_and_synthetic(self, tmp_path: Path) -> None:
+        marker = np.zeros(4000, dtype=np.float32)
+        marker[0], marker[1] = 1.0, 0.77  # a second tap no synthetic room has
+        sf.write(tmp_path / "room.wav", marker, 16000)
+        aug = BatchAugmenter(
+            16000, reverb_prob=1.0, reverb_corpus=AudioCorpus(str(tmp_path)), seed=0
+        )
+        # 16-bit PCM on disk, so compare loosely.
+        measured = sum(np.isclose(aug.room(aug._rng())[1], 0.77, atol=1e-3) for _ in range(200))
+        assert 120 < measured < 190  # ~ (1 - SYNTHETIC_REVERB_SHARE) of 200
+        no_corpus = BatchAugmenter(16000, reverb_prob=1.0, seed=0)
+        assert no_corpus.room(no_corpus._rng())[0] == 1.0
 
 
 class TestBatchAugmenter:
@@ -152,7 +180,7 @@ class TestBatchAugmenter:
         aug = BatchAugmenter(
             16000,
             noise_prob=1.0,
-            corpus=NoiseCorpus(str(tmp_path)),
+            corpus=AudioCorpus(str(tmp_path)),
             bandlimit_prob=1.0,
             clip_prob=1.0,
             reverb_prob=1.0,
@@ -170,7 +198,7 @@ class TestBatchAugmenter:
     def test_noise_sources_cover_every_branch(self, tmp_path: Path, corpus: bool) -> None:
         sf.write(tmp_path / "n.wav", np.random.default_rng(0).standard_normal(4000) * 0.1, 16000)
         aug = BatchAugmenter(
-            16000, noise_prob=1.0, corpus=NoiseCorpus(str(tmp_path)) if corpus else None, seed=1
+            16000, noise_prob=1.0, corpus=AudioCorpus(str(tmp_path)) if corpus else None, seed=1
         )
         for _ in range(20):
             assert aug.noise(8000, [_tone(0.3)]).shape == (8000,)

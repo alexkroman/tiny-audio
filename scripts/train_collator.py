@@ -18,7 +18,7 @@ from transformers import PreTrainedTokenizerBase, SequenceFeatureExtractor
 from trl.import_utils import TRLExperimentalWarning
 
 from scripts.labels import has_edge_content_tag, normalize_label
-from scripts.train_augment import BatchAugmenter, NoiseCorpus
+from scripts.train_augment import AudioCorpus, BatchAugmenter
 from tiny_audio.asr_config import (
     DEFAULT_ENCODER_CONV_LAYERS,
     ConvLayerSpec,
@@ -303,14 +303,14 @@ def build_collators(
         "encoder_conv_layers": model.config.encoder_conv_layers,
         "audio_token": model.audio_token,
     }
-    corpus_id = data_cfg.get("noise_corpus")
-    corpus = (
-        NoiseCorpus(corpus_id, data_cfg.get("noise_corpus_glob") or "**/*.wav")
-        if corpus_id
-        else None
-    )
-    if corpus is not None:
-        corpus.files()  # download/list once here, not in every forked DataLoader worker
+
+    def corpus(key: str) -> AudioCorpus | None:
+        source = data_cfg.get(key)
+        if not source:
+            return None
+        found = AudioCorpus(source, data_cfg.get(f"{key}_glob") or "**/*.wav")
+        found.files()  # download/list once here, not in every forked DataLoader worker
+        return found
 
     def pair(key: str, default: tuple[float, float]) -> tuple[float, float]:
         low, high = data_cfg.get(key) or default
@@ -320,7 +320,7 @@ def build_collators(
         data_cfg.sample_rate,
         noise_prob=data_cfg.get("noise_prob") or 0.0,
         noise_snr_db=pair("noise_snr_db", (-5.0, 20.0)),
-        corpus=corpus,
+        corpus=corpus("noise_corpus"),
         bandlimit_prob=data_cfg.get("bandlimit_prob") or 0.0,
         bandlimit_hz=tuple(float(h) for h in data_cfg.get("bandlimit_hz") or (4000.0,)),
         clip_prob=data_cfg.get("clip_prob") or 0.0,
@@ -328,6 +328,7 @@ def build_collators(
         clip_high_quantile=pair("clip_high_quantile", (0.9, 1.0)),
         reverb_prob=data_cfg.get("reverb_prob") or 0.0,
         reverb_rt60=pair("reverb_rt60", (0.2, 1.0)),
+        reverb_corpus=corpus("reverb_corpus"),
         seed=seed,
     )
     train = DataCollator(**args, augmenter=augmenter if augmenter.enabled else None)

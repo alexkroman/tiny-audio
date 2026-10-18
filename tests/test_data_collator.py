@@ -448,7 +448,10 @@ class TestBuildCollators:
                 "noise_corpus_glob": "noise/*.wav",
             }
         )
+        cfg["reverb_corpus"], cfg["reverb_corpus_glob"] = str(tmp_path), "noise/*.wav"
         augmenter = build_collators(model, cfg, seed=0)[0].augmenter
         assert augmenter is not None
         assert augmenter.corpus is not None
         assert augmenter.corpus._files == [tmp_path / "noise" / "hum.wav"]
+        assert augmenter.reverb_corpus is not None
+        assert augmenter.reverb_corpus._files == [tmp_path / "noise" / "hum.wav"]
