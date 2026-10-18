@@ -1,10 +1,12 @@
 """Tests for DataCollator label masking behavior."""
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import numpy as np
 import pytest
+import soundfile as sf
 import torch
 from omegaconf import OmegaConf
 from transformers import AutoTokenizer, PreTrainedTokenizerBase, WhisperFeatureExtractor
@@ -387,7 +389,7 @@ class TestAugmentedBatch:
             sample_rate=16000,
             projector=projector,
             augmenter=BatchAugmenter(
-                16000, noise_prob=1.0, bandlimit_prob=1.0, clip_prob=1.0, seed=0
+                16000, noise_prob=1.0, bandlimit_prob=1.0, clip_prob=1.0, reverb_prob=1.0, seed=0
             ),
         )
         batch = collator([create_sample("first row"), create_sample("second row")])
@@ -419,3 +421,34 @@ class TestBuildCollators:
         assert evaluation.augmenter is None
         off = OmegaConf.create({"sample_rate": 16000})
         assert build_collators(model, off, seed=0)[0].augmenter is None
+
+    def test_noise_corpus_is_listed_before_workers_fork(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        feature_extractor: WhisperFeatureExtractor,
+        tmp_path: Path,
+    ) -> None:
+        (tmp_path / "noise").mkdir()
+        sf.write(tmp_path / "noise" / "hum.wav", np.zeros(1600, dtype=np.float32), 16000)
+        model = cast(
+            "Any",
+            SimpleNamespace(
+                tokenizer=tokenizer,
+                feature_extractor=feature_extractor,
+                projector=MockProjector(),
+                config=SimpleNamespace(encoder_conv_layers=None),
+                audio_token="<audio>",
+            ),
+        )
+        cfg = OmegaConf.create(
+            {
+                "sample_rate": 16000,
+                "noise_prob": 0.3,
+                "noise_corpus": str(tmp_path),
+                "noise_corpus_glob": "noise/*.wav",
+            }
+        )
+        augmenter = build_collators(model, cfg, seed=0)[0].augmenter
+        assert augmenter is not None
+        assert augmenter.corpus is not None
+        assert augmenter.corpus._files == [tmp_path / "noise" / "hum.wav"]

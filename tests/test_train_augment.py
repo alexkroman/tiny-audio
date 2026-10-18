@@ -15,6 +15,8 @@ from scripts.train_augment import (
     clip,
     colored_noise,
     mix_at_snr,
+    reverberate,
+    room_response,
 )
 
 
@@ -81,19 +83,41 @@ class TestBandlimit:
 
 
 class TestClip:
-    """clip flattens the requested share of samples and keeps the level."""
+    """clip flattens everything outside two quantiles (URGENT's scheme) and keeps the level."""
 
-    @pytest.mark.parametrize("fraction", [0.007, 0.037, 0.09])
-    def test_clipped_share_and_level(self, fraction: float) -> None:
+    @pytest.mark.parametrize(("low_q", "high_q"), [(0.0, 0.9), (0.05, 0.95), (0.1, 1.0)])
+    def test_clipped_shares_and_level(self, low_q: float, high_q: float) -> None:
         speech = (np.random.default_rng(0).standard_normal(16000) * 0.1).astype(np.float32)
-        out = clip(speech, fraction)
-        at_peak = np.isclose(np.abs(out), np.abs(out).max(), rtol=1e-4).mean()
-        assert at_peak == pytest.approx(fraction, abs=0.003)
+        out = clip(speech, low_q, high_q)
+        assert np.isclose(out, out.min(), rtol=1e-4).mean() == pytest.approx(low_q, abs=0.003)
+        assert np.isclose(out, out.max(), rtol=1e-4).mean() == pytest.approx(1 - high_q, abs=0.003)
         assert np.sqrt(np.mean(out**2)) == pytest.approx(np.sqrt(np.mean(speech**2)), rel=0.02)
 
     def test_silence_is_left_alone(self) -> None:
         silence = np.zeros(100, dtype=np.float32)
-        np.testing.assert_array_equal(clip(silence, 0.05), silence)
+        np.testing.assert_array_equal(clip(silence, 0.05, 0.95), silence)
+
+
+class TestReverb:
+    """The synthetic room decays 60 dB in RT60; reverberated audio keeps length and level."""
+
+    @pytest.mark.parametrize("rt60", [0.3, 0.8])
+    def test_tail_falls_60_db_in_rt60(self, rt60: float) -> None:
+        rir = room_response(rt60, 16000, np.random.default_rng(0))
+        assert rir[0] == 1.0
+        tail = rir[1:].astype(np.float64) ** 2
+        frame = 400
+        level = 10 * np.log10(np.convolve(tail, np.ones(frame) / frame, mode="valid") + 1e-30)
+        start = level[0]
+        at_rt60 = level[int(rt60 * 16000) - frame]
+        assert start - at_rt60 == pytest.approx(60.0, abs=6.0)
+
+    def test_reverberate_keeps_length_and_level(self) -> None:
+        tone = _tone(1.0)
+        out = reverberate(tone, 0.6, 16000, np.random.default_rng(0))
+        assert out.shape == tone.shape
+        assert np.sqrt(np.mean(out**2)) == pytest.approx(np.sqrt(np.mean(tone**2)), rel=0.02)
+        assert not np.allclose(out, tone)
 
 
 class TestNoiseCorpus:
@@ -131,6 +155,7 @@ class TestBatchAugmenter:
             corpus=NoiseCorpus(str(tmp_path)),
             bandlimit_prob=1.0,
             clip_prob=1.0,
+            reverb_prob=1.0,
             seed=0,
         )
         audios, features = _rows(4)

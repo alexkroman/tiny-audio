@@ -1,19 +1,24 @@
 """Training-batch audio degradation matched to the Open ASR leaderboard's URGENT 2024 set.
 
-Measured on URGENT (the noisy and clean configs are the same 1,000 utterances,
-so noisy-minus-clean errors isolate the degradation; granite-qwen-frozen-nc,
-2026-10-17): SNR below 0 dB is 66% of the excess errors, clipping adds ~7.6 WER
-points per clip and a sub-8 kHz bandwidth ~5.1, while reverberation and tonal
-or musical noise cost next to nothing. The worst noise is steady, broadband and
-non-tonal; babble is as bad. So each training row independently may get:
+The leaderboard's URGENT test is the challenge's simulated validation set, and
+its recipe is public (urgent-challenge/urgent2024_challenge,
+conf/simulation_validation.yaml): reverberation on half the clips, noise at an
+SNR uniform in -5..20 dB on every clip, then either nothing, a bandwidth limit
+or clipping. Measured on the leaderboard pair (noisy and clean configs are the
+same 1,000 utterances; granite-qwen-frozen-nc, 2026-10-17), SNR below 0 dB is
+66% of the excess errors and clipping and a sub-8 kHz bandwidth each add
+several WER points. So each training row independently may get, in this order:
 
+- reverberation (`data.reverb_prob`) from a synthetic room response with an
+  RT60 drawn from `data.reverb_rt60` (URGENT's own RIRs are DNS5's, kept out);
 - noise (`data.noise_prob`) at an SNR drawn from `data.noise_snr_db`, from a
   noise corpus (`data.noise_corpus`, e.g. MUSAN's noise set, which URGENT did
   not draw from), synthetic white/pink/brown noise, or another row of the batch;
 - a bandwidth limit (`data.bandlimit_prob`) at a cutoff drawn from
   `data.bandlimit_hz`;
-- clipping (`data.clip_prob`) of a share of samples drawn from
-  `data.clip_fraction`.
+- clipping (`data.clip_prob`) below a quantile drawn from
+  `data.clip_low_quantile` and above one drawn from `data.clip_high_quantile`,
+  URGENT's two-sided scheme.
 
 Targets are unchanged. Applied to training batches only.
 """
@@ -28,7 +33,7 @@ import numpy as np
 import numpy.typing as npt
 import soundfile as sf
 from huggingface_hub import snapshot_download
-from scipy.signal import resample_poly
+from scipy.signal import fftconvolve, resample_poly
 
 # Noise source mix when a row gets noise: corpus, synthetic broadband, batch babble.
 # Without a corpus its share goes to synthetic noise.
@@ -80,14 +85,38 @@ def bandlimit(
     return np.fft.irfft(spectrum, n=audio.size).astype(np.float32)
 
 
-def clip(audio: npt.NDArray[Any], fraction: float) -> npt.NDArray[np.float32]:
-    """Hard-clip the loudest `fraction` of samples, keeping the overall level."""
+def clip(audio: npt.NDArray[Any], low_q: float, high_q: float) -> npt.NDArray[np.float32]:
+    """Clip every sample below the `low_q` quantile or above the `high_q` one
+    (URGENT's scheme: up to 10% on each side), keeping the overall level."""
     x = audio.astype(np.float32, copy=False)
-    level = float(np.quantile(np.abs(x), 1.0 - fraction))
-    if level <= 0:
+    low, high = np.quantile(x, [low_q, high_q])
+    if high <= low:
         return x
-    clipped = np.clip(x, -level, level)
+    clipped = np.clip(x, low, high)
     return _peak_safe(clipped * np.float32(_rms(x) / _rms(clipped)))
+
+
+def room_response(
+    rt60: float, sample_rate: int, rng: np.random.Generator
+) -> npt.NDArray[np.float32]:
+    """A synthetic room impulse response: a direct path and an exponentially
+    decaying noise tail that falls 60 dB in `rt60` seconds."""
+    n = max(2, int(min(1.2 * rt60, 1.5) * sample_rate))
+    t = np.arange(n) / sample_rate
+    tail = rng.standard_normal(n) * np.exp(-np.log(1000.0) * t / rt60)
+    tail[0] = 0.0
+    rir = tail / (np.sqrt(np.sum(tail**2)) + _EPS) * 10 ** (-rng.uniform(0.0, 10.0) / 20)
+    rir[0] = 1.0  # direct path; the tail sits 0-10 dB below it in energy
+    return rir.astype(np.float32)
+
+
+def reverberate(
+    audio: npt.NDArray[Any], rt60: float, sample_rate: int, rng: np.random.Generator
+) -> npt.NDArray[np.float32]:
+    """`audio` through a synthetic room with reverberation time `rt60`, same length and level."""
+    x = audio.astype(np.float32, copy=False)
+    wet = fftconvolve(x, room_response(rt60, sample_rate, rng))[: x.size].astype(np.float32)
+    return _peak_safe(wet * np.float32(_rms(x) / _rms(wet)))
 
 
 class NoiseCorpus:
@@ -131,7 +160,7 @@ class NoiseCorpus:
 
 
 class BatchAugmenter:
-    """Applies noise, bandwidth limits and clipping to one batch of rows."""
+    """Applies reverb, noise, bandwidth limits and clipping to one batch of rows."""
 
     def __init__(
         self,
@@ -142,14 +171,19 @@ class BatchAugmenter:
         bandlimit_prob: float = 0.0,
         bandlimit_hz: tuple[float, ...] = (4000.0,),
         clip_prob: float = 0.0,
-        clip_fraction: tuple[float, float] = (0.007, 0.09),
+        clip_low_quantile: tuple[float, float] = (0.0, 0.1),
+        clip_high_quantile: tuple[float, float] = (0.9, 1.0),
+        reverb_prob: float = 0.0,
+        reverb_rt60: tuple[float, float] = (0.2, 1.0),
         seed: int | None = None,
     ) -> None:
         """Keep the rates; the RNG is created per process (see `_rng`)."""
         self.sample_rate = sample_rate
         self.noise_prob, self.noise_snr_db, self.corpus = noise_prob, noise_snr_db, corpus
         self.bandlimit_prob, self.bandlimit_hz = bandlimit_prob, bandlimit_hz
-        self.clip_prob, self.clip_fraction = clip_prob, clip_fraction
+        self.clip_prob = clip_prob
+        self.clip_low_quantile, self.clip_high_quantile = clip_low_quantile, clip_high_quantile
+        self.reverb_prob, self.reverb_rt60 = reverb_prob, reverb_rt60
         self._seed = seed
         self._pid: int | None = None
         self._generator: np.random.Generator | None = None
@@ -157,7 +191,8 @@ class BatchAugmenter:
     @property
     def enabled(self) -> bool:
         """Whether any degradation can fire."""
-        return self.noise_prob > 0 or self.bandlimit_prob > 0 or self.clip_prob > 0
+        probs = (self.reverb_prob, self.noise_prob, self.bandlimit_prob, self.clip_prob)
+        return any(p > 0 for p in probs)
 
     def _rng(self) -> np.random.Generator:
         # DataLoader workers fork the collator: one generator per process, or
@@ -187,9 +222,11 @@ class BatchAugmenter:
         return colored_noise(size, float(rng.choice([0.0, 1.0, 2.0])), rng)
 
     def degrade(self, audio: npt.NDArray[Any], others: list[npt.NDArray[Any]]) -> npt.NDArray[Any]:
-        """One row through noise, then a bandwidth limit, then clipping, each by chance."""
+        """One row through reverb, noise, a bandwidth limit and clipping, each by chance."""
         rng = self._rng()
         out = audio
+        if rng.random() < self.reverb_prob:
+            out = reverberate(out, float(rng.uniform(*self.reverb_rt60)), self.sample_rate, rng)
         if rng.random() < self.noise_prob:
             out = mix_at_snr(
                 out, self.noise(out.size, others), float(rng.uniform(*self.noise_snr_db))
@@ -198,7 +235,8 @@ class BatchAugmenter:
             cutoff = float(self.bandlimit_hz[int(rng.integers(len(self.bandlimit_hz)))])
             out = bandlimit(out, self.sample_rate, cutoff)
         if rng.random() < self.clip_prob:
-            out = clip(out, float(rng.uniform(*self.clip_fraction)))
+            low_q = float(rng.uniform(*self.clip_low_quantile))
+            out = clip(out, low_q, float(rng.uniform(*self.clip_high_quantile)))
         return out
 
     def __call__(

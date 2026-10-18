@@ -86,7 +86,10 @@ class DataConfig:
     bandlimit_prob: float = 0.0
     bandlimit_hz: list[float] = field(default_factory=lambda: [4000.0])
     clip_prob: float = 0.0
-    clip_fraction: list[float] = field(default_factory=lambda: [0.007, 0.09])
+    clip_low_quantile: list[float] = field(default_factory=lambda: [0.0, 0.1])
+    clip_high_quantile: list[float] = field(default_factory=lambda: [0.9, 1.0])
+    reverb_prob: float = 0.0
+    reverb_rt60: list[float] = field(default_factory=lambda: [0.2, 1.0])
 
 
 @dataclass

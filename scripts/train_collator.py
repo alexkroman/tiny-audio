@@ -309,17 +309,25 @@ def build_collators(
         if corpus_id
         else None
     )
-    snr = data_cfg.get("noise_snr_db") or (-5.0, 20.0)
-    clip_frac = data_cfg.get("clip_fraction") or (0.007, 0.09)
+    if corpus is not None:
+        corpus.files()  # download/list once here, not in every forked DataLoader worker
+
+    def pair(key: str, default: tuple[float, float]) -> tuple[float, float]:
+        low, high = data_cfg.get(key) or default
+        return float(low), float(high)
+
     augmenter = BatchAugmenter(
         data_cfg.sample_rate,
         noise_prob=data_cfg.get("noise_prob") or 0.0,
-        noise_snr_db=(float(snr[0]), float(snr[1])),
+        noise_snr_db=pair("noise_snr_db", (-5.0, 20.0)),
         corpus=corpus,
         bandlimit_prob=data_cfg.get("bandlimit_prob") or 0.0,
         bandlimit_hz=tuple(float(h) for h in data_cfg.get("bandlimit_hz") or (4000.0,)),
         clip_prob=data_cfg.get("clip_prob") or 0.0,
-        clip_fraction=(float(clip_frac[0]), float(clip_frac[1])),
+        clip_low_quantile=pair("clip_low_quantile", (0.0, 0.1)),
+        clip_high_quantile=pair("clip_high_quantile", (0.9, 1.0)),
+        reverb_prob=data_cfg.get("reverb_prob") or 0.0,
+        reverb_rt60=pair("reverb_rt60", (0.2, 1.0)),
         seed=seed,
     )
     train = DataCollator(**args, augmenter=augmenter if augmenter.enabled else None)
