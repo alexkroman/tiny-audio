@@ -7,7 +7,7 @@ SNR uniform in -5..20 dB on every clip, then either nothing, a bandwidth limit
 or clipping. Measured on the leaderboard pair (noisy and clean configs are the
 same 1,000 utterances; granite-qwen-frozen-nc, 2026-10-17), SNR below 0 dB is
 66% of the excess errors and clipping and a sub-8 kHz bandwidth each add
-several WER points. So each training row independently may get, in this order:
+several WER points. So each training row may get, in this order:
 
 - reverberation (`data.reverb_prob`) through a measured room response from
   `data.reverb_corpus` (the MIT IR Survey: 270 everyday places, not one of
@@ -16,13 +16,19 @@ several WER points. So each training row independently may get, in this order:
 - noise (`data.noise_prob`) at an SNR drawn from `data.noise_snr_db`, from a
   noise corpus (`data.noise_corpus`, e.g. MUSAN's noise set, which URGENT did
   not draw from), synthetic white/pink/brown noise, or another row of the batch;
-- a bandwidth limit (`data.bandlimit_prob`) at a cutoff drawn from
-  `data.bandlimit_hz`;
-- clipping (`data.clip_prob`) below a quantile drawn from
-  `data.clip_low_quantile` and above one drawn from `data.clip_high_quantile`,
-  URGENT's two-sided scheme.
+- then at most ONE of, as in URGENT: a bandwidth limit (`data.bandlimit_prob`)
+  at a cutoff drawn from `data.bandlimit_hz`, or clipping (`data.clip_prob`)
+  below a quantile drawn from `data.clip_low_quantile` and above one drawn
+  from `data.clip_high_quantile` (URGENT's two-sided scheme).
 
 Targets are unchanged. Applied to training batches only.
+
+The first run with this (verbatim-aug, 2026-10-18) degraded ~83% of rows and
+let band limits and clipping stack on top of reverb and -5 dB noise: noisy
+URGENT clips below 0 dB improved 5.1 WER points, but clean conversational
+audio started to hallucinate fluent unrelated text (AMI 13 -> 29 such clips,
+GigaSpeech 121 -> 165, URGENT-clean 2 -> 9), wiping out the gain. Hence the
+exclusive post-noise step and the lower default rates (~half the rows clean).
 """
 
 import io
@@ -197,6 +203,9 @@ class BatchAugmenter:
         seed: int | None = None,
     ) -> None:
         """Keep the rates; the RNG is created per process (see `_rng`)."""
+        if bandlimit_prob + clip_prob > 1.0:
+            msg = f"bandlimit_prob + clip_prob is {bandlimit_prob + clip_prob}; they are exclusive"
+            raise ValueError(msg)
         self.sample_rate = sample_rate
         self.noise_prob, self.noise_snr_db, self.corpus = noise_prob, noise_snr_db, corpus
         self.bandlimit_prob, self.bandlimit_hz = bandlimit_prob, bandlimit_hz
@@ -251,7 +260,8 @@ class BatchAugmenter:
         return room_response(float(rng.uniform(*self.reverb_rt60)), self.sample_rate, rng)
 
     def degrade(self, audio: npt.NDArray[Any], others: list[npt.NDArray[Any]]) -> npt.NDArray[Any]:
-        """One row through reverb, noise, a bandwidth limit and clipping, each by chance."""
+        """One row through reverb and noise, each by chance, then at most one of
+        a bandwidth limit or clipping."""
         rng = self._rng()
         out = audio
         if rng.random() < self.reverb_prob:
@@ -260,10 +270,11 @@ class BatchAugmenter:
             out = mix_at_snr(
                 out, self.noise(out.size, others), float(rng.uniform(*self.noise_snr_db))
             )
-        if rng.random() < self.bandlimit_prob:
+        draw = rng.random()
+        if draw < self.bandlimit_prob:
             cutoff = float(self.bandlimit_hz[int(rng.integers(len(self.bandlimit_hz)))])
             out = bandlimit(out, self.sample_rate, cutoff)
-        if rng.random() < self.clip_prob:
+        elif draw < self.bandlimit_prob + self.clip_prob:
             low_q = float(rng.uniform(*self.clip_low_quantile))
             out = clip(out, low_q, float(rng.uniform(*self.clip_high_quantile)))
         return out

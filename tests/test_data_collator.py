@@ -389,7 +389,7 @@ class TestAugmentedBatch:
             sample_rate=16000,
             projector=projector,
             augmenter=BatchAugmenter(
-                16000, noise_prob=1.0, bandlimit_prob=1.0, clip_prob=1.0, reverb_prob=1.0, seed=0
+                16000, noise_prob=1.0, bandlimit_prob=0.5, clip_prob=0.5, reverb_prob=1.0, seed=0
             ),
         )
         batch = collator([create_sample("first row"), create_sample("second row")])

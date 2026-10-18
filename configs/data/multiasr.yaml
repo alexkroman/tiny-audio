@@ -829,28 +829,35 @@ epoch_expansion: 1
 # URGENT's data: measured rooms from the MIT IR Survey (plus some synthetic
 # ones) instead of DNS5 RIRs, MUSAN noise
 # plus synthetic broadband noise and batch babble instead of DNS5/WHAM!, so no
-# test noise or rooms reach training. Degradations are drawn independently
-# (URGENT's bandwidth-limit/clipping are exclusive). Targets are unchanged and
-# eval batches are never degraded. Not yet measured in a training run: read
-# URGENT against 13.09 and check that clean sets (LS, SPGI, E22) hold.
-reverb_prob: 0.5
+# test noise or rooms reach training. Reverb and noise are drawn independently,
+# then at most one of bandwidth limit / clipping, as in URGENT. Targets are
+# unchanged and eval batches are never degraded.
+#
+# Rates: the first run (verbatim-aug, 2026-10-18; reverb 0.5, noise 0.35, band
+# limit 0.2, clipping 0.33, all independent) degraded ~83% of rows. URGENT
+# clips below 0 dB improved 5.1 WER pts, but clean conversational audio began
+# to hallucinate unrelated fluent text (AMI 13 -> 29 such clips, GigaSpeech
+# 121 -> 165, URGENT-clean 2 -> 9), so mean of 9 went 5.600 -> 5.666. Eight of
+# the nine leaderboard sets are clean audio, so these rates leave about half
+# the rows untouched: 0.8 x 0.75 x 0.8 = 0.48.
+reverb_prob: 0.2
 # MIT Acoustical Reverberation Scene Statistics Survey (Traer & McDermott
 # 2016): 270 measured responses from everyday places, CC BY 4.0, 16 kHz mirror.
 reverb_corpus: TaterTotterson/MIT_environmental_impulse_responses
 reverb_corpus_glob: "16khz/*.wav"
 # RT60 range of the synthetic rooms (scripts/train_augment.py SYNTHETIC_REVERB_SHARE).
 reverb_rt60: [0.2, 1.0]
-noise_prob: 0.35
+noise_prob: 0.25
 noise_snr_db: [-5.0, 20.0]
 noise_corpus: FluidInference/musan
 noise_corpus_glob: "noise/**/*.wav"
-bandlimit_prob: 0.2
+bandlimit_prob: 0.1
 # Uniform over the list. 4 kHz is URGENT's band limit (resampling to 8 kHz);
 # 5.5 and 7 kHz mimic band-limited source recordings, which URGENT inherits
 # from its speech corpora (cutoffs measured on its test clips: 121 at 4 kHz,
 # 16 at 5 kHz, 51 at 7 kHz).
 bandlimit_hz: [4000, 4000, 4000, 5512, 7000]
-clip_prob: 0.33
+clip_prob: 0.1
 clip_low_quantile: [0.0, 0.1]
 clip_high_quantile: [0.9, 1.0]
 

@@ -264,3 +264,11 @@ def test_default_mix_degrades_tags_and_reweights_but_tiny_does_not() -> None:
     assert tiny.data.noise_corpus is None
     assert not tiny.data.verbatim_sources
     assert not tiny.data.source_weights
+
+
+def test_default_augmentation_leaves_about_half_the_rows_clean() -> None:
+    """8 of the 9 leaderboard sets are clean audio. Degrading ~83% of rows (the
+    2026-10-18 run) made clean conversational audio hallucinate."""
+    d = _compose().data
+    clean = (1 - d.reverb_prob) * (1 - d.noise_prob) * (1 - d.bandlimit_prob - d.clip_prob)
+    assert 0.4 <= clean <= 0.6
