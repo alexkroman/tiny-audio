@@ -228,14 +228,14 @@ def _add_sample(sample: ResultSample, ds: DatasetMetrics, by_length: dict[int, l
     WER on earnings22.
     """
     tagged = _raw_pair(sample)
-    pair = None if tagged is None else (scoring_text(tagged[0]), scoring_text(tagged[1]))
-    if pair is not None:
+    normalizer = None
+    ref, pred = sample["ground_truth"], sample["prediction"]
+    if tagged is not None:
+        pair = (scoring_text(tagged[0]), scoring_text(tagged[1]))
         ds["raw_pairs"].append(pair)
-    normalizer = current_normalizer() if pair is not None else None
-    if pair is not None and normalizer is not None:
-        ref, pred = normalizer.normalize(pair[0]), normalizer.normalize(pair[1])
-    else:
-        ref, pred = sample["ground_truth"], sample["prediction"]
+        normalizer = current_normalizer()
+        if normalizer is not None:
+            ref, pred = normalizer.normalize(pair[0]), normalizer.normalize(pair[1])
     if not ref:
         return
     ds["refs"].append(ref)
@@ -525,11 +525,6 @@ def paired_bootstrap_delta(
     n = len(a_err)
     if n == 0:
         return float("nan"), float("nan"), float("nan")
-    point = float((a_err.sum() / a_ref.sum() - b_err.sum() / b_ref.sum()) * 100)
-
-    if n == 1:
-        # One utterance resamples only to itself; scipy refuses a sample of one.
-        return point, point, point
 
     def delta(
         a_e: npt.NDArray[np.float64],
@@ -539,6 +534,11 @@ def paired_bootstrap_delta(
         axis: int = -1,
     ) -> npt.NDArray[np.float64]:
         return (a_e.sum(axis) / a_r.sum(axis) - b_e.sum(axis) / b_r.sum(axis)) * 100
+
+    point = float(delta(a_err, a_ref, b_err, b_ref))
+    if n == 1:
+        # One utterance resamples only to itself; scipy refuses a sample of one.
+        return point, point, point
 
     res = stats.bootstrap(
         (a_err, a_ref, b_err, b_ref),

@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from tiny_audio.asr_processing import ASRProcessor
+from tiny_audio.asr_processing import ASRProcessor, left_pad_prompt_rows
 
 
 def make_processor(
@@ -31,30 +31,34 @@ def make_processor(
     return ASRProcessor(fe, tok, projector=proj)
 
 
-class TestStackPromptRows:
+class TestLeftPadPromptRows:
     """Ragged prompt rows are left-padded with the right id."""
 
     def test_uniform_rows_are_stacked(self) -> None:
         proc = make_processor()
-        ids, mask = proc._stack_prompt_rows([torch.tensor([1, 2]), torch.tensor([3, 4])])
+        ids, mask = left_pad_prompt_rows(
+            [torch.tensor([1, 2]), torch.tensor([3, 4])], proc.tokenizer
+        )
         assert ids.tolist() == [[1, 2], [3, 4]]
         assert mask.tolist() == [[1, 1], [1, 1]]
 
     def test_ragged_rows_use_pad_token(self) -> None:
         proc = make_processor(pad_token_id=9)
-        ids, mask = proc._stack_prompt_rows([torch.tensor([1]), torch.tensor([3, 4, 5])])
+        ids, mask = left_pad_prompt_rows(
+            [torch.tensor([1]), torch.tensor([3, 4, 5])], proc.tokenizer
+        )
         assert ids.tolist() == [[9, 9, 1], [3, 4, 5]]
         assert mask.tolist() == [[0, 0, 1], [1, 1, 1]]
         assert ids.dtype == torch.long
 
     def test_missing_pad_token_falls_back_to_eos(self) -> None:
         proc = make_processor(pad_token_id=None, eos_token_id=2)
-        ids, _ = proc._stack_prompt_rows([torch.tensor([1]), torch.tensor([3, 4])])
+        ids, _ = left_pad_prompt_rows([torch.tensor([1]), torch.tensor([3, 4])], proc.tokenizer)
         assert ids[0, 0].item() == 2
 
     def test_missing_pad_and_eos_falls_back_to_zero(self) -> None:
         proc = make_processor(pad_token_id=None, eos_token_id=None)
-        ids, _ = proc._stack_prompt_rows([torch.tensor([1]), torch.tensor([3, 4])])
+        ids, _ = left_pad_prompt_rows([torch.tensor([1]), torch.tensor([3, 4])], proc.tokenizer)
         assert ids[0, 0].item() == 0
 
 

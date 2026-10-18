@@ -117,11 +117,9 @@ def save_results(
     results_file = result_dir / "results.txt"
     with results_file.open("w") as f:
         for i, r in enumerate(results, 1):
-            norm_pred = r.norm_prediction
-            norm_ref = r.norm_reference
             f.write(f"Sample {i} - WER: {r.wer:.2f}%\n")
-            f.write(f"Ground Truth: {norm_ref}\n")
-            f.write(f"Prediction: {norm_pred}\n")
+            f.write(f"Ground Truth: {r.norm_reference}\n")
+            f.write(f"Prediction: {r.norm_prediction}\n")
             # Raw (un-normalized) pair, written after the normalized one so the
             # existing "Ground Truth: "/"Prediction: " parsers keep matching the
             # WER-bearing text. Formatting metrics (ITN, casing, punctuation)

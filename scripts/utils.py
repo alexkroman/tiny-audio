@@ -13,7 +13,6 @@ class ResultSample(TypedDict):
     ground_truth: str
     prediction: str
     wer: float
-    word_count: int
     ground_truth_raw: str | None
     prediction_raw: str | None
 
@@ -26,7 +25,7 @@ def parse_results_file(results_path: Path) -> list[ResultSample]:
 
     Returns:
         List of dicts with keys: sample_num, ground_truth, prediction, wer,
-        word_count, ground_truth_raw, prediction_raw. The `_raw` values are the
+        ground_truth_raw, prediction_raw. The `_raw` values are the
         un-normalized transcripts; they are `None` for runs written before
         those lines existed, so formatting metrics must skip such samples
         rather than silently score normalized text.
@@ -63,7 +62,6 @@ def parse_results_file(results_path: Path) -> list[ResultSample]:
             wer = float(sample_match.group(2))
             ground_truth = gt_match.group(1).strip()
             prediction = pred_match.group(1).strip()
-            word_count = len(ground_truth.split())
 
             samples.append(
                 {
@@ -71,7 +69,6 @@ def parse_results_file(results_path: Path) -> list[ResultSample]:
                     "ground_truth": ground_truth,
                     "prediction": prediction,
                     "wer": wer,
-                    "word_count": word_count,
                     "ground_truth_raw": (gt_raw_match.group(1).strip() if gt_raw_match else None),
                     "prediction_raw": (pred_raw_match.group(1).strip() if pred_raw_match else None),
                 }

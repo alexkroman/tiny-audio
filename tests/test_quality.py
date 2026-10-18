@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 from typer.testing import CliRunner
 
-from scripts import quality
+from scripts import owning_imports, quality
 
 runner = CliRunner()
 
@@ -43,6 +43,22 @@ class TestFileLengthViolations:
             {"a.py": self.CAP + 51}, {"a.py": self.CAP + 50}
         )
         assert "grew past" in problem
+
+    def test_command_reports_and_fails_on_a_grown_file(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        (tmp_path / "a.py").write_text("x = 1\n" * (self.CAP + 1))
+        monkeypatch.setattr(quality, "ROOT", tmp_path)
+        monkeypatch.setattr(quality, "FILE_LENGTH_BASELINE", tmp_path / "lengths.json")
+
+        def tracked(_pattern: str) -> list[str]:
+            return ["a.py"]
+
+        monkeypatch.setattr(owning_imports, "tracked", tracked)
+
+        result = runner.invoke(quality.app, ["file-length"])
+        assert result.exit_code == 1
+        assert "over the" in result.output
 
 
 class TestCoverage:

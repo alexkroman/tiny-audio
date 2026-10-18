@@ -137,7 +137,6 @@ class Component:
     params: int = 0
     download_bytes: int = 0
     trainable: bool = False
-    note: str = ""
 
 
 @dataclass
@@ -213,7 +212,7 @@ def _encoder_trainable_blocks(train: DictConfig, depth: int) -> int:
 
 def _add_encoder(plan: Plan, train: DictConfig, audio_id: str, enc_inner: Any) -> int:
     """Append the encoder's frozen/trainable split; return its trainable block count."""
-    enc_params, enc_dtype = safetensors_params(audio_id)
+    enc_params, _ = safetensors_params(audio_id)
     enc_depth = int(getattr(enc_inner, "num_hidden_layers", 0) or 0)
     enc_frozen_flag = bool(_get(train, "freeze_audio_encoder", True))
     trainable_blocks = _encoder_trainable_blocks(train, enc_depth)
@@ -240,14 +239,13 @@ def _add_encoder(plan: Plan, train: DictConfig, audio_id: str, enc_inner: Any) -
             enc_params - enc_trainable_params,
             repo_weight_bytes(audio_id),
             False,
-            f"checkpoint {enc_dtype}",
         )
     )
     if enc_trainable_params:
         enc_top_n = int(_get(train, "encoder_trainable_top_layers", 0) or 0)
         label = "all blocks" if not enc_frozen_flag else f"top {enc_top_n} of {enc_depth} blocks"
         plan.components.append(
-            Component(f"  encoder trainable ({label})", enc_trainable_params, 0, True, "")
+            Component(f"  encoder trainable ({label})", enc_trainable_params, 0, True)
         )
     return trainable_blocks
 
@@ -276,7 +274,6 @@ def _add_lora(plan: Plan, model: DictConfig, text_id: str) -> None:
             lora_params,
             0,  # fresh init, nothing to fetch
             True,
-            "trainable; base decoder frozen",
         )
     )
 
@@ -284,7 +281,7 @@ def _add_lora(plan: Plan, model: DictConfig, text_id: str) -> None:
 def _add_decoder(plan: Plan, cfg: DictConfig, text_id: str, text_cfg: Any) -> bool:
     """Append the decoder, its LoRA adapters and frozen tables; return whether it trains."""
     train = cfg.training
-    dec_params, dec_dtype = safetensors_params(text_id, NON_LM_TOWER_PREFIXES)
+    dec_params, _ = safetensors_params(text_id, NON_LM_TOWER_PREFIXES)
     dec_trainable = not _get(train, "freeze_language_model", True)
     # Split the frozen vocabulary table out of the trainable decoder. The
     # freeze flag acts on an individual tensor inside the language model, so a
@@ -303,7 +300,6 @@ def _add_decoder(plan: Plan, cfg: DictConfig, text_id: str, text_cfg: Any) -> bo
             dec_params - frozen_table_params,
             repo_weight_bytes(text_id),
             dec_trainable,
-            f"checkpoint {dec_dtype}",
         )
     )
     _add_lora(plan, cfg.model, text_id)
@@ -314,7 +310,6 @@ def _add_decoder(plan: Plan, cfg: DictConfig, text_id: str, text_cfg: Any) -> bo
                 frozen_table_params,
                 0,  # already charged by the decoder's repo download above
                 False,
-                "no optimizer state",
             )
         )
     return dec_trainable
@@ -349,9 +344,7 @@ def _add_projector(
             proj_params = sum(p.numel() for p in projector_cls(shim).parameters())
     else:
         plan.warnings.append("Could not resolve encoder/llm dims; projector excluded.")
-    plan.components.append(
-        Component("projector (fresh init)", proj_params, 0, True, f"{encoder_dim}->{llm_dim}")
-    )
+    plan.components.append(Component("projector (fresh init)", proj_params, 0, True))
 
 
 def _add_datasets(plan: Plan, data: DictConfig) -> None:

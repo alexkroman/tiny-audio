@@ -347,10 +347,6 @@ class ASRProcessor(ProcessorMixin):
             self.tokenizer, self.audio_token, num_audio_tokens, self.TRANSCRIBE_PROMPT, text
         )
 
-    def _stack_prompt_rows(self, rows: list[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
-        """Stack per-sample prompt rows into a batch (see `left_pad_prompt_rows`)."""
-        return left_pad_prompt_rows(rows, self.tokenizer)
-
     def __call__(self, *args: Any, **kwargs: Any) -> BatchFeature:
         """Process audio and text inputs for inference; see `_process` for the arguments.
 
@@ -415,7 +411,7 @@ class ASRProcessor(ProcessorMixin):
             token_counts = self.projector.get_output_length(encoder_lengths).tolist()
 
         rows = [self._render_prompt(n, text) for n in token_counts]
-        input_ids, attention_mask = self._stack_prompt_rows(rows)
+        input_ids, attention_mask = left_pad_prompt_rows(rows, self.tokenizer)
         result["input_ids"] = input_ids
         result["attention_mask"] = attention_mask
 
