@@ -861,19 +861,19 @@ clip_prob: 0.1
 clip_low_quantile: [0.0, 0.1]
 clip_high_quantile: [0.9, 1.0]
 
-# Word-for-word sources (repeats, false starts, "yeah" not "yes") train under
-# the verbatim prompts (scripts/train_collator.py) instead of riding on
-# whether their labels carry punctuation; inference keeps the punctuation
-# prompt (model.transcribe_prompt). Caution from 2026-10-17: SERVING the plain
-# prompt, trained on the same kind of sources, helped AMI (-0.17) and URGENT
-# but cost GigaSpeech +0.68, Monsoon +0.63, SPGI/VoxPopuli +0.21 (mean of 9
-# 5.676 vs 5.600), so score both prompts before serving the verbatim one.
-verbatim_sources:
-  - edinburghcstr/ami
-  - sanchit-gandhi/tedlium-data
-  - MLCommons/peoples_speech
-  - mazesmazes/notsofar-train
-  - edinburghcstr/edacc
+# One prompt for every row: the shipped inference prompt ("Transcribe the
+# speech with proper punctuation and capitalization"), whatever the source's
+# labels look like. The verbatim-aug run (2026-10-18) split prompts by label
+# style (data.verbatim_sources), which tied each prompt to a KIND of audio:
+# all the conversational word-for-word sources moved to the verbatim prompt,
+# so the punctuation prompt saw almost only read speech, and conversational
+# audio served under it hallucinated read-speech sentences (AMI 13 -> 29
+# hallucination-like clips; 19 with the verbatim prompt). One prompt cannot
+# carry a domain. Cost: the unpunctuated sources (TEDLIUM, AMI, People's,
+# EdAcc) now train under the punctuation prompt too, so punctuation on
+# conversational audio may hedge; WER is blind to it (the normalizer strips
+# punctuation). For frozen-nc's two-prompt split instead, set this false.
+single_prompt: true
 
 # More weight on the word-for-word conversational sources, less on
 # GigaSpeech M, whose labels collapse repeated words (0.9 repeats per 1k words

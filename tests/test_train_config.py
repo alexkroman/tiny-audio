@@ -250,19 +250,21 @@ class TestApplyLigerKernels:
         assert "Applied liger kernels" in caplog.text
 
 
-def test_default_mix_degrades_tags_and_reweights_but_tiny_does_not() -> None:
-    """The ten-corpus default carries the URGENT-matched augmentation, verbatim
-    tags and source weights; the free laptop run uses none of them."""
+def test_default_mix_degrades_and_reweights_under_one_prompt_but_tiny_does_not() -> None:
+    """The ten-corpus default carries the URGENT-matched augmentation, source
+    weights and a single training prompt; the free laptop run uses none of them."""
     default, tiny = _compose(), _compose(["+experiments=tiny"])
     assert default.data.noise_prob > 0
     assert default.data.noise_corpus == "FluidInference/musan"
     assert default.data.clip_prob > 0
     assert default.data.bandlimit_prob > 0
-    assert "edinburghcstr/ami" in default.data.verbatim_sources
+    assert default.data.single_prompt is True
+    assert not default.data.verbatim_sources
     assert default.data.source_weights["speechcolab/gigaspeech:m"] == 0.5
     assert tiny.data.noise_prob == 0
     assert tiny.data.noise_corpus is None
     assert not tiny.data.verbatim_sources
+    assert not tiny.data.single_prompt
     assert not tiny.data.source_weights
 
 

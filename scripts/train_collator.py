@@ -88,10 +88,13 @@ class DataCollator:
         encoder_conv_layers: Sequence[ConvLayerSpec] | None = None,
         audio_token: str = "<audio>",
         augmenter: BatchAugmenter | None = None,
+        prompt: str | None = None,
     ) -> None:
         """Keep the tokenizer, feature extractor and projector a batch is built from."""
         # Training batches only: the eval collator is built without one.
         self.augmenter = augmenter
+        # One prompt for every row (data.single_prompt); None picks per row.
+        self.prompt = prompt
         self.tokenizer = tokenizer
         # `SequenceFeatureExtractor` declares no `__call__`, but every concrete
         # one (Whisper, GLM-ASR) has it; no library type names that surface.
@@ -240,7 +243,9 @@ class DataCollator:
         # unpunctuated halves of the mix stop competing for the same
         # conditioning. Undeclared sources keep the plain prompt.
         punct = bool(feature.get("_text_punct"))
-        if feature.get("_text_verbatim"):
+        if self.prompt is not None:
+            prompt = self.prompt
+        elif feature.get("_text_verbatim"):
             prompt = TRANSCRIBE_PROMPT_VERBATIM_PUNCT if punct else TRANSCRIBE_PROMPT_VERBATIM
         else:
             prompt = TRANSCRIBE_PROMPT_PUNCT if punct else TRANSCRIBE_PROMPT
@@ -302,6 +307,9 @@ def build_collators(
         "projector": model.projector,
         "encoder_conv_layers": model.config.encoder_conv_layers,
         "audio_token": model.audio_token,
+        # data.single_prompt: every row, train and eval, under the shipped
+        # inference prompt, so no prompt can stand for a kind of audio.
+        "prompt": TRANSCRIBE_PROMPT_PUNCT if data_cfg.get("single_prompt") else None,
     }
 
     def corpus(key: str) -> AudioCorpus | None:
