@@ -48,8 +48,10 @@ from huggingface_hub.constants import HF_HOME
 from scipy.signal import butter, fftconvolve, resample_poly, sosfilt
 
 # Noise source mix when a row gets noise: corpus, synthetic broadband, batch babble.
-# Without a corpus its share goes to synthetic noise.
-SOURCE_WEIGHTS = {"corpus": 0.5, "synthetic": 0.3, "babble": 0.2}
+# Without a corpus its share goes to synthetic noise. Synthetic was 0.3 while
+# the corpus was MUSAN's ~930 files, which repeat fast; DNS5 + WHAM! (~240 h)
+# is what URGENT's test was mixed from, and URGENT used no synthetic noise.
+SOURCE_WEIGHTS = {"corpus": 0.8, "synthetic": 0.0, "babble": 0.2}
 # Measured responses are cut to this long after their direct path.
 MAX_RIR_SECONDS = 1.5
 _EPS = 1e-8
