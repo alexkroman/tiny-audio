@@ -313,10 +313,10 @@ def build_collators(
     }
 
     def corpus(key: str) -> AudioCorpus | None:
-        source = data_cfg.get(key)
-        if not source:
+        sources = data_cfg.get(key)
+        if not sources:
             return None
-        found = AudioCorpus(source, data_cfg.get(f"{key}_glob") or "**/*.wav")
+        found = AudioCorpus(sources)
         found.files()  # download/list once here, not in every forked DataLoader worker
         return found
 
@@ -335,7 +335,6 @@ def build_collators(
         clip_low_quantile=pair("clip_low_quantile", (0.0, 0.1)),
         clip_high_quantile=pair("clip_high_quantile", (0.9, 1.0)),
         reverb_prob=data_cfg.get("reverb_prob") or 0.0,
-        reverb_rt60=pair("reverb_rt60", (0.2, 1.0)),
         reverb_corpus=corpus("reverb_corpus"),
         phone_prob=data_cfg.get("phone_prob") or 0.0,
         phone_highpass_hz=pair("phone_highpass_hz", (50.0, 200.0)),

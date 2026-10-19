@@ -69,6 +69,9 @@ librosa = ">=0.10.0"
 # `ta dev quality invariants`), the one the diarization pipeline was verified on.
 transformers = { git = "https://github.com/huggingface/transformers.git", rev = "91ea1192a00e0ebb684400434375fbd2345c8449" }
 datasets = { extras = ["audio"], version = ">=3.0.0,<4.0.0" }
+# Noise and room-response corpora ship as parquet shards (scripts/train_augment.py).
+# Already locked through datasets; declared because it is imported directly.
+pyarrow = "*"
 jiwer = "*"
 attrs = "*"
 rich = "*"
