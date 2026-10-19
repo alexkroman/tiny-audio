@@ -374,6 +374,35 @@ class TestPromptChoice:
         assert user.endswith(" " + prompt)
 
 
+class TestSinglePrompt:
+    """With a fixed prompt every row uses it, whatever its punctuation or verbatim tags."""
+
+    @pytest.mark.parametrize(
+        "feature",
+        [
+            {"text": "hi", "_text_punct": False},
+            {"text": "hi", "_text_punct": True},
+            {"text": "hi", "_text_punct": False, "_text_verbatim": True},
+        ],
+    )
+    def test_every_row_gets_the_fixed_prompt(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        feature_extractor: WhisperFeatureExtractor,
+        projector: MockProjector,
+        feature: dict[str, Any],
+    ) -> None:
+        collator = DataCollator(
+            tokenizer=tokenizer,
+            feature_extractor=feature_extractor,
+            sample_rate=16000,
+            projector=projector,
+            prompt=TRANSCRIBE_PROMPT_PUNCT,
+        )
+        user = collator._build_sample(feature, 3)["messages"][0]["content"]
+        assert user.endswith(" " + TRANSCRIBE_PROMPT_PUNCT)
+
+
 class TestAugmentedBatch:
     """A degraded training batch keeps its targets."""
 
@@ -389,7 +418,7 @@ class TestAugmentedBatch:
             sample_rate=16000,
             projector=projector,
             augmenter=BatchAugmenter(
-                16000, noise_prob=1.0, bandlimit_prob=1.0, clip_prob=1.0, reverb_prob=1.0, seed=0
+                16000, noise_prob=1.0, bandlimit_prob=0.5, clip_prob=0.5, reverb_prob=1.0, seed=0
             ),
         )
         batch = collator([create_sample("first row"), create_sample("second row")])
@@ -421,6 +450,10 @@ class TestBuildCollators:
         assert evaluation.augmenter is None
         off = OmegaConf.create({"sample_rate": 16000})
         assert build_collators(model, off, seed=0)[0].augmenter is None
+        single = OmegaConf.create({"sample_rate": 16000, "single_prompt": True})
+        train, evaluation = build_collators(model, single, seed=0)
+        assert train.prompt == evaluation.prompt == TRANSCRIBE_PROMPT_PUNCT
+        assert build_collators(model, off, seed=0)[0].prompt is None
 
     def test_noise_corpus_is_listed_before_workers_fork(
         self,

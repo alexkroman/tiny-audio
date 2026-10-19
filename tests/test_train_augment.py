@@ -181,8 +181,8 @@ class TestBatchAugmenter:
             16000,
             noise_prob=1.0,
             corpus=AudioCorpus(str(tmp_path)),
-            bandlimit_prob=1.0,
-            clip_prob=1.0,
+            bandlimit_prob=0.5,
+            clip_prob=0.5,
             reverb_prob=1.0,
             seed=0,
         )
@@ -193,6 +193,39 @@ class TestBatchAugmenter:
             assert after.shape == before.shape
             assert not np.allclose(after, before)
             assert np.abs(after).max() <= 1.0
+
+    def test_bandlimit_and_clipping_never_stack(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """After noise a row gets at most one of the two, as in URGENT."""
+        calls: list[str] = []
+
+        def fake_bandlimit(audio: Any, *_: object) -> Any:
+            calls.append("bandlimit")
+            return audio
+
+        def fake_clip(audio: Any, *_: object) -> Any:
+            calls.append("clip")
+            return audio
+
+        monkeypatch.setattr("scripts.train_augment.bandlimit", fake_bandlimit)
+        monkeypatch.setattr("scripts.train_augment.clip", fake_clip)
+        aug = BatchAugmenter(16000, bandlimit_prob=0.5, clip_prob=0.5, seed=0)
+        for _ in range(200):
+            calls.clear()
+            aug.degrade(_tone(0.1), [])
+            assert len(calls) == 1
+        aug = BatchAugmenter(16000, bandlimit_prob=0.3, clip_prob=0.3, seed=1)
+        counts = {"none": 0, "bandlimit": 0, "clip": 0}
+        for _ in range(2000):
+            calls.clear()
+            aug.degrade(_tone(0.1), [])
+            assert len(calls) <= 1
+            counts[calls[0] if calls else "none"] += 1
+        assert counts["none"] == pytest.approx(800, abs=90)
+        assert counts["bandlimit"] == pytest.approx(600, abs=90)
+
+    def test_exclusive_probabilities_over_one_fail_loudly(self) -> None:
+        with pytest.raises(ValueError, match="exclusive"):
+            BatchAugmenter(16000, bandlimit_prob=0.6, clip_prob=0.5)
 
     @pytest.mark.parametrize("corpus", [False, True])
     def test_noise_sources_cover_every_branch(self, tmp_path: Path, corpus: bool) -> None:

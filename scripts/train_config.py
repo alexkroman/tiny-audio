@@ -77,6 +77,9 @@ class DataConfig:
     # Sources whose labels are word-for-word: they train under the verbatim
     # prompts (scripts/train_collator.py) instead of the plain/punct ones.
     verbatim_sources: list[str] = field(default_factory=list[str])
+    # Train every row under the punctuation (inference) prompt, ignoring
+    # text_punct and verbatim_sources.
+    single_prompt: bool = False
     # Training-batch degradation (scripts/train_augment.py); probabilities of 0 disable.
     noise_prob: float = 0.0
     noise_snr_db: list[float] = field(default_factory=lambda: [-5.0, 20.0])
