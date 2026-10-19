@@ -17,6 +17,7 @@ from scripts.train_augment import (
     clip,
     colored_noise,
     mix_at_snr,
+    non_silent,
     phone,
     reverberate,
     room_response,
@@ -55,6 +56,38 @@ class TestMixAtSnr:
         assert np.abs(mix_at_snr(loud, loud, -5.0)).max() <= 1.0
 
 
+class TestNonSilent:
+    """ESPnet's detect_non_silence: frames above 1% of the mean frame power are active."""
+
+    def test_burst_is_active_and_silence_is_not(self) -> None:
+        x = np.zeros(16000, dtype=np.float32)
+        x[4096:8192] = _tone(4096 / 16000, amp=0.3)
+        mask = non_silent(x)
+        assert mask.shape == x.shape
+        assert mask[5000:7000].all()
+        assert not mask[:3000].any()
+        assert not mask[10000:].any()
+
+    def test_short_or_silent_clips_count_as_all_active(self) -> None:
+        assert non_silent(np.ones(500, dtype=np.float32)).all()
+        assert non_silent(np.zeros(4000, dtype=np.float32)).all()
+
+
+class TestUrgentSnr:
+    """mix_at_snr measures SNR over non-silent samples, as URGENT's mix_noise does."""
+
+    def test_snr_ignores_pauses_and_noise_gaps(self) -> None:
+        speech = np.zeros(32000, dtype=np.float32)
+        speech[:16000] = _tone(1.0, amp=0.1)  # a 1 s pause after the speech
+        noise = np.random.default_rng(0).standard_normal(32000).astype(np.float32)
+        noise[8000:24000] = 0  # a bursty noise
+        added = mix_at_snr(speech, noise, 5.0) - speech
+        snr = 10 * np.log10(
+            np.mean(speech[non_silent(speech)] ** 2) / np.mean(added[non_silent(added)] ** 2)
+        )
+        assert snr == pytest.approx(5.0, abs=0.05)
+
+
 class TestColoredNoise:
     """colored_noise is unit RMS and tilts toward low frequencies as the exponent grows."""
 
@@ -83,6 +116,25 @@ class TestBandlimit:
     def test_cutoff_at_or_above_nyquist_is_a_no_op(self) -> None:
         tone = _tone(0.5)
         np.testing.assert_array_equal(bandlimit(tone, 16000, 8000.0), tone)
+
+
+class TestUrgentBandlimit:
+    """The 4 kHz limit is URGENT's resampling to 8 kHz and back, not a brickwall."""
+
+    def test_resampled_limit_cuts_the_top_band_and_keeps_the_passband(self) -> None:
+        white = colored_noise(32000, 0.0, np.random.default_rng(0)) * 0.1
+        out = bandlimit(white, 16000, 4000.0)
+        assert out.shape == white.shape
+        assert _high_share(out, 4500.0) < 0.01
+
+        def passband(a: npt.NDArray[np.float32]) -> float:  # ~100 Hz - 3 kHz
+            return float((np.abs(np.fft.rfft(a))[200:6000] ** 2).sum())
+
+        assert passband(out) / passband(white) == pytest.approx(1.0, rel=0.05)
+
+    def test_other_cutoffs_stay_brickwall(self) -> None:
+        white = colored_noise(32000, 0.0, np.random.default_rng(1)) * 0.1
+        assert _high_share(bandlimit(white, 16000, 7000.0), 7000.0 + 1) < 1e-6
 
 
 class TestClip:

@@ -882,8 +882,9 @@ noise_snr_db: [-5.0, 20.0]
 noise_corpus: FluidInference/musan
 noise_corpus_glob: "noise/**/*.wav"
 bandlimit_prob: 0.1
-# Uniform over the list. 4 kHz is URGENT's band limit (resampling to 8 kHz);
-# 5.5 and 7 kHz mimic band-limited source recordings, which URGENT inherits
+# Uniform over the list. 4 kHz is URGENT's band limit, done as URGENT does it
+# (resample to 8 kHz and back); 5.5 and 7 kHz are brickwalls mimicking
+# band-limited source recordings, which URGENT inherits
 # from its speech corpora (cutoffs measured on its test clips: 121 at 4 kHz,
 # 16 at 5 kHz, 51 at 7 kHz).
 bandlimit_hz: [4000, 4000, 4000, 5512, 7000]
