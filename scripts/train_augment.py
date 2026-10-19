@@ -69,12 +69,43 @@ def _peak_safe(audio: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]:
     return audio / peak if peak > 1.0 else audio
 
 
+def non_silent(
+    x: npt.NDArray[Any], threshold: float = 0.01, frame_length: int = 1024, frame_shift: int = 512
+) -> npt.NDArray[np.bool_]:
+    """ESPnet's `detect_non_silence` (espnet2/train/preprocessor.py), for one channel.
+
+    A sample is non-silent when its frame's power exceeds `threshold` of the
+    clip's mean frame power. URGENT measures both sides of an SNR over these
+    samples only, so pauses in the speech or gaps in a bursty noise do not
+    shift the mix.
+    """
+    if x.size < frame_length:
+        return np.ones(x.size, dtype=bool)
+    nadd = (-(x.size - frame_length) % frame_shift) % frame_length
+    padded = np.pad(x.astype(np.float64), (0, nadd))
+    frames = np.lib.stride_tricks.sliding_window_view(padded, frame_length)[::frame_shift]
+    power = np.mean(frames**2, axis=-1)
+    mean_power = power.mean()
+    if mean_power == 0:
+        return np.ones(x.size, dtype=bool)
+    detects = np.repeat(power / mean_power > threshold, frame_shift)[: x.size]
+    return np.pad(detects, (0, x.size - detects.size), mode="edge")
+
+
+def _active_power(x: npt.NDArray[Any]) -> float:
+    return float(np.mean(np.square(x[non_silent(x)], dtype=np.float64)))
+
+
 def mix_at_snr(
     speech: npt.NDArray[Any], noise: npt.NDArray[Any], snr_db: float
 ) -> npt.NDArray[np.float32]:
-    """`speech` with `noise` (tiled or cropped to its length) mixed in `snr_db` below it."""
+    """`speech` with `noise` (tiled or cropped to its length) mixed in `snr_db` below it.
+
+    URGENT's `mix_noise`: speech and noise power are taken over their
+    non-silent samples (`non_silent`), with the same 1e-10 floor on the noise.
+    """
     noise = _fit(noise, speech.size)
-    scale = _rms(speech) / (_rms(noise) * 10 ** (snr_db / 20))
+    scale = 10 ** (-snr_db / 20) * np.sqrt(_active_power(speech) / max(_active_power(noise), 1e-10))
     return _peak_safe(speech.astype(np.float32) + np.float32(scale) * noise)
 
 
@@ -87,13 +118,27 @@ def colored_noise(size: int, exponent: float, rng: np.random.Generator) -> npt.N
     return noise / _rms(noise)
 
 
+# URGENT's bandwidth limitation resamples to one of these lower rates and back.
+URGENT_SAMPLE_RATES = (8000, 16000, 22050, 24000, 32000, 44100, 48000)
+
+
 def bandlimit(
     audio: npt.NDArray[Any], sample_rate: int, cutoff_hz: float
 ) -> npt.NDArray[np.float32]:
-    """`audio` with every frequency above `cutoff_hz` removed (a brickwall, like
-    URGENT's cutoffs: a 30+ dB drop within 500 Hz)."""
+    """`audio` with every frequency above `cutoff_hz` removed.
+
+    When `2 * cutoff_hz` is one of URGENT's rates (at 16 kHz input only 8 kHz,
+    the 4 kHz limit), this is URGENT's own augmentation: resample down and back
+    with `resample_poly`, i.e. librosa's "polyphase", one of URGENT's resamplers.
+    Other cutoffs mimic band-limited source recordings, whose edges measure
+    sharp (a 30+ dB drop within 500 Hz), so they are a brickwall.
+    """
     if 2 * cutoff_hz >= sample_rate:
         return audio.astype(np.float32, copy=False)
+    if int(2 * cutoff_hz) in URGENT_SAMPLE_RATES:
+        ratio = Fraction(int(2 * cutoff_hz), sample_rate).limit_denominator(1000)
+        down = resample_poly(audio, ratio.numerator, ratio.denominator)
+        return _fit(resample_poly(down, ratio.denominator, ratio.numerator), audio.size)
     spectrum = np.fft.rfft(audio)
     spectrum[np.fft.rfftfreq(audio.size, d=1 / sample_rate) > cutoff_hz] = 0
     return np.fft.irfft(spectrum, n=audio.size).astype(np.float32)
