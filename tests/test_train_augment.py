@@ -1,10 +1,13 @@
 """Tests for the URGENT-matched training-batch degradation."""
 
+import io
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import numpy.typing as npt
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 import soundfile as sf
 
@@ -20,7 +23,6 @@ from scripts.train_augment import (
     non_silent,
     phone,
     reverberate,
-    room_response,
 )
 
 
@@ -121,6 +123,12 @@ class TestBandlimit:
 class TestUrgentBandlimit:
     """The 4 kHz limit is URGENT's resampling to 8 kHz and back, not a brickwall."""
 
+    @pytest.mark.parametrize("cutoff", [4000.0, 5512.0])
+    def test_ringing_never_exceeds_full_scale(self, cutoff: float) -> None:
+        """A full-scale square wave rings ~9% past its edges under any low-pass."""
+        square = np.sign(_tone(0.5, freq=700.0)).astype(np.float32)
+        assert np.abs(bandlimit(square, 16000, cutoff)).max() <= 1.0
+
     def test_resampled_limit_cuts_the_top_band_and_keeps_the_passband(self) -> None:
         white = colored_noise(32000, 0.0, np.random.default_rng(0)) * 0.1
         out = bandlimit(white, 16000, 4000.0)
@@ -153,23 +161,20 @@ class TestClip:
         np.testing.assert_array_equal(clip(silence, 0.05, 0.95), silence)
 
 
-class TestReverb:
-    """The synthetic room decays 60 dB in RT60; reverberated audio keeps length and level."""
+def _room(seconds: float = 0.5) -> npt.NDArray[np.float32]:
+    """A direct path and a decaying noise tail, like a measured response."""
+    t = np.arange(int(seconds * 16000)) / 16000
+    rir = 0.05 * np.random.default_rng(0).standard_normal(t.size) * np.exp(-t / 0.08)
+    rir[0] = 1.0
+    return rir.astype(np.float32)
 
-    @pytest.mark.parametrize("rt60", [0.3, 0.8])
-    def test_tail_falls_60_db_in_rt60(self, rt60: float) -> None:
-        rir = room_response(rt60, 16000, np.random.default_rng(0))
-        assert rir[0] == 1.0
-        tail = rir[1:].astype(np.float64) ** 2
-        frame = 400
-        level = 10 * np.log10(np.convolve(tail, np.ones(frame) / frame, mode="valid") + 1e-30)
-        start = level[0]
-        at_rt60 = level[int(rt60 * 16000) - frame]
-        assert start - at_rt60 == pytest.approx(60.0, abs=6.0)
+
+class TestReverb:
+    """Reverberated audio keeps length and level."""
 
     def test_reverberate_keeps_length_and_level(self) -> None:
         tone = _tone(1.0)
-        out = reverberate(tone, room_response(0.6, 16000, np.random.default_rng(0)))
+        out = reverberate(tone, _room())
         assert out.shape == tone.shape
         assert np.sqrt(np.mean(out**2)) == pytest.approx(np.sqrt(np.mean(tone**2)), rel=0.02)
         assert not np.allclose(out, tone)
@@ -204,18 +209,40 @@ class TestAudioCorpus:
         (tmp_path / "noise").mkdir()
         sf.write(tmp_path / "noise" / "a.wav", rng.standard_normal(8000) * 0.1, 8000)
         sf.write(tmp_path / "noise" / "b.wav", rng.standard_normal(48000) * 0.1, 16000)
-        corpus = AudioCorpus(str(tmp_path), "noise/*.wav")
+        corpus = AudioCorpus({str(tmp_path): "noise/*.wav"})
         assert len(corpus.files()) == 2
         for _ in range(4):
             assert corpus.excerpt(24000, 16000, rng).shape == (24000,)
 
     def test_empty_corpus_fails_loudly(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError, match="no audio files"):
-            AudioCorpus(str(tmp_path)).files()
+            AudioCorpus({str(tmp_path): "**/*.wav"}).files()
+
+    def test_parquet_shards_unpack_once_and_sources_pool(self, tmp_path: Path) -> None:
+        """Raw-bytes and Hub `Audio` struct columns both unpack to one file per row."""
+
+        def encoded(seconds: float) -> bytes:
+            buf = io.BytesIO()
+            sf.write(buf, _tone(seconds), 16000, format="WAV")
+            return buf.getvalue()
+
+        (tmp_path / "a").mkdir()
+        (tmp_path / "b").mkdir()
+        raw = pa.table({"audio": [encoded(0.5), encoded(1.0)], "name": ["x", "y"]})
+        pq.write_table(raw, tmp_path / "a" / "train-000.parquet")
+        hub = pa.table({"audio": [{"bytes": encoded(0.25), "path": "z.wav"}]})
+        pq.write_table(hub, tmp_path / "b" / "noise-000.parquet")
+        cache = tmp_path / "cache"
+        sources = {str(tmp_path / "a"): "*.parquet", str(tmp_path / "b"): "noise-*.parquet"}
+        files = AudioCorpus(sources, cache_dir=cache).files()
+        assert [sf.info(f).frames for f in files] == [8000, 16000, 4000]
+        # A shard is unpacked once: a second corpus never parses it again.
+        (tmp_path / "a" / "train-000.parquet").write_bytes(b"not parquet")
+        assert AudioCorpus(sources, cache_dir=cache).files() == files
 
 
 class TestMeasuredRooms:
-    """Measured responses start at their direct path; the augmenter mixes in synthetic rooms."""
+    """Measured responses start at their direct path; reverb draws only measured rooms."""
 
     def test_align_rir_starts_at_the_direct_path(self) -> None:
         rir = np.zeros(48000, dtype=np.float32)
@@ -226,18 +253,21 @@ class TestMeasuredRooms:
         assert float(np.abs(out).max()) == pytest.approx(1.0)
         assert out.size == int(MAX_RIR_SECONDS * 16000)
 
-    def test_room_draws_measured_and_synthetic(self, tmp_path: Path) -> None:
+    def test_room_comes_from_the_corpus(self, tmp_path: Path) -> None:
         marker = np.zeros(4000, dtype=np.float32)
-        marker[0], marker[1] = 1.0, 0.77  # a second tap no synthetic room has
+        marker[0], marker[1] = 1.0, 0.77
         sf.write(tmp_path / "room.wav", marker, 16000)
-        aug = BatchAugmenter(
-            16000, reverb_prob=1.0, reverb_corpus=AudioCorpus(str(tmp_path)), seed=0
-        )
+        corpus = AudioCorpus({str(tmp_path): "*.wav"})
+        aug = BatchAugmenter(16000, reverb_prob=1.0, reverb_corpus=corpus, seed=0)
         # 16-bit PCM on disk, so compare loosely.
-        measured = sum(np.isclose(aug.room(aug._rng())[1], 0.77, atol=1e-3) for _ in range(200))
-        assert 120 < measured < 190  # ~ (1 - SYNTHETIC_REVERB_SHARE) of 200
-        no_corpus = BatchAugmenter(16000, reverb_prob=1.0, seed=0)
-        assert no_corpus.room(no_corpus._rng())[0] == 1.0
+        assert np.isclose(aug.room(aug._rng())[1], 0.77, atol=1e-3)
+
+    def test_reverb_needs_measured_rooms(self) -> None:
+        with pytest.raises(ValueError, match="reverb_corpus"):
+            BatchAugmenter(16000, reverb_prob=0.5)
+        no_reverb = BatchAugmenter(16000, noise_prob=1.0)
+        with pytest.raises(ValueError, match="reverb_corpus"):
+            no_reverb.room(no_reverb._rng())
 
 
 class TestBatchAugmenter:
@@ -254,10 +284,11 @@ class TestBatchAugmenter:
         aug = BatchAugmenter(
             16000,
             noise_prob=1.0,
-            corpus=AudioCorpus(str(tmp_path)),
+            corpus=AudioCorpus({str(tmp_path): "*.wav"}),
             bandlimit_prob=0.5,
             clip_prob=0.5,
             reverb_prob=1.0,
+            reverb_corpus=AudioCorpus({str(tmp_path): "*.wav"}),
             seed=0,
         )
         audios, features = _rows(4)
@@ -312,7 +343,10 @@ class TestBatchAugmenter:
     def test_noise_sources_cover_every_branch(self, tmp_path: Path, corpus: bool) -> None:
         sf.write(tmp_path / "n.wav", np.random.default_rng(0).standard_normal(4000) * 0.1, 16000)
         aug = BatchAugmenter(
-            16000, noise_prob=1.0, corpus=AudioCorpus(str(tmp_path)) if corpus else None, seed=1
+            16000,
+            noise_prob=1.0,
+            corpus=AudioCorpus({str(tmp_path): "*.wav"}) if corpus else None,
+            seed=1,
         )
         for _ in range(20):
             assert aug.noise(8000, [_tone(0.3)]).shape == (8000,)

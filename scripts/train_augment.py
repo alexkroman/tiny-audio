@@ -10,12 +10,11 @@ same 1,000 utterances; granite-qwen-frozen-nc, 2026-10-17), SNR below 0 dB is
 several WER points. So each training row may get, in this order:
 
 - reverberation (`data.reverb_prob`) through a measured room response from
-  `data.reverb_corpus` (the MIT IR Survey: 270 everyday places, not one of
-  URGENT's DNS5 RIR sources) or, `SYNTHETIC_REVERB_SHARE` of the time, a
-  synthetic one with an RT60 drawn from `data.reverb_rt60`;
+  `data.reverb_corpus` (DNS5's, URGENT's own RIR set);
 - noise (`data.noise_prob`) at an SNR drawn from `data.noise_snr_db`, from a
-  noise corpus (`data.noise_corpus`, e.g. MUSAN's noise set, which URGENT did
-  not draw from), synthetic white/pink/brown noise, or another row of the batch;
+  noise corpus (`data.noise_corpus`: DNS5 + WHAM!, URGENT's sources minus what
+  its validation drew from), synthetic white/pink/brown noise, or another row
+  of the batch;
 - then at most ONE of, as in URGENT: a bandwidth limit (`data.bandlimit_prob`)
   at a cutoff drawn from `data.bandlimit_hz`, clipping (`data.clip_prob`)
   below a quantile drawn from `data.clip_low_quantile` and above one drawn
@@ -34,22 +33,23 @@ exclusive post-noise step and the lower default rates (~half the rows clean).
 
 import io
 import os
+import shutil
+from collections.abc import Mapping
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import numpy.typing as npt
+import pyarrow.parquet as pq
 import soundfile as sf
 from huggingface_hub import snapshot_download
+from huggingface_hub.constants import HF_HOME
 from scipy.signal import butter, fftconvolve, resample_poly, sosfilt
 
 # Noise source mix when a row gets noise: corpus, synthetic broadband, batch babble.
 # Without a corpus its share goes to synthetic noise.
 SOURCE_WEIGHTS = {"corpus": 0.5, "synthetic": 0.3, "babble": 0.2}
-# Share of reverberated rows that use a synthetic room even when a corpus of
-# measured rooms is configured: 270 rooms alone repeat quickly.
-SYNTHETIC_REVERB_SHARE = 0.2
 # Measured responses are cut to this long after their direct path.
 MAX_RIR_SECONDS = 1.5
 _EPS = 1e-8
@@ -131,17 +131,20 @@ def bandlimit(
     the 4 kHz limit), this is URGENT's own augmentation: resample down and back
     with `resample_poly`, i.e. librosa's "polyphase", one of URGENT's resamplers.
     Other cutoffs mimic band-limited source recordings, whose edges measure
-    sharp (a 30+ dB drop within 500 Hz), so they are a brickwall.
+    sharp (a 30+ dB drop within 500 Hz), so they are a brickwall. Either rings
+    past a full-scale input's peak, hence the final `_peak_safe`.
     """
     if 2 * cutoff_hz >= sample_rate:
         return audio.astype(np.float32, copy=False)
     if int(2 * cutoff_hz) in URGENT_SAMPLE_RATES:
         ratio = Fraction(int(2 * cutoff_hz), sample_rate).limit_denominator(1000)
         down = resample_poly(audio, ratio.numerator, ratio.denominator)
-        return _fit(resample_poly(down, ratio.denominator, ratio.numerator), audio.size)
-    spectrum = np.fft.rfft(audio)
-    spectrum[np.fft.rfftfreq(audio.size, d=1 / sample_rate) > cutoff_hz] = 0
-    return np.fft.irfft(spectrum, n=audio.size).astype(np.float32)
+        out = _fit(resample_poly(down, ratio.denominator, ratio.numerator), audio.size)
+    else:
+        spectrum = np.fft.rfft(audio)
+        spectrum[np.fft.rfftfreq(audio.size, d=1 / sample_rate) > cutoff_hz] = 0
+        out = np.fft.irfft(spectrum, n=audio.size)
+    return _peak_safe(out.astype(np.float32))
 
 
 def clip(audio: npt.NDArray[Any], low_q: float, high_q: float) -> npt.NDArray[np.float32]:
@@ -153,20 +156,6 @@ def clip(audio: npt.NDArray[Any], low_q: float, high_q: float) -> npt.NDArray[np
         return x
     clipped = np.clip(x, low, high)
     return _peak_safe(clipped * np.float32(_rms(x) / _rms(clipped)))
-
-
-def room_response(
-    rt60: float, sample_rate: int, rng: np.random.Generator
-) -> npt.NDArray[np.float32]:
-    """A synthetic room impulse response: a direct path and an exponentially
-    decaying noise tail that falls 60 dB in `rt60` seconds."""
-    n = max(2, int(min(1.2 * rt60, 1.5) * sample_rate))
-    t = np.arange(n) / sample_rate
-    tail = rng.standard_normal(n) * np.exp(-np.log(1000.0) * t / rt60)
-    tail[0] = 0.0
-    rir = tail / (np.sqrt(np.sum(tail**2)) + _EPS) * 10 ** (-rng.uniform(0.0, 10.0) / 20)
-    rir[0] = 1.0  # direct path; the tail sits 0-10 dB below it in energy
-    return rir.astype(np.float32)
 
 
 def reverberate(audio: npt.NDArray[Any], rir: npt.NDArray[Any]) -> npt.NDArray[np.float32]:
@@ -202,27 +191,33 @@ def phone(
 
 
 class AudioCorpus:
-    """Recordings from a folder (or Hub dataset): noise excerpts or whole room responses."""
+    """Recordings from local folders and Hub datasets: noise excerpts or whole room responses.
 
-    def __init__(self, source: str, pattern: str = "**/*.wav") -> None:
-        """`source`: a local directory, or a Hub dataset id downloaded on first use."""
-        self.source, self.pattern = source, pattern
+    `sources` maps a local directory or Hub dataset id to a glob of its files.
+    Audio files are read as they are. Parquet shards (Hub audio datasets: an
+    `audio` column of encoded bytes) are unpacked to one file per row under
+    `cache_dir` (default `HF_HOME/tiny_audio_corpora`) on first use, so drawing
+    a recording reads one file, not a shard. A draw picks a file uniformly over
+    all sources.
+    """
+
+    def __init__(self, sources: Mapping[str, str], cache_dir: Path | None = None) -> None:
+        """`sources`: {local dir or Hub dataset id: glob of audio files or parquet shards}."""
+        self.sources = dict(sources)
+        self.cache_dir = cache_dir or Path(HF_HOME) / "tiny_audio_corpora"
         self._files: list[Path] | None = None
 
     def files(self) -> list[Path]:
-        """The recordings, resolved (and downloaded) on first call."""
+        """The recordings, resolved (downloaded and unpacked) on first call."""
         if self._files is None:
-            root = Path(self.source)
-            if not root.is_dir():
-                root = Path(
-                    snapshot_download(
-                        self.source, repo_type="dataset", allow_patterns=[self.pattern]
-                    )
-                )
-            self._files = sorted(root.glob(self.pattern))
-            if not self._files:
-                msg = f"no audio files match {self.pattern!r} under {root}"
-                raise FileNotFoundError(msg)
+            files: list[Path] = []
+            for source, pattern in self.sources.items():
+                found = _resolve(source, pattern, self.cache_dir)
+                if not found:
+                    msg = f"no audio files match {pattern!r} in {source}"
+                    raise FileNotFoundError(msg)
+                files += found
+            self._files = files
         return self._files
 
     def recording(self, sample_rate: int, rng: np.random.Generator) -> npt.NDArray[np.float32]:
@@ -246,6 +241,43 @@ class AudioCorpus:
         return _fit(noise, size)
 
 
+def _resolve(source: str, pattern: str, cache_dir: Path) -> list[Path]:
+    """The audio files `pattern` names in `source`, with parquet shards unpacked."""
+    root = Path(source)
+    if not root.is_dir():
+        root = Path(snapshot_download(source, repo_type="dataset", allow_patterns=[pattern]))
+    files: list[Path] = []
+    for path in sorted(root.glob(pattern)):
+        files += (
+            _unpack(path, cache_dir / source.replace("/", "--"))
+            if path.suffix == ".parquet"
+            else [path]
+        )
+    return files
+
+
+def _unpack(shard: Path, cache_dir: Path) -> list[Path]:
+    """One file per row of a parquet shard's `audio` column, unpacked once.
+
+    Written to a temporary directory and renamed into place, so concurrent
+    ranks never see a half-unpacked shard.
+    """
+    out = cache_dir / shard.stem
+    if not out.is_dir():
+        tmp = out.with_name(f"{out.name}.{os.getpid()}.tmp")
+        tmp.mkdir(parents=True, exist_ok=True)
+        table = pq.read_table(shard, columns=["audio"])
+        for i, cell in enumerate(table.column("audio").to_pylist()):
+            # Hub `Audio` columns are {bytes, path} structs; some mirrors store raw bytes.
+            data = cell["bytes"] if isinstance(cell, dict) else cell
+            (tmp / f"{i:06d}").write_bytes(data)
+        try:
+            tmp.rename(out)
+        except OSError:  # another rank got there first
+            shutil.rmtree(tmp)
+    return sorted(out.iterdir())
+
+
 class BatchAugmenter:
     """Applies reverb, noise, bandwidth limits and clipping to one batch of rows."""
 
@@ -261,7 +293,6 @@ class BatchAugmenter:
         clip_low_quantile: tuple[float, float] = (0.0, 0.1),
         clip_high_quantile: tuple[float, float] = (0.9, 1.0),
         reverb_prob: float = 0.0,
-        reverb_rt60: tuple[float, float] = (0.2, 1.0),
         reverb_corpus: AudioCorpus | None = None,
         phone_prob: float = 0.0,
         phone_highpass_hz: tuple[float, float] = (50.0, 200.0),
@@ -274,16 +305,15 @@ class BatchAugmenter:
             total = bandlimit_prob + clip_prob + phone_prob
             msg = f"bandlimit_prob + clip_prob + phone_prob is {total}; they are exclusive"
             raise ValueError(msg)
+        if reverb_prob > 0 and reverb_corpus is None:
+            msg = "reverb_prob needs a reverb_corpus of measured room responses"
+            raise ValueError(msg)
         self.sample_rate = sample_rate
         self.noise_prob, self.noise_snr_db, self.corpus = noise_prob, noise_snr_db, corpus
         self.bandlimit_prob, self.bandlimit_hz = bandlimit_prob, bandlimit_hz
         self.clip_prob = clip_prob
         self.clip_low_quantile, self.clip_high_quantile = clip_low_quantile, clip_high_quantile
-        self.reverb_prob, self.reverb_rt60, self.reverb_corpus = (
-            reverb_prob,
-            reverb_rt60,
-            reverb_corpus,
-        )
+        self.reverb_prob, self.reverb_corpus = reverb_prob, reverb_corpus
         self.phone_prob, self.phone_lowpass_hz = phone_prob, phone_lowpass_hz
         self.phone_highpass_hz, self.phone_gain_db = phone_highpass_hz, phone_gain_db
         self._seed = seed
@@ -330,10 +360,11 @@ class BatchAugmenter:
         return colored_noise(size, float(rng.choice([0.0, 1.0, 2.0])), rng)
 
     def room(self, rng: np.random.Generator) -> npt.NDArray[np.float32]:
-        """A measured room response, or a synthetic one (see `SYNTHETIC_REVERB_SHARE`)."""
-        if self.reverb_corpus is not None and rng.random() >= SYNTHETIC_REVERB_SHARE:
-            return align_rir(self.reverb_corpus.recording(self.sample_rate, rng), self.sample_rate)
-        return room_response(float(rng.uniform(*self.reverb_rt60)), self.sample_rate, rng)
+        """A random response from the room corpus, aligned to its direct path."""
+        if self.reverb_corpus is None:
+            msg = "no reverb_corpus"
+            raise ValueError(msg)
+        return align_rir(self.reverb_corpus.recording(self.sample_rate, rng), self.sample_rate)
 
     def degrade(self, audio: npt.NDArray[Any], others: list[npt.NDArray[Any]]) -> npt.NDArray[Any]:
         """One row through reverb and noise, each by chance, then at most one of

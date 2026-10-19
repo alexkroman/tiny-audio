@@ -83,19 +83,17 @@ class DataConfig:
     # Training-batch degradation (scripts/train_augment.py); probabilities of 0 disable.
     noise_prob: float = 0.0
     noise_snr_db: list[float] = field(default_factory=lambda: [-5.0, 20.0])
-    # Local dir or Hub dataset id of noise recordings, and the files to use.
-    noise_corpus: str | None = None
-    noise_corpus_glob: str = "**/*.wav"
+    # Noise recordings: {local dir or Hub dataset id: glob of audio files or
+    # parquet shards} (scripts/train_augment.py AudioCorpus).
+    noise_corpus: dict[str, str] = field(default_factory=dict[str, str])
     bandlimit_prob: float = 0.0
     bandlimit_hz: list[float] = field(default_factory=lambda: [4000.0])
     clip_prob: float = 0.0
     clip_low_quantile: list[float] = field(default_factory=lambda: [0.0, 0.1])
     clip_high_quantile: list[float] = field(default_factory=lambda: [0.9, 1.0])
     reverb_prob: float = 0.0
-    reverb_rt60: list[float] = field(default_factory=lambda: [0.2, 1.0])
-    # Local dir or Hub dataset id of measured room responses (synthetic if unset).
-    reverb_corpus: str | None = None
-    reverb_corpus_glob: str = "**/*.wav"
+    # Measured room responses, same form as noise_corpus; required for reverb_prob.
+    reverb_corpus: dict[str, str] = field(default_factory=dict[str, str])
     # Phone channel (scripts/train_augment.py phone), exclusive with band limit
     # and clipping: high-pass corner range, low-pass cutoffs (uniform over the
     # list), gain range.

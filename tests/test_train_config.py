@@ -255,14 +255,15 @@ def test_default_mix_degrades_and_reweights_under_one_prompt_but_tiny_does_not()
     weights and a single training prompt; the free laptop run uses none of them."""
     default, tiny = _compose(), _compose(["+experiments=tiny"])
     assert default.data.noise_prob > 0
-    assert default.data.noise_corpus == "FluidInference/musan"
+    assert set(default.data.noise_corpus) == {"philgzl/dns5", "philgzl/wham"}
+    assert set(default.data.reverb_corpus) == {"philgzl/dns5"}
     assert default.data.clip_prob > 0
     assert default.data.bandlimit_prob > 0
     assert default.data.single_prompt is True
     assert not default.data.verbatim_sources
     assert default.data.source_weights["speechcolab/gigaspeech:m"] == 0.5
     assert tiny.data.noise_prob == 0
-    assert tiny.data.noise_corpus is None
+    assert not tiny.data.noise_corpus
     assert not tiny.data.verbatim_sources
     assert not tiny.data.single_prompt
     assert not tiny.data.source_weights

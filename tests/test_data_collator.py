@@ -418,7 +418,7 @@ class TestAugmentedBatch:
             sample_rate=16000,
             projector=projector,
             augmenter=BatchAugmenter(
-                16000, noise_prob=1.0, bandlimit_prob=0.5, clip_prob=0.5, reverb_prob=1.0, seed=0
+                16000, noise_prob=1.0, bandlimit_prob=0.5, clip_prob=0.5, seed=0
             ),
         )
         batch = collator([create_sample("first row"), create_sample("second row")])
@@ -477,11 +477,11 @@ class TestBuildCollators:
             {
                 "sample_rate": 16000,
                 "noise_prob": 0.3,
-                "noise_corpus": str(tmp_path),
-                "noise_corpus_glob": "noise/*.wav",
+                "noise_corpus": {str(tmp_path): "noise/*.wav"},
+                "reverb_prob": 0.2,
+                "reverb_corpus": {str(tmp_path): "noise/*.wav"},
             }
         )
-        cfg["reverb_corpus"], cfg["reverb_corpus_glob"] = str(tmp_path), "noise/*.wav"
         augmenter = build_collators(model, cfg, seed=0)[0].augmenter
         assert augmenter is not None
         assert augmenter.corpus is not None

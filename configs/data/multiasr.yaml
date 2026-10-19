@@ -855,13 +855,16 @@ epoch_expansion: 1
 # only one below this model's 16 kHz input) / clipping (below a quantile
 # U(0, 0.1) and above one U(0.9, 1.0)). Measured on the leaderboard pair
 # (2026-10-17, granite-qwen-frozen-nc): the degradation costs 8.07 WER pts
-# (13.10 noisy vs 5.03 clean), SNR < 0 is 66% of it. Mirrored here without
-# URGENT's data: measured rooms from the MIT IR Survey (plus some synthetic
-# ones) instead of DNS5 RIRs, MUSAN noise
-# plus synthetic broadband noise and batch babble instead of DNS5/WHAM!, so no
-# test noise or rooms reach training. Reverb and noise are drawn independently,
-# then at most one of bandwidth limit / clipping, as in URGENT. Targets are
-# unchanged and eval batches are never degraded.
+# (13.10 noisy vs 5.03 clean), SNR < 0 is 66% of it. Mirrored here with
+# URGENT's own sources, keeping out the noise its validation (= the
+# leaderboard test) drew from: DNS5 room responses (URGENT never split them,
+# so all of them), DNS5 noise minus the alphabetical first quarter, WHAM!
+# train only. Before 2026-10-18 this used MUSAN noise (~930 files, 6 h) and
+# the 270-room MIT IR Survey plus synthetic rooms; DNS5 + WHAM! is ~240 h of
+# noise, with the cafe/street babble URGENT's hardest clips carry. Reverb and
+# noise are drawn independently, then at most one of bandwidth limit /
+# clipping / phone channel, as in URGENT. Targets are unchanged and eval
+# batches are never degraded.
 #
 # Rates: the first run (verbatim-aug, 2026-10-18; reverb 0.5, noise 0.35, band
 # limit 0.2, clipping 0.33, all independent) degraded ~83% of rows. URGENT
@@ -871,16 +874,22 @@ epoch_expansion: 1
 # the nine leaderboard sets are clean audio, so these rates leave about half
 # the rows untouched: 0.8 x 0.75 x 0.8 = 0.48.
 reverb_prob: 0.2
-# MIT Acoustical Reverberation Scene Statistics Survey (Traer & McDermott
-# 2016): 270 measured responses from everyday places, CC BY 4.0, 16 kHz mirror.
-reverb_corpus: TaterTotterson/MIT_environmental_impulse_responses
-reverb_corpus_glob: "16khz/*.wav"
-# RT60 range of the synthetic rooms (scripts/train_augment.py SYNTHETIC_REVERB_SHARE).
-reverb_rt60: [0.2, 1.0]
+# Mirrors as parquet shards of Opus/FLAC (scripts/train_augment.py AudioCorpus
+# unpacks them once, ~8 GB). DNS5 room responses: OpenSLR 26 (60k simulated
+# rooms) + 28 (real ones), CC BY 4.0, URGENT's RIR set in full.
+reverb_corpus:
+  philgzl/dns5: "data/rir-*.parquet"
 noise_prob: 0.25
 noise_snr_db: [-5.0, 20.0]
-noise_corpus: FluidInference/musan
-noise_corpus_glob: "noise/**/*.wav"
+noise_corpus:
+  # DNS5 AudioSet + Freesound noise (CC BY 4.0), shards in name order.
+  # URGENT's validation took the first 1/8 by name of each bandwidth group;
+  # skipping shard group 000 (the first quarter) covers most of it, though the
+  # groups are not public so it cannot be exact.
+  philgzl/dns5: "data/noise-00[1-3]-*.parquet"
+  # WHAM! (CC BY-NC 4.0) train split, files 000-188; URGENT used its
+  # validation split.
+  philgzl/wham: "data/train-*.parquet"
 bandlimit_prob: 0.1
 # Uniform over the list. 4 kHz is URGENT's band limit, done as URGENT does it
 # (resample to 8 kHz and back); 5.5 and 7 kHz are brickwalls mimicking
