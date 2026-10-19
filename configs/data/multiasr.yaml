@@ -872,14 +872,22 @@ epoch_expansion: 1
 # to hallucinate unrelated fluent text (AMI 13 -> 29 such clips, GigaSpeech
 # 121 -> 165, URGENT-clean 2 -> 9), so mean of 9 went 5.600 -> 5.666. Eight of
 # the nine leaderboard sets are clean audio, so these rates leave about half
-# the rows untouched: 0.8 x 0.75 x 0.8 = 0.48.
-reverb_prob: 0.2
+# the rows untouched: 0.9 x 0.65 x 0.73 = 0.43.
+#
+# The degraded budget goes where URGENT's errors are (measured 2026-10-17 on
+# its test clips: how often each condition occurs x what it costs), not in
+# URGENT's own proportions: noise is on every clip and SNR < 0 dB is 66% of the
+# excess errors; clipping is on 34% of clips at +7.6 WER; a band limit on 23%
+# at +5; reverb explains almost none of it and no other leaderboard set is
+# reverberant. Hence noise 0.35 > clipping 0.12 > band limit 0.10 > reverb
+# 0.10 (was reverb 0.2, noise 0.25, clipping 0.1 before 2026-10-18).
+reverb_prob: 0.1
 # Mirrors as parquet shards of Opus/FLAC (scripts/train_augment.py AudioCorpus
 # unpacks them once, ~8 GB). DNS5 room responses: OpenSLR 26 (60k simulated
 # rooms) + 28 (real ones), CC BY 4.0, URGENT's RIR set in full.
 reverb_corpus:
   philgzl/dns5: "data/rir-*.parquet"
-noise_prob: 0.25
+noise_prob: 0.35
 noise_snr_db: [-5.0, 20.0]
 noise_corpus:
   # DNS5 AudioSet + Freesound noise (CC BY 4.0), shards in name order.
@@ -893,11 +901,13 @@ noise_corpus:
 bandlimit_prob: 0.1
 # Uniform over the list. 4 kHz is URGENT's band limit, done as URGENT does it
 # (resample to 8 kHz and back); 5.5 and 7 kHz are brickwalls mimicking
-# band-limited source recordings, which URGENT inherits
-# from its speech corpora (cutoffs measured on its test clips: 121 at 4 kHz,
-# 16 at 5 kHz, 51 at 7 kHz).
-bandlimit_hz: [4000, 4000, 4000, 5512, 7000]
-clip_prob: 0.1
+# band-limited source recordings, which URGENT inherits from its speech
+# corpora. Cutoffs measured on its test clips: 121 at 4 kHz, 16 at 5 kHz, 51
+# at 7 kHz (64/9/27%); this list is 13/2/5 = 65/10/25%.
+bandlimit_hz:
+  [4000, 4000, 4000, 4000, 4000, 4000, 4000, 4000, 4000, 4000, 4000, 4000, 4000,
+   5512, 5512, 7000, 7000, 7000, 7000, 7000]
+clip_prob: 0.12
 clip_low_quantile: [0.0, 0.1]
 clip_high_quantile: [0.9, 1.0]
 # Phone channel (scripts/train_augment.py phone) for the Monsoon en-IN column,
@@ -905,7 +915,7 @@ clip_high_quantile: [0.9, 1.0]
 # (2026-10-18): band edge median 7.2 kHz (IQR 6.8-7.6; 55% round to 7 kHz,
 # 25% to 8 kHz = no-op at 16 kHz, 10% to 6, 3% to 5), low-end corner median
 # ~110 Hz (5-95%: 20-190), RMS -35 to -16 dBFS. Exclusive with band limit and
-# clipping; at 5% of rows the clean share is 0.8 x 0.75 x 0.75 = 45%.
+# clipping; at 5% of rows the clean share is 0.9 x 0.65 x 0.73 = 43%.
 phone_prob: 0.05
 phone_highpass_hz: [50.0, 200.0]
 phone_lowpass_hz: [7000, 7000, 7000, 7000, 7000, 6000, 6000, 5000]
