@@ -17,6 +17,7 @@ from scripts.train_augment import (
     clip,
     colored_noise,
     mix_at_snr,
+    phone,
     reverberate,
     room_response,
 )
@@ -122,6 +123,27 @@ class TestReverb:
         assert not np.allclose(out, tone)
 
 
+class TestPhone:
+    """The phone channel cuts the low end and the top band, and applies the gain."""
+
+    def test_highpass_lowpass_and_gain(self) -> None:
+        white = colored_noise(32000, 0.0, np.random.default_rng(0)) * 0.05
+        out = phone(white, 16000, highpass_hz=150.0, lowpass_hz=6000.0, gain_db=0.0)
+        power = np.abs(np.fft.rfft(out)) ** 2
+        freqs = np.fft.rfftfreq(out.size, d=1 / 16000)
+        mid = power[(freqs > 1000) & (freqs < 4000)].mean()
+        assert power[freqs > 7000].mean() < mid / 100  # 8th-order roll-off above 6 kHz
+        assert power[freqs < 50].mean() < mid / 5  # high-pass below 150 Hz
+        louder = phone(white, 16000, highpass_hz=150.0, lowpass_hz=6000.0, gain_db=6.0)
+        ratio = np.sqrt(np.mean(louder**2) / np.mean(out**2))
+        assert ratio == pytest.approx(10 ** (6 / 20), rel=0.01)
+
+    def test_lowpass_at_nyquist_is_skipped(self) -> None:
+        tone = _tone(0.5, freq=1000.0)
+        out = phone(tone, 16000, highpass_hz=50.0, lowpass_hz=8000.0, gain_db=0.0)
+        assert out.shape == tone.shape
+
+
 class TestAudioCorpus:
     """AudioCorpus draws excerpts of the requested length at the requested rate."""
 
@@ -208,19 +230,26 @@ class TestBatchAugmenter:
 
         monkeypatch.setattr("scripts.train_augment.bandlimit", fake_bandlimit)
         monkeypatch.setattr("scripts.train_augment.clip", fake_clip)
-        aug = BatchAugmenter(16000, bandlimit_prob=0.5, clip_prob=0.5, seed=0)
+
+        def fake_phone(audio: Any, *_: object) -> Any:
+            calls.append("phone")
+            return audio
+
+        monkeypatch.setattr("scripts.train_augment.phone", fake_phone)
+        aug = BatchAugmenter(16000, bandlimit_prob=0.4, clip_prob=0.4, phone_prob=0.2, seed=0)
         for _ in range(200):
             calls.clear()
             aug.degrade(_tone(0.1), [])
             assert len(calls) == 1
-        aug = BatchAugmenter(16000, bandlimit_prob=0.3, clip_prob=0.3, seed=1)
-        counts = {"none": 0, "bandlimit": 0, "clip": 0}
+        aug = BatchAugmenter(16000, bandlimit_prob=0.3, clip_prob=0.3, phone_prob=0.1, seed=1)
+        counts = {"none": 0, "bandlimit": 0, "clip": 0, "phone": 0}
         for _ in range(2000):
             calls.clear()
             aug.degrade(_tone(0.1), [])
             assert len(calls) <= 1
             counts[calls[0] if calls else "none"] += 1
-        assert counts["none"] == pytest.approx(800, abs=90)
+        assert counts["none"] == pytest.approx(600, abs=90)
+        assert counts["phone"] == pytest.approx(200, abs=60)
         assert counts["bandlimit"] == pytest.approx(600, abs=90)
 
     def test_exclusive_probabilities_over_one_fail_loudly(self) -> None:

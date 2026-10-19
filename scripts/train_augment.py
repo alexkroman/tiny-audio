@@ -17,9 +17,10 @@ several WER points. So each training row may get, in this order:
   noise corpus (`data.noise_corpus`, e.g. MUSAN's noise set, which URGENT did
   not draw from), synthetic white/pink/brown noise, or another row of the batch;
 - then at most ONE of, as in URGENT: a bandwidth limit (`data.bandlimit_prob`)
-  at a cutoff drawn from `data.bandlimit_hz`, or clipping (`data.clip_prob`)
+  at a cutoff drawn from `data.bandlimit_hz`, clipping (`data.clip_prob`)
   below a quantile drawn from `data.clip_low_quantile` and above one drawn
-  from `data.clip_high_quantile` (URGENT's two-sided scheme).
+  from `data.clip_high_quantile` (URGENT's two-sided scheme), or a phone
+  channel (`data.phone_prob`, see `phone`).
 
 Targets are unchanged. Applied to training batches only.
 
@@ -41,7 +42,7 @@ import numpy as np
 import numpy.typing as npt
 import soundfile as sf
 from huggingface_hub import snapshot_download
-from scipy.signal import fftconvolve, resample_poly
+from scipy.signal import butter, fftconvolve, resample_poly, sosfilt
 
 # Noise source mix when a row gets noise: corpus, synthetic broadband, batch babble.
 # Without a corpus its share goes to synthetic noise.
@@ -138,6 +139,23 @@ def align_rir(rir: npt.NDArray[Any], sample_rate: int) -> npt.NDArray[np.float32
     return out / (float(np.abs(out).max()) + _EPS)
 
 
+def phone(
+    audio: npt.NDArray[Any], sample_rate: int, highpass_hz: float, lowpass_hz: float, gain_db: float
+) -> npt.NDArray[np.float32]:
+    """A phone channel, matched to the leaderboard's Monsoon en-IN recordings
+    (Android phones, measured 2026-10-18): a 2nd-order high-pass at `highpass_hz`
+    (the small-mic roll-off, Monsoon's median ~110 Hz), an 8th-order low-pass at
+    `lowpass_hz` (voice codecs roll off gently, unlike URGENT's resampling
+    brickwall; Monsoon's band edge median 7.2 kHz), then `gain_db` (its RMS
+    spans -35 to -16 dBFS)."""
+    x = audio.astype(np.float64, copy=False)
+    nyquist = sample_rate / 2
+    x = sosfilt(butter(2, highpass_hz / nyquist, btype="highpass", output="sos"), x)
+    if lowpass_hz < nyquist:
+        x = sosfilt(butter(8, lowpass_hz / nyquist, btype="lowpass", output="sos"), x)
+    return _peak_safe((x * 10 ** (gain_db / 20)).astype(np.float32))
+
+
 class AudioCorpus:
     """Recordings from a folder (or Hub dataset): noise excerpts or whole room responses."""
 
@@ -200,11 +218,16 @@ class BatchAugmenter:
         reverb_prob: float = 0.0,
         reverb_rt60: tuple[float, float] = (0.2, 1.0),
         reverb_corpus: AudioCorpus | None = None,
+        phone_prob: float = 0.0,
+        phone_highpass_hz: tuple[float, float] = (50.0, 200.0),
+        phone_lowpass_hz: tuple[float, ...] = (7000.0,),
+        phone_gain_db: tuple[float, float] = (-10.0, 6.0),
         seed: int | None = None,
     ) -> None:
         """Keep the rates; the RNG is created per process (see `_rng`)."""
-        if bandlimit_prob + clip_prob > 1.0:
-            msg = f"bandlimit_prob + clip_prob is {bandlimit_prob + clip_prob}; they are exclusive"
+        if bandlimit_prob + clip_prob + phone_prob > 1.0:
+            total = bandlimit_prob + clip_prob + phone_prob
+            msg = f"bandlimit_prob + clip_prob + phone_prob is {total}; they are exclusive"
             raise ValueError(msg)
         self.sample_rate = sample_rate
         self.noise_prob, self.noise_snr_db, self.corpus = noise_prob, noise_snr_db, corpus
@@ -216,6 +239,8 @@ class BatchAugmenter:
             reverb_rt60,
             reverb_corpus,
         )
+        self.phone_prob, self.phone_lowpass_hz = phone_prob, phone_lowpass_hz
+        self.phone_highpass_hz, self.phone_gain_db = phone_highpass_hz, phone_gain_db
         self._seed = seed
         self._pid: int | None = None
         self._generator: np.random.Generator | None = None
@@ -223,7 +248,13 @@ class BatchAugmenter:
     @property
     def enabled(self) -> bool:
         """Whether any degradation can fire."""
-        probs = (self.reverb_prob, self.noise_prob, self.bandlimit_prob, self.clip_prob)
+        probs = (
+            self.reverb_prob,
+            self.noise_prob,
+            self.bandlimit_prob,
+            self.clip_prob,
+            self.phone_prob,
+        )
         return any(p > 0 for p in probs)
 
     def _rng(self) -> np.random.Generator:
@@ -261,7 +292,7 @@ class BatchAugmenter:
 
     def degrade(self, audio: npt.NDArray[Any], others: list[npt.NDArray[Any]]) -> npt.NDArray[Any]:
         """One row through reverb and noise, each by chance, then at most one of
-        a bandwidth limit or clipping."""
+        a bandwidth limit, clipping or a phone channel."""
         rng = self._rng()
         out = audio
         if rng.random() < self.reverb_prob:
@@ -277,6 +308,15 @@ class BatchAugmenter:
         elif draw < self.bandlimit_prob + self.clip_prob:
             low_q = float(rng.uniform(*self.clip_low_quantile))
             out = clip(out, low_q, float(rng.uniform(*self.clip_high_quantile)))
+        elif draw < self.bandlimit_prob + self.clip_prob + self.phone_prob:
+            lowpass = float(self.phone_lowpass_hz[int(rng.integers(len(self.phone_lowpass_hz)))])
+            out = phone(
+                out,
+                self.sample_rate,
+                float(rng.uniform(*self.phone_highpass_hz)),
+                lowpass,
+                float(rng.uniform(*self.phone_gain_db)),
+            )
         return out
 
     def __call__(

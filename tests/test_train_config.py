@@ -272,5 +272,20 @@ def test_default_augmentation_leaves_about_half_the_rows_clean() -> None:
     """8 of the 9 leaderboard sets are clean audio. Degrading ~83% of rows (the
     2026-10-18 run) made clean conversational audio hallucinate."""
     d = _compose().data
-    clean = (1 - d.reverb_prob) * (1 - d.noise_prob) * (1 - d.bandlimit_prob - d.clip_prob)
+    post_noise = d.bandlimit_prob + d.clip_prob + d.phone_prob
+    clean = (1 - d.reverb_prob) * (1 - d.noise_prob) * (1 - post_noise)
     assert 0.4 <= clean <= 0.6
+
+
+def test_nptel_is_english_speech_only_capped_and_filtered() -> None:
+    """Only NPTEL's En-Indic config is English speech; Indic-En would teach translation."""
+    [nptel] = [d for d in _compose().data.datasets if "ai4bharat/NPTEL" in str(d.get("data_files"))]
+    assert "/En-Indic/" in nptel.data_files["train"]
+    assert "Indic-En" not in nptel.data_files["train"]
+    assert nptel.target_samples == 200000
+    assert nptel.exclude_where.column == "alignment_score"
+    assert nptel.exclude_where.below == 0.95
+
+
+def test_edacc_is_upweighted_three_times() -> None:
+    assert _compose().data.source_weights["edinburghcstr/edacc"] == 3.0

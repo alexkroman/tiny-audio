@@ -337,6 +337,10 @@ def build_collators(
         reverb_prob=data_cfg.get("reverb_prob") or 0.0,
         reverb_rt60=pair("reverb_rt60", (0.2, 1.0)),
         reverb_corpus=corpus("reverb_corpus"),
+        phone_prob=data_cfg.get("phone_prob") or 0.0,
+        phone_highpass_hz=pair("phone_highpass_hz", (50.0, 200.0)),
+        phone_lowpass_hz=tuple(float(h) for h in data_cfg.get("phone_lowpass_hz") or (7000.0,)),
+        phone_gain_db=pair("phone_gain_db", (-10.0, 6.0)),
         seed=seed,
     )
     train = DataCollator(**args, augmenter=augmenter if augmenter.enabled else None)

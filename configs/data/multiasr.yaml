@@ -772,6 +772,36 @@ datasets:
   # NOT a Monsoon lever: only 249 effective Indian-English rows (0.32 h,
   # 2 speakers). <LAUGH>/<DTMF>/<OVERLAP>/<FOREIGN>/<NO-SPEECH> are stripped
   # by normalize_label (TestEdAccNormalization).
+  # NPTEL Indian-English lectures (ai4bharat/NPTEL, CC BY 4.0, gated: the
+  # training pod's HF token needs access). Added 2026-10-18 for the Open ASR
+  # leaderboard's Monsoon en-IN column (#39 of 65, 4.52 WER vs a 3.44 top-10
+  # cut), whose errors are accent-shaped function-word slips ("a"/"is"/"the"
+  # inserted, "to" -> "too"), not names. ONLY the En-Indic config is English
+  # speech; Indic-En is Indian-language speech with English translations and
+  # must never be loaded. Eight of En-Indic's 28 shards, spread across the
+  # repo (~450K segments, ~5,000 h in all 28) so courses and speakers vary,
+  # cut to segments the aligner scored >= 0.95 (quartiles 0.92/0.96/0.97), then
+  # capped at 200K rows (~5% of the mix); uncapped it would be ~40% and pull
+  # the decoder toward lecture register, the way People's at 1M rows
+  # displaced AMI and CV (see the People's note above). Lecture monologue on
+  # lecture mics, technical vocabulary, subtitle-style labels (cased, light
+  # punctuation): it fixes the accent gap, not Monsoon's phone/conversational
+  # gap (data.phone_prob covers part of the phone side). ~15% of segments are
+  # over 19 s (p90 24 s) and drop at collate time, so it delivers ~170K.
+  - path: parquet
+    data_files:
+      train: "hf://datasets/ai4bharat/NPTEL/En-Indic/train-000[0-2][048]-of-00028.parquet"
+    audio_column: chunked_audio_filepath
+    text_column: text
+    task: transcribe
+    text_case: cased
+    text_punct: true
+    train_splits: [train]
+    eval_splits: []
+    target_samples: 200000
+    exclude_where:
+      column: alignment_score
+      below: 0.95
   - path: edinburghcstr/edacc
     audio_column: audio
     text_column: text
@@ -860,6 +890,16 @@ bandlimit_hz: [4000, 4000, 4000, 5512, 7000]
 clip_prob: 0.1
 clip_low_quantile: [0.0, 0.1]
 clip_high_quantile: [0.9, 1.0]
+# Phone channel (scripts/train_augment.py phone) for the Monsoon en-IN column,
+# which is real Android-phone audio. Measured on its 2,102 test clips
+# (2026-10-18): band edge median 7.2 kHz (IQR 6.8-7.6; 55% round to 7 kHz,
+# 25% to 8 kHz = no-op at 16 kHz, 10% to 6, 3% to 5), low-end corner median
+# ~110 Hz (5-95%: 20-190), RMS -35 to -16 dBFS. Exclusive with band limit and
+# clipping; at 5% of rows the clean share is 0.8 x 0.75 x 0.75 = 45%.
+phone_prob: 0.05
+phone_highpass_hz: [50.0, 200.0]
+phone_lowpass_hz: [7000, 7000, 7000, 7000, 7000, 6000, 6000, 5000]
+phone_gain_db: [-10.0, 6.0]
 
 # One prompt for every row: the shipped inference prompt ("Transcribe the
 # speech with proper punctuation and capitalization"), whatever the source's
@@ -884,6 +924,12 @@ single_prompt: true
 # (mean of 9 5.711; AMI 8.01, E22 8.37, Giga 7.86, LS 1.37/2.64, SPGI 1.64,
 # URGENT 13.09, Monsoon 4.53, VoxPopuli 3.87), not just the targets.
 source_weights:
+  # EdAcc x3 (2026-10-18): the mix's only non-native conversational speech
+  # transcribed exactly as spoken. VoxPopuli (#35) and Monsoon (#39) lose
+  # points to the decoder repairing non-native grammar (VoxPopuli: "the"
+  # inserted 75 times; Monsoon: "a"/"is"/"the" inserted). ~9 h usable, so x3
+  # is ~0.8% of the mix; stop there, the repeats are the same speakers.
+  "edinburghcstr/edacc": 3.0
   "edinburghcstr/ami": 2.0
   "sanchit-gandhi/tedlium-data": 1.5
   "mazesmazes/notsofar-train": 2.0

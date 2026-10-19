@@ -96,6 +96,13 @@ class DataConfig:
     # Local dir or Hub dataset id of measured room responses (synthetic if unset).
     reverb_corpus: str | None = None
     reverb_corpus_glob: str = "**/*.wav"
+    # Phone channel (scripts/train_augment.py phone), exclusive with band limit
+    # and clipping: high-pass corner range, low-pass cutoffs (uniform over the
+    # list), gain range.
+    phone_prob: float = 0.0
+    phone_highpass_hz: list[float] = field(default_factory=lambda: [50.0, 200.0])
+    phone_lowpass_hz: list[float] = field(default_factory=lambda: [7000.0])
+    phone_gain_db: list[float] = field(default_factory=lambda: [-10.0, 6.0])
 
 
 @dataclass
