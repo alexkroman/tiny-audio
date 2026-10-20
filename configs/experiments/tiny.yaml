@@ -10,10 +10,12 @@
 # somewhere around step 400-650 as the decoder starts reading the audio.
 # Measured on an M4 Max: ~30 minutes, 16% WER on 100 unseen test-clean clips.
 #
-# Only the decoder, the data, the step budget and the hardware settings
-# differ from configs/config.yaml; the encoder (Granite Speech 470M), the
-# projector and the LoRA setup are inherited unchanged. The decoder is
-# Qwen3.5-0.8B, the smallest Qwen3.5, instead of the default's Qwen3.5-2B.
+# The model is the published recipe at laptop size: the Granite Speech 470M
+# encoder, its projector settings and the default LoRA setup, with
+# Qwen3.5-0.8B, the smallest Qwen3.5, as the decoder. The default recipe
+# moved to Whisper-large-v3 + Qwen3-1.7B on 2026-10-20; this preset keeps the
+# encoder the numbers above were measured with (Whisper-large is ~1.4x the
+# size and always encodes a padded 30 s window).
 #
 # Peak GPU memory is 8-10 GB, so it fits a 16 GB Mac. Runs on Apple Silicon,
 # a CUDA GPU (including a free Colab T4), or slowly on CPU. The trained
@@ -26,6 +28,13 @@ defaults:
   - override /data: librispeech_dev
 
 model:
+  audio_model_id: ibm-granite/granite-speech-5.0-470m-turboctc-nc
+  # Granite's ~M/4 conv subsampling, not Whisper's ~M/2: the collator sizes
+  # the <audio> placeholders from this, and a mismatch with what the
+  # projector emits fails _assert_audio_token_counts at step 0.
+  encoder_conv_layers: [[0, 2, 2], [0, 2, 2]]
+  # Granite already emits 12.5 Hz; its top layers were CTC-trained there.
+  projector_pool_stride: 1
   text_model_id: Qwen/Qwen3.5-0.8B
 
 data:
