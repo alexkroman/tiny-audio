@@ -261,7 +261,7 @@ def test_default_mix_degrades_and_reweights_under_one_prompt_but_tiny_does_not()
     assert default.data.bandlimit_prob > 0
     assert default.data.single_prompt is True
     assert not default.data.verbatim_sources
-    assert default.data.source_weights["speechcolab/gigaspeech:m"] == 0.5
+    assert "speechcolab/gigaspeech:m" not in default.data.source_weights  # back at x1
     assert tiny.data.noise_prob == 0
     assert not tiny.data.noise_corpus
     assert not tiny.data.verbatim_sources
@@ -278,14 +278,9 @@ def test_default_augmentation_leaves_about_half_the_rows_clean() -> None:
     assert 0.4 <= clean <= 0.6
 
 
-def test_nptel_is_english_speech_only_capped_and_filtered() -> None:
-    """Only NPTEL's En-Indic config is English speech; Indic-En would teach translation."""
-    [nptel] = [d for d in _compose().data.datasets if "ai4bharat/NPTEL" in str(d.get("data_files"))]
-    assert "/En-Indic/" in nptel.data_files["train"]
-    assert "Indic-En" not in nptel.data_files["train"]
-    assert nptel.target_samples == 200000
-    assert nptel.exclude_where.column == "alignment_score"
-    assert nptel.exclude_where.below == 0.95
+def test_nptel_stays_out_of_the_mix() -> None:
+    """Removed 2026-10-20 after it made the Monsoon column worse (configs/data/multiasr.yaml)."""
+    assert not [d for d in _compose().data.datasets if "NPTEL" in str(d.get("data_files"))]
 
 
 def test_edacc_is_upweighted_three_times() -> None:
