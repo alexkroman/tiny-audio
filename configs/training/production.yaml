@@ -95,6 +95,13 @@ seed: 44
 # 1e-3 / 1e-4 and max_grad_norm 1.0 mean what they meant there and the run
 # compares cleanly against it.
 #
+# NOT RE-MEASURED for Whisper-large-v3 + Qwen3-1.7B (the default since
+# 2026-10-20). The decoder sees the same 12.5 Hz audio-token count and
+# Qwen3-1.7B is smaller than Qwen3.5-2B, so the trainable side should fit,
+# but the frozen encoder now runs a padded 30 s window per clip. Watch the
+# first few hundred steps on the RTX PRO 6000; if it OOMs, step down to 48
+# BEFORE rerunning -- the seeded data order replays the OOM on resume.
+#
 # MEASURED, not planned: W&B es1p5srq (2B, batch 64, A100 80GB) peaked at
 # 76.4 GiB (95.5% of the card, median 68.6); `ta runpod plan` predicted
 # 77.3. Peak is batch x the collator's 19.0s cap regardless of mix: batches

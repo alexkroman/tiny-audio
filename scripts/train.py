@@ -935,8 +935,9 @@ def _init_wandb(cfg: DictConfig) -> None:
         run.summary["git_dirty"] = git_dirty
 
 
-# Decoder-family substring -> liger patcher. Only Qwen3.5 is supported.
-_LIGER_PATCHERS = (("qwen3.5", "apply_liger_kernel_to_qwen3_5"),)
+# Decoder-family substring -> suffix of liger's apply_liger_kernel_to_<suffix>.
+# First match wins, so Qwen3.5 (whose ids also contain "qwen3") comes first.
+_LIGER_PATCHERS = (("qwen3.5", "qwen3_5"), ("qwen3", "qwen3"))
 
 
 def _apply_liger_kernels(cfg: DictConfig) -> None:
@@ -971,14 +972,14 @@ def _apply_liger_kernels(cfg: DictConfig) -> None:
     reason: BaseException | str | None = _liger_import_error
     if _liger_transformers is not None:
         try:
-            getattr(_liger_transformers, patcher_name)()
+            getattr(_liger_transformers, f"apply_liger_kernel_to_{patcher_name}")()
         except (ImportError, AttributeError) as e:
             reason = e
         else:
-            logger.info("Applied liger kernels via %s()", patcher_name)
+            logger.info("Applied liger kernels via apply_liger_kernel_to_%s()", patcher_name)
             return
     logger.warning(
-        "liger-kernel unavailable or missing %s (%s) — falling back to "
+        "liger-kernel unavailable or missing apply_liger_kernel_to_%s (%s) — falling back to "
         "stock kernels. Install with `poetry install` on Linux and pin a "
         "version that exports it to enable fused linear CE.",
         patcher_name,

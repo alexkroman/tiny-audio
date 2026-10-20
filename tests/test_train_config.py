@@ -76,24 +76,33 @@ def test_default_config_composes() -> None:
     assert isinstance(cfg.training.learning_rate, float)
 
 
-def test_default_config_is_the_published_recipe() -> None:
+def test_default_config_is_whisper_and_qwen3() -> None:
     cfg = _compose()
-    assert cfg.model.audio_model_id == "ibm-granite/granite-speech-5.0-470m-turboctc-nc"
-    assert cfg.model.text_model_id == "Qwen/Qwen3.5-2B"
+    assert cfg.model.audio_model_id == "openai/whisper-large-v3"
+    assert cfg.model.text_model_id == "Qwen/Qwen3-1.7B"
     assert cfg.model.use_lora is True
     assert cfg.training.freeze_audio_encoder is True
     assert cfg.training.freeze_language_model is True
 
 
-def test_tiny_preset_trains_the_default_model_on_the_sample() -> None:
-    """`-e tiny` is the default recipe on dev-clean with a smaller decoder.
+def test_tiny_preset_trains_the_published_model_at_laptop_size() -> None:
+    """`-e tiny` keeps the Granite encoder its laptop numbers were measured with.
 
-    Only the decoder, data, steps and hardware differ: the encoder, projector
-    and LoRA setup are the default's.
+    Only the encoder settings, the decoder, data, steps and hardware differ:
+    the projector width and the LoRA setup are the default's.
     """
     default, tiny = _compose(), _compose(["+experiments=tiny"])
     assert tiny.model.text_model_id == "Qwen/Qwen3.5-0.8B"
-    assert {**tiny.model, "text_model_id": None} == {**default.model, "text_model_id": None}
+    assert tiny.model.audio_model_id == "ibm-granite/granite-speech-5.0-470m-turboctc-nc"
+    assert tiny.model.projector_pool_stride == 1
+    encoder_keys = (
+        "audio_model_id",
+        "text_model_id",
+        "encoder_conv_layers",
+        "projector_pool_stride",
+    )
+    blank = dict.fromkeys(encoder_keys)
+    assert {**tiny.model, **blank} == {**default.model, **blank}
     for key in ("freeze_audio_encoder", "freeze_language_model", "learning_rate"):
         assert tiny.training[key] == default.training[key], key
     [source] = tiny.data.datasets
@@ -248,6 +257,25 @@ class TestApplyLigerKernels:
         train_module._apply_liger_kernels(self._cfg())
         assert calls == ["patched"]
         assert "Applied liger kernels" in caplog.text
+
+    @pytest.mark.parametrize(
+        ("text_model_id", "patcher"),
+        [
+            ("Qwen/Qwen3.5-2B", "apply_liger_kernel_to_qwen3_5"),
+            ("Qwen/Qwen3-1.7B-Base", "apply_liger_kernel_to_qwen3"),
+        ],
+    )
+    def test_each_decoder_gets_its_own_patcher(
+        self, monkeypatch: pytest.MonkeyPatch, text_model_id: str, patcher: str
+    ) -> None:
+        """Qwen3.5 ids also contain "qwen3"; they must not fall through to the Qwen3 patcher."""
+        calls: list[str] = []
+        names = ("apply_liger_kernel_to_qwen3_5", "apply_liger_kernel_to_qwen3")
+        liger = SimpleNamespace(**{n: (lambda n=n: calls.append(n)) for n in names})
+        monkeypatch.setattr(train_module, "_liger_transformers", liger)
+        cfg = OmegaConf.create({"model": {"text_model_id": text_model_id}})
+        train_module._apply_liger_kernels(cfg)
+        assert calls == [patcher]
 
 
 def test_default_mix_degrades_and_reweights_under_one_prompt_but_tiny_does_not() -> None:
