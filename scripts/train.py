@@ -701,6 +701,12 @@ class ASRTrainer(Trainer):
         self.encoder_learning_rate = encoder_learning_rate
         self.encoder_weight_decay = encoder_weight_decay
 
+    def _load_from_checkpoint(self, resume_from_checkpoint: str, model: Any = None) -> None:
+        """Trainer's load plus the LoRA adapter it skips (`ASRModel.load_lora_checkpoint`)."""
+        super()._load_from_checkpoint(resume_from_checkpoint, model)
+        if isinstance(m := self.accelerator.unwrap_model(model or self.model), ASRModel):
+            m.load_lora_checkpoint(resume_from_checkpoint)
+
     def get_eval_dataloader(self, eval_dataset: Any = None) -> Any:
         """Eval batches through the non-augmenting collator, when one was given."""
         train_collator = self.data_collator

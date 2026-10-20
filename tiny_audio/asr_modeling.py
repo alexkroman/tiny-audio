@@ -12,7 +12,7 @@ from threading import Thread
 from typing import TYPE_CHECKING, Any, Self, cast, overload
 
 import torch
-from peft import LoraConfig, PeftModel, get_peft_model
+from peft import LoraConfig, PeftModel, get_peft_model, set_peft_model_state_dict
 from safetensors.torch import load_file
 from torch import nn
 from torch.nn import functional
@@ -1093,6 +1093,27 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             encoder_conv_layers=self.config.encoder_conv_layers,
             audio_token=self.audio_token,
         )
+
+    def load_lora_checkpoint(self, checkpoint_dir: str | PathLike[str]) -> bool:
+        """Load the LoRA weights a checkpoint saved as adapter_model.safetensors.
+
+        HF Trainer resumes by loading model.safetensors (the projector, see
+        `state_dict`) and, when that file exists, never reaches its PEFT
+        branch, so a resumed run kept the trained projector but restarted LoRA
+        from its initialization under the trained optimizer state
+        (granite-qwen-verbatim-aug-2 resumed at step 52,000 on 2026-10-19:
+        loss 0.28 -> 1.7). Returns whether adapter weights were loaded; raises
+        if a saved tensor matches no LoRA parameter.
+        """
+        path = Path(checkpoint_dir) / "adapter_model.safetensors"
+        if not path.is_file() or not isinstance(self.language_model, PeftModel):
+            return False
+        result = set_peft_model_state_dict(self.language_model, load_file(path))
+        if result.unexpected_keys:
+            msg = f"adapter weights match no LoRA parameter: {result.unexpected_keys[:3]}"
+            raise ValueError(msg)
+        logger.info("Loaded LoRA adapter weights from %s", path)
+        return True
 
     @overload
     def state_dict(
