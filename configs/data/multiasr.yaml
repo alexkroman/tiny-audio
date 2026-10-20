@@ -914,17 +914,18 @@ phone_gain_db: [-10.0, 6.0]
 # punctuation). For frozen-nc's two-prompt split instead, set this false.
 single_prompt: true
 
-# More weight on the word-for-word conversational sources: AMI ~148K x2,
-# TEDLIUM ~195K x1.5, NOTSOFAR x2. GigaSpeech M was also halved (its labels
-# collapse repeated words: 0.9 repeats per 1k words against 6.1 in the
-# leaderboard's references) and is back at x1 since 2026-10-20: the first run
-# with x0.5 (verbatim-aug-2) lost +0.29 [+0.23, +0.36] on GigaSpeech, +0.31
-# with confabulated clips excluded, a broad loss of in-domain accuracy. The
-# +0.02 that justified halving came from a run that differed in other ways. An earlier
-# reweighting (the "tilt", see the top of this file) was rolled back for
-# cross-eval regressions, so read every set against the 2026-10-17 baseline
-# (mean of 9 5.711; AMI 8.01, E22 8.37, Giga 7.86, LS 1.37/2.64, SPGI 1.64,
-# URGENT 13.09, Monsoon 4.53, VoxPopuli 3.87), not just the targets.
+# More weight on the word-for-word conversational sources: AMI ~148K x4,
+# TEDLIUM ~195K x1.5, NOTSOFAR x4 (see the meetings note below). GigaSpeech M
+# was also halved (its labels collapse repeated words: 0.9 repeats per 1k
+# words against 6.1 in the leaderboard's references) and is back at x1 since
+# 2026-10-20: the first run with x0.5 (verbatim-aug-2) lost +0.29 [+0.23,
+# +0.36] on GigaSpeech, +0.31 with confabulated clips excluded, a broad loss
+# of in-domain accuracy. The +0.02 that justified halving came from a run that
+# differed in other ways. An earlier reweighting (the "tilt", see the top of
+# this file) was rolled back for cross-eval regressions, so read every set
+# against the 2026-10-17 baseline (mean of 9 5.711; AMI 8.01, E22 8.37, Giga
+# 7.86, LS 1.37/2.64, SPGI 1.64, URGENT 13.09, Monsoon 4.53, VoxPopuli 3.87),
+# not just the targets.
 source_weights:
   # EdAcc x3 (2026-10-18): the mix's only non-native conversational speech
   # transcribed exactly as spoken. VoxPopuli (#35) and Monsoon (#39) lose
@@ -932,6 +933,18 @@ source_weights:
   # inserted 75 times; Monsoon: "a"/"is"/"the" inserted). ~9 h usable, so x3
   # is ~0.8% of the mix; stop there, the repeats are the same speakers.
   "edinburghcstr/edacc": 3.0
-  "edinburghcstr/ami": 2.0
+  # Meetings (AMI IHM + SDM, NOTSOFAR) x4 since 2026-10-20, ~15% of the rows
+  # the model sees: Canary-Qwen-2.5B (#17, published card) oversampled AMI
+  # "to constitute about 15% of the total data observed", which it says
+  # "skewed the model towards predicting verbatim transcripts that include
+  # conversational speech disfluencies such as repetitions" -- the verbatim
+  # gap behind this mix's E22 repeat deletions and Monsoon/AMI misses. At x2
+  # the meeting block was ~7.9% (AMI ~7.6%). Arithmetic on the 2026-10-20
+  # loader counts with collate-time drops (AMI keeps ~68% of rows): meetings
+  # 153,921 kept rows per unit of weight against ~3.57M other kept rows, so
+  # x4 = 615,684 / 4.19M = 14.7% (AMI alone 14.1%). Costs ~6,900 more steps
+  # (~+11%) and shows each meeting clip 4x per epoch; Canary's share implies
+  # far heavier repetition of AMI's ~100 h than that.
+  "edinburghcstr/ami": 4.0
   "sanchit-gandhi/tedlium-data": 1.5
-  "mazesmazes/notsofar-train": 2.0
+  "mazesmazes/notsofar-train": 4.0
