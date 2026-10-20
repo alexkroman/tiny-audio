@@ -772,36 +772,15 @@ datasets:
   # NOT a Monsoon lever: only 249 effective Indian-English rows (0.32 h,
   # 2 speakers). <LAUGH>/<DTMF>/<OVERLAP>/<FOREIGN>/<NO-SPEECH> are stripped
   # by normalize_label (TestEdAccNormalization).
-  # NPTEL Indian-English lectures (ai4bharat/NPTEL, CC BY 4.0, gated: the
-  # training pod's HF token needs access). Added 2026-10-18 for the Open ASR
-  # leaderboard's Monsoon en-IN column (#39 of 65, 4.52 WER vs a 3.44 top-10
-  # cut), whose errors are accent-shaped function-word slips ("a"/"is"/"the"
-  # inserted, "to" -> "too"), not names. ONLY the En-Indic config is English
-  # speech; Indic-En is Indian-language speech with English translations and
-  # must never be loaded. Eight of En-Indic's 28 shards, spread across the
-  # repo (~450K segments, ~5,000 h in all 28) so courses and speakers vary,
-  # cut to segments the aligner scored >= 0.95 (quartiles 0.92/0.96/0.97), then
-  # capped at 200K rows (~5% of the mix); uncapped it would be ~40% and pull
-  # the decoder toward lecture register, the way People's at 1M rows
-  # displaced AMI and CV (see the People's note above). Lecture monologue on
-  # lecture mics, technical vocabulary, subtitle-style labels (cased, light
-  # punctuation): it fixes the accent gap, not Monsoon's phone/conversational
-  # gap (data.phone_prob covers part of the phone side). ~15% of segments are
-  # over 19 s (p90 24 s) and drop at collate time, so it delivers ~170K.
-  - path: parquet
-    data_files:
-      train: "hf://datasets/ai4bharat/NPTEL/En-Indic/train-000[0-2][048]-of-00028.parquet"
-    audio_column: chunked_audio_filepath
-    text_column: text
-    task: transcribe
-    text_case: cased
-    text_punct: true
-    train_splits: [train]
-    eval_splits: []
-    target_samples: 200000
-    exclude_where:
-      column: alignment_score
-      below: 0.95
+  # NPTEL Indian-English lectures (ai4bharat/NPTEL En-Indic, 200K rows) was
+  # added 2026-10-18 for the Monsoon en-IN column and REMOVED 2026-10-20:
+  # the first run with it (verbatim-aug-2) got Monsoon WORSE, +0.50 [+0.25,
+  # +0.79] paired against frozen-nc, and +0.38 with confabulated clips
+  # excluded, so many small errors, not a few failures. It was the largest
+  # of the three Monsoon changes in that run (EdAcc x3 and the phone channel
+  # stay), so it goes first; if the next run's Monsoon recovers, NPTEL was it.
+  # Its labels are lecture subtitles (cased, light punctuation, lecture
+  # register), unlike Monsoon's verbatim conversational references.
   - path: edinburghcstr/edacc
     audio_column: audio
     text_column: text
@@ -935,10 +914,13 @@ phone_gain_db: [-10.0, 6.0]
 # punctuation). For frozen-nc's two-prompt split instead, set this false.
 single_prompt: true
 
-# More weight on the word-for-word conversational sources, less on
-# GigaSpeech M, whose labels collapse repeated words (0.9 repeats per 1k words
-# against 6.1 in the leaderboard's references). Roughly row-neutral: AMI
-# ~148K x2, TEDLIUM ~195K x1.5, NOTSOFAR x2, Giga M ~657K x0.5. An earlier
+# More weight on the word-for-word conversational sources: AMI ~148K x2,
+# TEDLIUM ~195K x1.5, NOTSOFAR x2. GigaSpeech M was also halved (its labels
+# collapse repeated words: 0.9 repeats per 1k words against 6.1 in the
+# leaderboard's references) and is back at x1 since 2026-10-20: the first run
+# with x0.5 (verbatim-aug-2) lost +0.29 [+0.23, +0.36] on GigaSpeech, +0.31
+# with confabulated clips excluded, a broad loss of in-domain accuracy. The
+# +0.02 that justified halving came from a run that differed in other ways. An earlier
 # reweighting (the "tilt", see the top of this file) was rolled back for
 # cross-eval regressions, so read every set against the 2026-10-17 baseline
 # (mean of 9 5.711; AMI 8.01, E22 8.37, Giga 7.86, LS 1.37/2.64, SPGI 1.64,
@@ -953,4 +935,3 @@ source_weights:
   "edinburghcstr/ami": 2.0
   "sanchit-gandhi/tedlium-data": 1.5
   "mazesmazes/notsofar-train": 2.0
-  "speechcolab/gigaspeech:m": 0.5
