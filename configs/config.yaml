@@ -1,20 +1,18 @@
 # Main configuration -- the default training recipe.
 #
-#   Qwen/Qwen3-ASR-1.7B-hf's audio encoder             FULLY FROZEN (0 trainable)
+#   ibm-granite/granite-speech-5.0-470m-turboctc-nc     FULLY FROZEN (0 trainable)
 #   -> MLP projector (fresh init, no frame stacking, lr 1e-3)
-#   -> HuggingFaceTB/SmolLM3-3B, base FROZEN + LoRA all-linear r=64 (lr 1e-4)
+#   -> Qwen/Qwen3-0.6B, FULLY FINE-TUNED incl. embeddings (lr 2e-5), no LoRA
 #
-# QWEN3-ASR ENCODER + SMOLLM3-3B (2026-10-20). Replaces stock whisper-large-v3,
-# whose own system is #41 (mean of 9 6.663) and which trained slower than
-# Granite on identical data. Of the encoders that load natively in our
-# transformers (no remote code), Qwen3-ASR-1.7B's system ranks highest: #9,
-# 4.936. Its 314M encoder is Apache-2.0; it was trained to feed a Qwen3
-# decoder, so pairing it with SmolLM3 gives that up (the projector is
-# trained fresh either way). Before that this recipe was Granite
-# 5.0 turboctc-nc + Qwen3.5-2B (verbatim-aug-2: 5.490, #26 of 56; still the
-# published model, mazesmazes/tiny-audio), whose encoder is CC-BY-NC-SA.
-# Higgs Audio v3's tuned Whisper encoder was tried and dropped the same day:
-# it is fine-tuned on <=4 s chunks, which our input path did not reproduce.
+# GRANITE NC + QWEN3-0.6B FULL FINE-TUNE (2026-10-21). Back to the Granite NC
+# encoder: its CTC-trained output is close to token-shaped (the final hidden
+# state is what its 16k-BPE CTC head reads, and its mid-stack injects that
+# head's posteriors back in), so the projector learns a near-lookup and the
+# loss falls fast; the Qwen3-ASR + SmolLM3 run trailed it on every dataset
+# (+1.68 corpus WER, CI [+1.22, +2.15], 1,179 paired rows, half-trained).
+# Its CC-BY-NC-SA terms are back with it. The decoder is Qwen3-0.6B fully
+# fine-tuned, the old stage_1 recipe's decoder settings (decoder lr 2e-5,
+# embeddings trainable, decoder weight decay 0.01; see production.yaml).
 #
 #   poetry run python scripts/train.py
 #
@@ -31,26 +29,27 @@ defaults:
 
 # Model configuration (must match ASRConfig parameter names)
 model:
-  # Qwen3-ASR-1.7B's audio encoder (24 layers, d=1024, 128 mel bins), read
-  # out of the ASR checkpoint by tiny_audio/qwen3_asr_encoder.py. It is NOT
-  # fed like Whisper, and transformers' Qwen3ASREncoder does the feeding
-  # itself: its convolutions run on independent 1 s chunks (100 mel frames,
-  # 13 tokens each), attention is limited to 8 s windows, and it drops padding
-  # using the mel mask. ASRConfig turns on encoder_attention_mask and
-  # encoder_chunk_frames=100 for this id.
-  audio_model_id: Qwen/Qwen3-ASR-1.7B-hf
-  # SmolLM3-3B (Apache-2.0, hidden 2048, 36 layers), the post-trained model,
-  # not Base: the decoder is frozen, so its output row for <|im_end|> (the end
-  # of every training target) never changes, and only the post-trained model
-  # is trained to end turns with it. Its chat template takes
-  # enable_thinking=False, which render_audio_prompt passes. liger maps it
-  # (scripts/train.py _LIGER_PATCHERS).
-  text_model_id: HuggingFaceTB/SmolLM3-3B
-  # Three (pad 1, kernel 3, stride 2) convs per 100-frame chunk: 100 Hz mel
-  # to ~13 Hz (13 tokens per full second, plus the remainder's own count).
-  encoder_conv_layers: [[1, 3, 2], [1, 3, 2], [1, 3, 2]]
+  # Granite Speech 5.0 turboctc-nc (16 Conformer blocks, 1024 hidden, block
+  # attention over 128-frame blocks). Fed the whole clip with its padding
+  # mask (ASRConfig turns encoder_attention_mask on for granite-speech ids).
+  audio_model_id: ibm-granite/granite-speech-5.0-470m-turboctc-nc
+  # Qwen3-0.6B (post-trained, 1024 hidden, 28 layers), every weight trained
+  # (training.freeze_language_model: false). Its chat template takes
+  # enable_thinking=False, which render_audio_prompt passes; liger maps it.
+  text_model_id: Qwen/Qwen3-0.6B
+  # Granite's ~M/4 subsampling (two halving blocks), not Whisper's ~M/2: the
+  # collator sizes the <audio> placeholders from this, and a mismatch with
+  # what the encoder emits fails _assert_audio_token_counts at step 0.
+  encoder_conv_layers: [[0, 2, 2], [0, 2, 2]]
   projector_hidden_dim: 4096
-  model_dtype: bfloat16
+  # float32 STORAGE for the fully fine-tuned decoder (compute stays bf16 via
+  # training.bf16 autocast). With bf16 weights, AdamW's moments and update are
+  # bf16 too, and at decoder lr 2e-5 a step sits below one bf16 ULP of a
+  # typical Qwen3 weight (RMS ~0.015-0.02), so most updates round to zero --
+  # including the RMSNorm scales near 1.0. The old full fine-tune default ran
+  # float32 for exactly this. ~2.4 GB for 0.6B params. The frozen encoder
+  # keeps encoder_dtype bfloat16 below.
+  model_dtype: float32
   projector_dtype: float32
 
   # PROJECTOR, surveyed against transformers 5.17 (2026-09-21): RMSNorm(in)
@@ -59,9 +58,8 @@ model:
   # AudioFlamingo3, Qwen3-ASR are two-layer GELU MLPs; Higgs v3 STT an MLP
   # after 2x stacking; Canary-Qwen a single linear or identity).
   #
-  # No frame stacking: the encoder already emits ~13 Hz, about the 12.5 Hz
-  # audio-token rate of every earlier recipe (~247 tokens for a 19 s clip
-  # against ~237), so decoder cost and batch memory stay comparable.
+  # No frame stacking: Granite already emits 12.5 Hz, the audio-token rate of
+  # every earlier recipe, and its top layers were CTC-trained at that rate.
   projector_pool_stride: 1
 
   # Long audio is transcribed in chunks of at most this many seconds, cut at
@@ -84,11 +82,12 @@ model:
   # to quantise away, and the memory goes to batch size.
   encoder_dtype: bfloat16
 
-  # The LoRA measurements below were taken on Qwen3.5-2B (hybrid
-  # linear-attention). Qwen3 has none of its DeltaNet modules, so all-linear
-  # here covers attention and MLP; the alpha, dropout and rank reasoning
-  # carries over, the per-module numbers do not.
-  use_lora: true
+  # OFF (2026-10-21): the decoder is fully fine-tuned instead. The LoRA
+  # settings below are kept for a LoRA run (model.use_lora=true plus
+  # training.freeze_language_model=true); they were measured on Qwen3.5-2B
+  # (hybrid linear-attention), so the alpha, dropout and rank reasoning
+  # carries over and the per-module numbers do not.
+  use_lora: false
   lora_rank: 64
   # 64, i.e. alpha/r = 1.0. Measured on a scale-2.0 (alpha 128) adapter
   # (2026-09-20) by reconstructing (alpha/r)*B@A per module and taking

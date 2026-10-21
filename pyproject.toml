@@ -204,6 +204,19 @@ causal-conv1d = { version = ">=1.4.0", markers = "sys_platform == 'linux'" }
 flash-linear-attention = { version = ">=0.5.0", markers = "sys_platform == 'linux'" }
 tilelang = { version = ">=0.1.9", markers = "sys_platform == 'linux'" }
 
+# Apple-silicon inference (`ta eval --mlx`, scripts/mlx_inference.py): mlx-audio's
+# Granite Speech 5.0 encoder port and mlx-lm's Qwen3. MLX exists only on macOS,
+# so the group is optional and every marker is darwin; pods and CI never see it.
+# typings/ carries the stubs that let pyright check the code on Linux.
+#   poetry install --with mlx
+[tool.poetry.group.mlx]
+optional = true
+
+[tool.poetry.group.mlx.dependencies]
+mlx = { version = ">=0.32.2", markers = "sys_platform == 'darwin'" }
+mlx-lm = { version = ">=0.32.0", markers = "sys_platform == 'darwin'" }
+mlx-audio = { version = ">=0.5.9", markers = "sys_platform == 'darwin'" }
+
 [tool.black]
 line-length = 100
 # Must agree with `requires-python` above and `[tool.ruff] target-version`.
@@ -392,7 +405,8 @@ DEP001 = [
 DEP003 = ["triton"]
 # Optional vendor SDK for `ta eval -m elevenlabs`, imported lazily; dev-only on purpose.
 # `fla` is the optional Linux fast path that `ta runpod deploy` installs for `ta serve`.
-DEP004 = ["elevenlabs", "fla"]
+# mlx, mlx_lm and mlx_audio are the optional macOS group behind `ta eval --mlx`.
+DEP004 = ["elevenlabs", "fla", "mlx", "mlx_lm", "mlx_audio"]
 
 [tool.coverage.run]
 branch = true

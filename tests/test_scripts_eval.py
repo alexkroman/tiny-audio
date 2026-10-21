@@ -9,6 +9,7 @@ import io
 import types
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, TypedDict, cast
 
 import assemblyai as aai
@@ -24,14 +25,14 @@ from transformers import PretrainedConfig, PreTrainedModel
 
 from scripts.eval.cli import _build_tiny_audio_evaluator
 from scripts.eval.evaluators.asr import (
-    DTYPE_CONFIG_FIELDS,
     AssemblyAIStreamingEvaluator,
     AssemblyAIStreamsEvaluator,
     EndpointEvaluator,
     _resolve_local_runtime,
     _use_sdpa_where_safe,
+    print_generation_config,
 )
-from scripts.inference import merge_lora_adapters
+from scripts.inference import DTYPE_CONFIG_FIELDS, merge_lora_adapters
 from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
 
@@ -575,3 +576,23 @@ def test_assemblyai_streams_one_speaker_is_unmasked(monkeypatch: pytest.MonkeyPa
     assert text == "<SPK_1>hello shared ghost"
     assert len(fake.streams) == 1
     assert fake.streams[0].all()
+
+
+def test_print_generation_config_lists_the_decoding_knobs(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The eval log shows every decoding setting that changes the transcript."""
+    gen = SimpleNamespace(
+        max_new_tokens=256,
+        min_new_tokens=0,
+        num_beams=1,
+        do_sample=False,
+        repetition_penalty=1.0,
+        length_penalty=1.0,
+        no_repeat_ngram_size=12,
+    )
+    print_generation_config(cast(ASRModel, SimpleNamespace(generation_config=gen)), "some/model")
+    out = capsys.readouterr().out
+    assert "Generation config: some/model" in out
+    assert "no_repeat_ngram_size" in out
+    assert "12" in out

@@ -76,26 +76,33 @@ def test_default_config_composes() -> None:
     assert isinstance(cfg.training.learning_rate, float)
 
 
-def test_default_config_is_qwen3_asr_encoder_and_smollm3() -> None:
+def test_default_config_is_granite_nc_and_full_finetuned_qwen3() -> None:
     cfg = _compose()
-    assert cfg.model.audio_model_id == "Qwen/Qwen3-ASR-1.7B-hf"
-    # ~13 Hz straight out of the encoder, so no frame stacking.
-    assert cfg.model.encoder_conv_layers == [[1, 3, 2], [1, 3, 2], [1, 3, 2]]
+    assert cfg.model.audio_model_id == "ibm-granite/granite-speech-5.0-470m-turboctc-nc"
+    assert cfg.model.text_model_id == "Qwen/Qwen3-0.6B"
+    # Granite already emits 12.5 Hz, so no frame stacking.
+    assert cfg.model.encoder_conv_layers == [[0, 2, 2], [0, 2, 2]]
     assert cfg.model.projector_pool_stride == 1
+    # Full fine-tune: no LoRA, decoder and embeddings train at stage_1's 2e-5.
+    assert cfg.model.use_lora is False
+    assert cfg.training.freeze_language_model is False
+    assert cfg.training.freeze_text_embed_tokens is False
+    assert cfg.training.decoder_learning_rate == 2e-5
+    # fp32 storage so 2e-5 updates are not rounded away; the frozen encoder stays bf16.
+    assert cfg.model.model_dtype == "float32"
+    assert cfg.model.encoder_dtype == "bfloat16"
+    assert cfg.training.freeze_audio_encoder is True
     # 30 s clips in training, 28 s chunks at inference: chunks stay under it.
     assert cfg.data.max_audio_seconds == 30.0
     assert cfg.model.inference_chunk_seconds == 28.0
-    assert cfg.model.text_model_id == "HuggingFaceTB/SmolLM3-3B"
-    assert cfg.model.use_lora is True
-    assert cfg.training.freeze_audio_encoder is True
-    assert cfg.training.freeze_language_model is True
 
 
 def test_tiny_preset_trains_the_published_model_at_laptop_size() -> None:
-    """`-e tiny` keeps the Granite encoder its laptop numbers were measured with.
+    """`-e tiny` is the published LoRA recipe at laptop size.
 
-    Only the encoder settings, the decoder, data, steps and hardware differ:
-    the projector width and the LoRA setup are the default's.
+    The default fully fine-tunes Qwen3-0.6B; tiny keeps LoRA on a frozen
+    Qwen3.5-0.8B, the 8-10 GB setup its laptop numbers were measured with.
+    The encoder and the projector width are the default's.
     """
     default, tiny = _compose(), _compose(["+experiments=tiny"])
     assert tiny.model.text_model_id == "Qwen/Qwen3.5-0.8B"
@@ -110,11 +117,18 @@ def test_tiny_preset_trains_the_published_model_at_laptop_size() -> None:
         "encoder_conv_layers",
         "projector_pool_stride",
         "inference_chunk_seconds",
+        "use_lora",
+        "model_dtype",
     )
     blank = dict.fromkeys(encoder_keys)
     assert {**tiny.model, **blank} == {**default.model, **blank}
-    for key in ("freeze_audio_encoder", "freeze_language_model", "learning_rate"):
+    for key in ("freeze_audio_encoder", "learning_rate"):
         assert tiny.training[key] == default.training[key], key
+    # LoRA on a frozen decoder, not the default's full fine-tune.
+    assert tiny.model.use_lora is True
+    assert tiny.training.freeze_language_model is True
+    assert tiny.training.freeze_text_embed_tokens is True
+    assert tiny.model.model_dtype == "bfloat16"
     [source] = tiny.data.datasets
     assert source.data_files == {
         "train": "hf://datasets/openslr/librispeech_asr/clean/validation/*.parquet"

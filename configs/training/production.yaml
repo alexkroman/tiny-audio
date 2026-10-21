@@ -1,7 +1,8 @@
-# Production training configuration -- the granite_qwen_frozen recipe.
+# Production training configuration.
 #
-# Encoder fully frozen, fresh MLP projector + LoRA on a frozen Qwen3.5-2B,
-# one pass over the data on one RTX PRO 6000 96GB.
+# Encoder fully frozen, fresh MLP projector, Qwen3-0.6B fully fine-tuned
+# (2026-10-21; was LoRA on a frozen decoder), one pass over the data on one
+# RTX PRO 6000 96GB.
 
 ---
 output_dir: ./outputs/production_model
@@ -19,36 +20,39 @@ output_dir: ./outputs/production_model
 # learned nothing directional, while the projector and LoRA co-adapted to
 # that random endpoint.
 #
-# The decoder base is frozen too; only the LoRA adapters (model.use_lora)
-# train on it. embed_tokens stays frozen.
-freeze_language_model: true
+# The decoder is FULLY fine-tuned (2026-10-21), embeddings included: the old
+# stage_1 recipe's Qwen3-0.6B settings. Its runs found a frozen embedding
+# table capped eval loss (ppbo0oqn floored at ~0.458), so it trains, at a
+# decoder LR low enough (2e-5, below) to keep rare-token rows from drifting.
+# Verify at the end: per-row embed_tokens drift should concentrate on common
+# tokens; max drift >100x mean is the rare-token-drift signature.
+freeze_language_model: false
 freeze_projector: false
-freeze_text_embed_tokens: true
+freeze_text_embed_tokens: false
 freeze_audio_encoder: true
 encoder_trainable_top_layers: 0
 encoder_trainable_post_projections: false
 
 # Optimizer
 optim: adamw_torch_fused
-# Projector (fresh init) at 1e-3; LoRA adapters (the decoder group) at 1e-4.
+# Projector (fresh init) at 1e-3; the fully fine-tuned decoder at 2e-5.
+# stage_1's value for Qwen3-0.6B, chosen from attention-weight drift: 3e-5
+# reached 11.67% at step 20K (qmzim6ia) and projected past the 18% ceiling
+# over a full run; 2e-5 (84w5zjhj) reached 8.47% at step 22K and projects to
+# ~13-14%, mid-zone. (The LoRA recipe used 1e-4.)
 learning_rate: 1e-3
-decoder_learning_rate: 1e-4
+decoder_learning_rate: 2e-5
 # INERT under a total freeze: the encoder param group resolves to an empty
 # parameter list, which fused AdamW accepts. Kept so a future partial unfreeze
 # does not silently inherit `learning_rate` (1e-3) as its encoder LR.
 encoder_learning_rate: 1e-5
 
-# 0.0, and this key is effectively "the LoRA weight decay". scripts/train.py
-# sets `dec_wd = base_wd` -- there is no `decoder_weight_decay` knob the way
-# there is for the encoder and the projector -- and LoRA tensors are named
-# `language_model.base_model...`, so they route to the decoder group and
-# survive every no-decay filter. Standard LoRA practice is 0.0 (QLoRA, the HF
-# alignment handbook, PEFT's own examples), because decoupled decay hits BOTH
-# factors of B@A and the pull on the realised dW is roughly 2x nominal. This
-# makes alpha the only thing controlling adapter magnitude. If dW comes back
-# hot, the levers are decoder_learning_rate 1e-4 -> 5e-5 or wiring up a real
-# `decoder_weight_decay`.
-weight_decay: 0.0
+# 0.01: this key is the DECODER group's weight decay (scripts/train.py sets
+# `dec_wd = base_wd`). stage_1's full fine-tune ran 0.01 after 0.0 opened a
+# ~0.17 eval-train gap by step 28k (run 4j97atjp). The LoRA recipe used 0.0,
+# standard for adapters. If the rare-token-drift signature appears, route
+# embed_tokens to the no-decay group rather than reverting this.
+weight_decay: 0.01
 # The projector is the ONLY group carrying decay. ~15% shrink over this
 # schedule at lr 1e-3, and it is the only force opposing the projector's
 # output-scale growth (~48x embed_tokens RMS by step 13k on an earlier run,
@@ -61,8 +65,9 @@ encoder_weight_decay: 0.0
 # range. Matches LLaMA / Mistral / Qwen pretraining convention for bf16.
 adam_epsilon: 1e-6
 
-# 1.0, the HF Trainer default. Post-warmup grad norm on this stack ran median
-# 0.634 / max 2.268 at batch 96, so 1.0 clips the tail, not the median, and at
+# 1.0, the HF Trainer default and stage_1's full fine-tune cap. Post-warmup
+# grad norm on the LoRA stack ran median 0.634 / max 2.268 at batch 96, so
+# 1.0 clips the tail, not the median, and at
 # effective batch 64 the noisier per-step gradient is where a tighter cap earns
 # its keep. 1.0 is also what the surveyed LoRA recipes run (Trainer/TRL
 # default). Read the clip fraction off `grad_norm` over the first 2k
@@ -80,13 +85,18 @@ lr_scheduler_type: cosine
 
 # Training
 max_steps: -1
-# ONE pass. `data.epoch_expansion` (configs/data/multiasr.yaml) stays 1; the
-# loader raises if both it and this are >1, because they compound.
+# TWO passes (2026-10-21, was one). `data.epoch_expansion`
+# (configs/data/multiasr.yaml) stays 1; the loader raises if both it and this
+# are >1, because they compound.
 #
-# ~3.53M loader rows (multiasr, EdAcc's 6.2K added 2026-10-16) at effective
-# batch 64 is ~55k optimizer steps
-# without showing any row twice.
-num_train_epochs: 1
+# ~3.5M loader rows (more now that the 30 s cap keeps LibriHeavy's long tail)
+# at effective batch 256 is ~14k optimizer steps per pass, ~28k total.
+#
+# Watch the epoch boundary: stage_1's 2-epoch run (ppbo0oqn, Qwen3-0.6B full
+# fine-tune) hit its best eval loss exactly at the end of epoch 1 and bounced
+# ~0.01 worse for the whole second pass while train loss kept falling, the
+# overfit signature that made it one epoch. Keep the epoch-1 checkpoint.
+num_train_epochs: 2
 seed: 44
 
 # 64 per device x 1 accumulation, sized for Qwen3.5-2B on an RTX PRO 6000
@@ -94,6 +104,14 @@ seed: 44
 # model trained at (granite-qwen-frozen-4, from #99's 2B variant), so lr
 # 1e-3 / 1e-4 and max_grad_norm 1.0 mean what they meant there and the run
 # compares cleanly against it.
+#
+# QWEN3-0.6B FULL FINE-TUNE (2026-10-21): 256 x 1. MEASURED at 64 x 1: ~27%
+# of the 95 GiB card. Split as ~12 GiB static (float32 decoder weights +
+# grads + AdamW ~10, bf16 encoder ~1, projector) plus ~14 GiB of activations
+# (~0.22 GiB per clip), 256 projects to ~68 GiB (~72%), leaving headroom for
+# batches heavy in 30 s clips (packing makes memory follow a batch's total
+# tokens). One reading, not a run's peak: record the W&B peak here, and if it
+# OOMs step down to 192 BEFORE rerunning (the seeded order replays an OOM).
 #
 # SMOLLM3-3B (2026-10-20): 64 x 1 OOMed on the RTX PRO 6000 (93.6 GiB in
 # use, 92.7 allocated by PyTorch, failing a 1.39 GiB allocation). Its 36
@@ -126,15 +144,20 @@ seed: 44
 # ~1.87x the 2B's 1.12) plus 10.9 GiB static; W&B rjid9zj6 (H100, batch 30)
 # peaked at 97.3% and the planner undershoots it by ~5%. It ran 28 x 2 on
 # an H100 and was planned at 32 x 2 on the RTX PRO 6000.
-per_device_train_batch_size: 32
-# Eval holds no activations for backward, but it shares the card with the
-# training state; halved alongside train so the first eval cannot be the OOM.
-per_device_eval_batch_size: 32
-# 2 x 32: effective batch 64, the batch this recipe was tuned and measured at.
+per_device_train_batch_size: 256
+# Half of train: eval holds no activations for backward, but shares the card
+# with the full training state.
+per_device_eval_batch_size: 128
+# 1: effective batch 256 (2026-10-21; it was 64, the batch every LR here was
+# tuned at). LRs are UNCHANGED: the frozen run found samples seen, not steps,
+# to be the currency (eval CE overlaid at matched samples despite ~1.6x the
+# steps), so 4x fewer, 4x larger steps are expected to track at matched
+# samples. Warmup stays 1000 STEPS, which is now 4x more samples. If loss
+# lags the batch-64 curves at matched samples, sqrt-scale the LRs (x2).
 # The frozen run showed samples, not optimizer steps, are the currency:
 # eval CE for y1tulo4j overlaid top4 (jscyrgkt) at matched samples despite
 # ~1.6x the steps.
-gradient_accumulation_steps: 2
+gradient_accumulation_steps: 1
 eval_accumulation_steps: 3
 # Deliberately false. HF's auto_find_batch_size halves
 # per_device_train_batch_size on OOM WITHOUT touching
@@ -162,10 +185,11 @@ greater_is_better: false
 
 # Hub
 push_to_hub: true
-# Named for the recipe it receives. It pointed at granite-qwen-frozen-nc (the
-# Granite + Qwen3.5-2B model, 2026-10-17) after #169 moved the default to
-# Whisper + Qwen3, so the next default run would have overwritten that model.
-hub_model_id: "mazesmazes/tiny-audio-whisper-qwen"
+# Named for the recipe it receives: Granite NC + fully fine-tuned Qwen3-0.6B
+# (2026-10-21). Never point it at an existing model's repo; every save pushes,
+# so a mismatched default overwrites that model (it once pointed at
+# granite-qwen-frozen-nc after the recipe had moved on).
+hub_model_id: "mazesmazes/tiny-audio-granite-qwen3-0.6b"
 # `end`, not `every_save`: scripts/train.py's PushToHubCallback already pushes
 # on every save via ASRModel.push_to_hub, which is the push that matters -- it
 # ships preprocessor_config.json and the custom modeling code, which Trainer's
@@ -221,7 +245,10 @@ use_cache: true
 # a large share of compute goes to padding. That is a loader change, not a
 # recipe change.
 dataloader_num_workers: 16
-dataloader_prefetch_factor: 8
+# Batches buffered PER WORKER. 8 x 16 workers was 128 batches; at 256 clips of
+# up to ~2 MB of Granite features each, that is tens of GB of host RAM.
+# 2 x 16 = 32 batches is still far ahead of the GPU.
+dataloader_prefetch_factor: 2
 dataloader_pin_memory: true
 dataloader_persistent_workers: true
 dataloader_drop_last: true
