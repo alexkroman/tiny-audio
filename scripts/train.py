@@ -937,7 +937,8 @@ def _init_wandb(cfg: DictConfig) -> None:
 
 # Decoder-family substring -> suffix of liger's apply_liger_kernel_to_<suffix>.
 # First match wins, so Qwen3.5 (whose ids also contain "qwen3") comes first.
-_LIGER_PATCHERS = (("qwen3.5", "qwen3_5"), ("qwen3", "qwen3"))
+# smollm3 is in liger 0.8.4's patcher list (checked in its wheel, 2026-10-20).
+_LIGER_PATCHERS = (("qwen3.5", "qwen3_5"), ("qwen3", "qwen3"), ("smollm3", "smollm3"))
 
 
 def _apply_liger_kernels(cfg: DictConfig) -> None:

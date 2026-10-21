@@ -95,12 +95,16 @@ seed: 44
 # 1e-3 / 1e-4 and max_grad_norm 1.0 mean what they meant there and the run
 # compares cleanly against it.
 #
-# NOT RE-MEASURED for Whisper-large-v3 + Qwen3-1.7B (the default since
-# 2026-10-20). The decoder sees the same 12.5 Hz audio-token count and
-# Qwen3-1.7B is smaller than Qwen3.5-2B, so the trainable side should fit,
-# but the frozen encoder now runs a padded 30 s window per clip. Watch the
-# first few hundred steps on the RTX PRO 6000; if it OOMs, step down to 48
-# BEFORE rerunning -- the seeded data order replays the OOM on resume.
+# SMOLLM3-3B (2026-10-20): 64 x 1 OOMed on the RTX PRO 6000 (93.6 GiB in
+# use, 92.7 allocated by PyTorch, failing a 1.39 GiB allocation). Its 36
+# layers x 2048 hidden scale the 2B's measured ~1.12 GiB of activations per
+# sample to ~1.7 GiB, so 48 would sit near 89 GiB (~94%) and 32 near 62 GiB.
+# Now 32 x 2: the same effective batch of 64, so LR, warmup and schedule keep
+# their meaning; the cost is throughput only. Under padding-free packing
+# (FA2) decoder memory follows a batch's TOTAL tokens, not 32 x its longest
+# row, so the 30 s clip cap (data.max_audio_seconds) raises the mean, not
+# the worst case, and 32 should have headroom; 64 x 1 may fit again. NOT yet measured -- record the
+# W&B peak here once a run has passed a few hundred steps.
 #
 # MEASURED, not planned: W&B es1p5srq (2B, batch 64, A100 80GB) peaked at
 # 76.4 GiB (95.5% of the card, median 68.6); `ta runpod plan` predicted
@@ -122,13 +126,15 @@ seed: 44
 # ~1.87x the 2B's 1.12) plus 10.9 GiB static; W&B rjid9zj6 (H100, batch 30)
 # peaked at 97.3% and the planner undershoots it by ~5%. It ran 28 x 2 on
 # an H100 and was planned at 32 x 2 on the RTX PRO 6000.
-per_device_train_batch_size: 64
-per_device_eval_batch_size: 64
-# 1: effective batch 64, the batch this recipe was tuned and measured at.
+per_device_train_batch_size: 32
+# Eval holds no activations for backward, but it shares the card with the
+# training state; halved alongside train so the first eval cannot be the OOM.
+per_device_eval_batch_size: 32
+# 2 x 32: effective batch 64, the batch this recipe was tuned and measured at.
 # The frozen run showed samples, not optimizer steps, are the currency:
 # eval CE for y1tulo4j overlaid top4 (jscyrgkt) at matched samples despite
 # ~1.6x the steps.
-gradient_accumulation_steps: 1
+gradient_accumulation_steps: 2
 eval_accumulation_steps: 3
 # Deliberately false. HF's auto_find_batch_size halves
 # per_device_train_batch_size on OOM WITHOUT touching
@@ -156,7 +162,10 @@ greater_is_better: false
 
 # Hub
 push_to_hub: true
-hub_model_id: "mazesmazes/tiny-audio-granite-qwen-frozen-nc"
+# Named for the recipe it receives. It pointed at granite-qwen-frozen-nc (the
+# Granite + Qwen3.5-2B model, 2026-10-17) after #169 moved the default to
+# Whisper + Qwen3, so the next default run would have overwritten that model.
+hub_model_id: "mazesmazes/tiny-audio-whisper-qwen"
 # `end`, not `every_save`: scripts/train.py's PushToHubCallback already pushes
 # on every save via ASRModel.push_to_hub, which is the push that matters -- it
 # ships preprocessor_config.json and the custom modeling code, which Trainer's
@@ -179,7 +188,13 @@ tf32: true
 # compile step. liger's kernels don't need torch.compile to deliver their
 # wins.
 torch_compile: false
-attn_implementation: sdpa
+# flash_attention_2 (2026-10-20, was sdpa since #149 with no measurement on
+# record): padding-free packing (tiny_audio/asr_packing.py) needs FA2's varlen
+# kernels, and Qwen3-ASR's encoder runs its 8 s windows as one varlen call
+# instead of an sdpa loop. resolve_attn_implementation falls back to sdpa,
+# with a warning, when flash-attn is missing or its kernels fail on the card;
+# packing then switches itself off.
+attn_implementation: flash_attention_2
 
 # Load-bearing, and NOT the same knob as the decoder's training-time cache.
 # transformers' Trainer.__init__ does

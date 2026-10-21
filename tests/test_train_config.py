@@ -76,10 +76,16 @@ def test_default_config_composes() -> None:
     assert isinstance(cfg.training.learning_rate, float)
 
 
-def test_default_config_is_whisper_and_qwen3() -> None:
+def test_default_config_is_qwen3_asr_encoder_and_smollm3() -> None:
     cfg = _compose()
-    assert cfg.model.audio_model_id == "openai/whisper-large-v3"
-    assert cfg.model.text_model_id == "Qwen/Qwen3-1.7B"
+    assert cfg.model.audio_model_id == "Qwen/Qwen3-ASR-1.7B-hf"
+    # ~13 Hz straight out of the encoder, so no frame stacking.
+    assert cfg.model.encoder_conv_layers == [[1, 3, 2], [1, 3, 2], [1, 3, 2]]
+    assert cfg.model.projector_pool_stride == 1
+    # 30 s clips in training, 28 s chunks at inference: chunks stay under it.
+    assert cfg.data.max_audio_seconds == 30.0
+    assert cfg.model.inference_chunk_seconds == 28.0
+    assert cfg.model.text_model_id == "HuggingFaceTB/SmolLM3-3B"
     assert cfg.model.use_lora is True
     assert cfg.training.freeze_audio_encoder is True
     assert cfg.training.freeze_language_model is True
@@ -95,11 +101,15 @@ def test_tiny_preset_trains_the_published_model_at_laptop_size() -> None:
     assert tiny.model.text_model_id == "Qwen/Qwen3.5-0.8B"
     assert tiny.model.audio_model_id == "ibm-granite/granite-speech-5.0-470m-turboctc-nc"
     assert tiny.model.projector_pool_stride == 1
+    # 19 s training clips, so 18 s inference chunks (the default recipe: 30 / 28).
+    assert tiny.data.max_audio_seconds == 19.0
+    assert tiny.model.inference_chunk_seconds == 18.0
     encoder_keys = (
         "audio_model_id",
         "text_model_id",
         "encoder_conv_layers",
         "projector_pool_stride",
+        "inference_chunk_seconds",
     )
     blank = dict.fromkeys(encoder_keys)
     assert {**tiny.model, **blank} == {**default.model, **blank}
@@ -263,6 +273,7 @@ class TestApplyLigerKernels:
         [
             ("Qwen/Qwen3.5-2B", "apply_liger_kernel_to_qwen3_5"),
             ("Qwen/Qwen3-1.7B-Base", "apply_liger_kernel_to_qwen3"),
+            ("HuggingFaceTB/SmolLM3-3B", "apply_liger_kernel_to_smollm3"),
         ],
     )
     def test_each_decoder_gets_its_own_patcher(
@@ -270,7 +281,11 @@ class TestApplyLigerKernels:
     ) -> None:
         """Qwen3.5 ids also contain "qwen3"; they must not fall through to the Qwen3 patcher."""
         calls: list[str] = []
-        names = ("apply_liger_kernel_to_qwen3_5", "apply_liger_kernel_to_qwen3")
+        names = (
+            "apply_liger_kernel_to_qwen3_5",
+            "apply_liger_kernel_to_qwen3",
+            "apply_liger_kernel_to_smollm3",
+        )
         liger = SimpleNamespace(**{n: (lambda n=n: calls.append(n)) for n in names})
         monkeypatch.setattr(train_module, "_liger_transformers", liger)
         cfg = OmegaConf.create({"model": {"text_model_id": text_model_id}})

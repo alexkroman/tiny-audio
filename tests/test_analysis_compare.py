@@ -41,6 +41,10 @@ class TestCompare:
         out = result.output
         assert "Accuracy by WER (corpus = 2/2 datasets" in out
         assert "Corpus WER delta vs modelA" in out
+        # Insertions, deletions, substitutions in that order; the ITN table is gone.
+        assert out.index("Insertion Rate") < out.index("Deletion Rate")
+        assert out.index("Deletion Rate") < out.index("Substitution Rate")
+        assert "ITN Formatting" not in out
         # modelB misses one word in four on every row: a 25-point gap, every resample.
         assert any(
             "modelB" in line and "+25.00" in line and line.rstrip().endswith("│ separated │")

@@ -98,12 +98,24 @@ class TestASRConfigAutoDetection:
         cfg = make_config(audio_model_id="ibm-granite/granite-speech-3.3-2b")
         assert cfg.encoder_attention_mask is True
 
+    def test_qwen3_asr_chunks_and_masks(self) -> None:
+        cfg = make_config(audio_model_id="Qwen/Qwen3-ASR-1.7B-hf")
+        assert cfg.encoder_chunk_frames == 100
+        assert cfg.encoder_attention_mask is True
+
+    def test_other_encoders_do_not_chunk(self) -> None:
+        assert make_config(audio_model_id="openai/whisper-tiny").encoder_chunk_frames == 0
+
     def test_explicit_flag_overrides_detection(self) -> None:
         cfg = make_config(
             audio_model_id="ibm-granite/granite-speech-3.3-2b",
             encoder_attention_mask=False,
         )
         assert cfg.encoder_attention_mask is False
+
+    def test_inference_chunk_defaults_to_the_old_18s(self) -> None:
+        """Checkpoints saved before the key existed keep chunking as they trained."""
+        assert make_config().inference_chunk_seconds == 18.0
 
     def test_default_conv_layers(self) -> None:
         assert make_config().encoder_conv_layers == DEFAULT_ENCODER_CONV_LAYERS
@@ -173,3 +185,24 @@ class TestASRConfigDefaults:
             tuple(layer) for layer in GRANITE_ENCODER_CONV_LAYERS
         ]
         assert restored.projector_dtype == "float32"
+
+
+class TestChunkedOutputLength:
+    """Qwen3-ASR convolves 100-frame chunks independently: 13 frames per full chunk."""
+
+    def test_full_chunks_and_remainder(self) -> None:
+        layers = [(1, 3, 2), (1, 3, 2), (1, 3, 2)]
+        assert compute_encoder_output_length(100, layers, 100) == 13
+        assert compute_encoder_output_length(300, layers, 100) == 39
+        # 50-frame remainder: 50 -> 25 -> 13 -> 7.
+        assert compute_encoder_output_length(150, layers, 100) == 20
+        assert compute_encoder_output_length(0, layers, 100) == 0
+
+    def test_tensor_matches_int(self) -> None:
+        layers = [(1, 3, 2), (1, 3, 2), (1, 3, 2)]
+        lengths = torch.tensor([1, 99, 100, 101, 1900])
+        out = compute_encoder_output_length(lengths, layers, 100)
+        assert out.tolist() == [
+            compute_encoder_output_length(n, layers, 100) for n in lengths.tolist()
+        ]
+        assert out.tolist()[-1] == 247  # a 19 s clip

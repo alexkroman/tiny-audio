@@ -256,10 +256,10 @@ Note the recommended GPU and the disk figure. Both go into the next step.
 
 1. Deploy a pod:
 
-   - GPU: what `ta runpod plan` recommended. The default batch of 64 is sized for an 80 GB card. On
-     a smaller card, lower `training.per_device_train_batch_size` and raise
-     `training.gradient_accumulation_steps` to keep the effective batch at 64, and re-run
-     `ta runpod plan` with those overrides to check the fit
+   - GPU: what `ta runpod plan` recommended. The default is 32 clips x 2 accumulation steps (an
+     effective batch of 64), sized for a 96 GB card. On a smaller card, lower
+     `training.per_device_train_batch_size` and raise `training.gradient_accumulation_steps` to keep
+     the effective batch at 64, and re-run `ta runpod plan` with those overrides to check the fit
    - Template: **RunPod PyTorch** (the code expects the image's CUDA-enabled PyTorch)
    - Container disk: at least the disk figure from the plan, with headroom
 
@@ -356,26 +356,26 @@ ______________________________________________________________________
 
 ### Training (`configs/training/production.yaml`)
 
-| Parameter                              | Default                                        | Description                                                                 |
-| -------------------------------------- | ---------------------------------------------- | --------------------------------------------------------------------------- |
-| `training.learning_rate`               | `1e-3`                                         | Projector learning rate                                                     |
-| `training.decoder_learning_rate`       | `1e-4`                                         | Decoder group (the LoRA adapters), 10x lower                                |
-| `training.freeze_language_model`       | `true`                                         | Decoder base frozen; only the LoRA adapters train on it                     |
-| `training.num_train_epochs`            | `1`                                            | Epochs over the data config                                                 |
-| `training.max_steps`                   | `-1`                                           | Set a positive number to cap the run regardless of epochs                   |
-| `training.per_device_train_batch_size` | `64`                                           | Clips per step, sized for an 80 GB GPU                                      |
-| `training.per_device_eval_batch_size`  | `32`                                           | Clips per eval step                                                         |
-| `training.gradient_accumulation_steps` | `1`                                            | Effective batch = batch size × this (64)                                    |
-| `training.warmup_steps`                | `1000`                                         | Linear LR ramp before the cosine decay                                      |
-| `training.lr_scheduler_type`           | `cosine`                                       | Decays to zero (no minimum LR)                                              |
-| `training.max_grad_norm`               | `1.0`                                          | Gradient clipping                                                           |
-| `training.weight_decay`                | `0.0`                                          | Decoder (LoRA) weight decay (projector uses `projector_weight_decay: 0.01`) |
-| `training.seed`                        | `44`                                           | Seeds data order and init                                                   |
-| `training.eval_steps` / `save_steps`   | `2000`                                         | Evaluate and checkpoint every N steps                                       |
-| `training.push_to_hub`                 | `true`                                         | Upload each checkpoint to `hub_model_id` (public by default)                |
-| `training.hub_model_id`                | `mazesmazes/tiny-audio-granite-qwen-frozen-nc` | Change this to your own repo                                                |
-| `training.bf16`                        | `true`                                         | bf16 compute                                                                |
-| `training.attn_implementation`         | `sdpa`                                         | PyTorch scaled-dot-product attention                                        |
+| Parameter                              | Default                              | Description                                                                 |
+| -------------------------------------- | ------------------------------------ | --------------------------------------------------------------------------- |
+| `training.learning_rate`               | `1e-3`                               | Projector learning rate                                                     |
+| `training.decoder_learning_rate`       | `1e-4`                               | Decoder group (the LoRA adapters), 10x lower                                |
+| `training.freeze_language_model`       | `true`                               | Decoder base frozen; only the LoRA adapters train on it                     |
+| `training.num_train_epochs`            | `1`                                  | Epochs over the data config                                                 |
+| `training.max_steps`                   | `-1`                                 | Set a positive number to cap the run regardless of epochs                   |
+| `training.per_device_train_batch_size` | `32`                                 | Clips per step (x2 accumulation = 64), sized for a 96 GB GPU                |
+| `training.per_device_eval_batch_size`  | `32`                                 | Clips per eval step                                                         |
+| `training.gradient_accumulation_steps` | `2`                                  | Effective batch = batch size × this (64)                                    |
+| `training.warmup_steps`                | `1000`                               | Linear LR ramp before the cosine decay                                      |
+| `training.lr_scheduler_type`           | `cosine`                             | Decays to zero (no minimum LR)                                              |
+| `training.max_grad_norm`               | `1.0`                                | Gradient clipping                                                           |
+| `training.weight_decay`                | `0.0`                                | Decoder (LoRA) weight decay (projector uses `projector_weight_decay: 0.01`) |
+| `training.seed`                        | `44`                                 | Seeds data order and init                                                   |
+| `training.eval_steps` / `save_steps`   | `2000`                               | Evaluate and checkpoint every N steps                                       |
+| `training.push_to_hub`                 | `true`                               | Upload each checkpoint to `hub_model_id` (public by default)                |
+| `training.hub_model_id`                | `mazesmazes/tiny-audio-whisper-qwen` | Change this to your own repo                                                |
+| `training.bf16`                        | `true`                               | bf16 compute                                                                |
+| `training.attn_implementation`         | `flash_attention_2`                  | FlashAttention 2 (falls back to `sdpa`); enables padding-free packing       |
 
 ### Model (`configs/config.yaml`)
 

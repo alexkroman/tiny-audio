@@ -1,19 +1,20 @@
 # Main configuration -- the default training recipe.
 #
-#   openai/whisper-large-v3 encoder                    FULLY FROZEN (0 trainable)
-#   -> MLP projector (fresh init, 4x frame stacking, lr 1e-3)
-#   -> Qwen/Qwen3-1.7B, base FROZEN + LoRA all-linear r=64 (lr 1e-4)
+#   Qwen/Qwen3-ASR-1.7B-hf's audio encoder             FULLY FROZEN (0 trainable)
+#   -> MLP projector (fresh init, no frame stacking, lr 1e-3)
+#   -> HuggingFaceTB/SmolLM3-3B, base FROZEN + LoRA all-linear r=64 (lr 1e-4)
 #
-# WHISPER + QWEN3 (2026-10-20). Replaces granite-speech-5.0-470m-turboctc-nc
-# + Qwen3.5-2B (verbatim-aug-2: mean of 9 5.490, #26 of 56; that recipe is
-# still the published model, mazesmazes/tiny-audio). The leaderboard ranks
-# above it are mostly encoders trained for the system they sit in, and the
-# Granite encoder alone (CTC, #20, 5.441) beat the full stack, so the encoder
-# is the lever. This is Higgs Audio v3 STT's pairing (#13, 5.224:
-# Whisper-large-v3 + Qwen3-1.7B-Base + MLP), with the stock encoder rather
-# than Higgs's tuned one and the post-trained decoder (see text_model_id).
-# It also drops the Granite NC encoder's CC-BY-NC-SA terms: Whisper is MIT,
-# Qwen3 Apache-2.0.
+# QWEN3-ASR ENCODER + SMOLLM3-3B (2026-10-20). Replaces stock whisper-large-v3,
+# whose own system is #41 (mean of 9 6.663) and which trained slower than
+# Granite on identical data. Of the encoders that load natively in our
+# transformers (no remote code), Qwen3-ASR-1.7B's system ranks highest: #9,
+# 4.936. Its 314M encoder is Apache-2.0; it was trained to feed a Qwen3
+# decoder, so pairing it with SmolLM3 gives that up (the projector is
+# trained fresh either way). Before that this recipe was Granite
+# 5.0 turboctc-nc + Qwen3.5-2B (verbatim-aug-2: 5.490, #26 of 56; still the
+# published model, mazesmazes/tiny-audio), whose encoder is CC-BY-NC-SA.
+# Higgs Audio v3's tuned Whisper encoder was tried and dropped the same day:
+# it is fine-tuned on <=4 s chunks, which our input path did not reproduce.
 #
 #   poetry run python scripts/train.py
 #
@@ -30,19 +31,24 @@ defaults:
 
 # Model configuration (must match ASRConfig parameter names)
 model:
-  # Stock Whisper-large-v3 (32 layers, d=1280, 128 mel bins), the encoder
-  # Higgs Audio v3 STT builds on. Higgs fine-tuned theirs (Apache-2.0) and
-  # could be swapped in later; their fine-tune excluded every recording in
-  # the leaderboard's test sets.
-  audio_model_id: openai/whisper-large-v3
-  # Post-trained, not Higgs's Base. Both ship the same chat template, but the
-  # decoder is frozen, so its output row for <|im_end|> (the end of every
-  # training target) never changes; the post-trained model is trained to end
-  # turns with it, Base is not, and a frozen Base that rarely predicts it
-  # would keep generating. Unverified for Base, so the safe choice; Base is a
-  # one-line swap.
-  text_model_id: Qwen/Qwen3-1.7B
-  # Whisper's two convs (the ASRConfig default) take 100 Hz mel to 50 Hz.
+  # Qwen3-ASR-1.7B's audio encoder (24 layers, d=1024, 128 mel bins), read
+  # out of the ASR checkpoint by tiny_audio/qwen3_asr_encoder.py. It is NOT
+  # fed like Whisper, and transformers' Qwen3ASREncoder does the feeding
+  # itself: its convolutions run on independent 1 s chunks (100 mel frames,
+  # 13 tokens each), attention is limited to 8 s windows, and it drops padding
+  # using the mel mask. ASRConfig turns on encoder_attention_mask and
+  # encoder_chunk_frames=100 for this id.
+  audio_model_id: Qwen/Qwen3-ASR-1.7B-hf
+  # SmolLM3-3B (Apache-2.0, hidden 2048, 36 layers), the post-trained model,
+  # not Base: the decoder is frozen, so its output row for <|im_end|> (the end
+  # of every training target) never changes, and only the post-trained model
+  # is trained to end turns with it. Its chat template takes
+  # enable_thinking=False, which render_audio_prompt passes. liger maps it
+  # (scripts/train.py _LIGER_PATCHERS).
+  text_model_id: HuggingFaceTB/SmolLM3-3B
+  # Three (pad 1, kernel 3, stride 2) convs per 100-frame chunk: 100 Hz mel
+  # to ~13 Hz (13 tokens per full second, plus the remainder's own count).
+  encoder_conv_layers: [[1, 3, 2], [1, 3, 2], [1, 3, 2]]
   projector_hidden_dim: 4096
   model_dtype: bfloat16
   projector_dtype: float32
@@ -53,11 +59,17 @@ model:
   # AudioFlamingo3, Qwen3-ASR are two-layer GELU MLPs; Higgs v3 STT an MLP
   # after 2x stacking; Canary-Qwen a single linear or identity).
   #
-  # 4x frame stacking: Whisper's 50 Hz becomes 12.5 Hz, the published recipe's
-  # audio-token rate (~237 tokens for a 19s clip), so decoder cost and batch
-  # memory stay comparable. Higgs runs at 25 Hz (2x); that doubles the
-  # decoder's audio tokens, so it is a separate experiment.
-  projector_pool_stride: 4
+  # No frame stacking: the encoder already emits ~13 Hz, about the 12.5 Hz
+  # audio-token rate of every earlier recipe (~247 tokens for a 19 s clip
+  # against ~237), so decoder cost and batch memory stay comparable.
+  projector_pool_stride: 1
+
+  # Long audio is transcribed in chunks of at most this many seconds, cut at
+  # the quietest point. 28 s against data.max_audio_seconds 30 (the old pair
+  # was 18 against 19): under the trained length, with room for the 0.25 s
+  # inference lead-in. Raised with it on 2026-10-20; an 18 s chunk would leave
+  # the newly trained long context unused.
+  inference_chunk_seconds: 28.0
 
   # INFERENCE prompt only. Training picks the prompt per row from
   # `text_punct` (scripts/train.py _build_sample), so the plain default

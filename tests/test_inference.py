@@ -90,7 +90,9 @@ def decoder(monkeypatch: pytest.MonkeyPatch) -> tuple[GraphedDecoder, FakeModel]
     def prepare_chunk(_audio: Any, _sample_rate: int) -> PreparedChunk:
         return _chunk(40)  # the longest chunk the pipeline cuts is 40 frames here
 
-    pipe = SimpleNamespace(model=model, postprocess=postprocess, prepare_chunk=prepare_chunk)
+    pipe = SimpleNamespace(
+        model=model, postprocess=postprocess, prepare_chunk=prepare_chunk, chunk_max_seconds=18.0
+    )
     return GraphedDecoder(cast(ASRPipeline, pipe), max_batch_size=24), model
 
 

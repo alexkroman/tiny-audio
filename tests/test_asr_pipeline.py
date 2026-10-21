@@ -2,6 +2,7 @@
 
 from collections.abc import Sequence
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, NoReturn, cast
 from unittest.mock import MagicMock, patch
 
@@ -541,6 +542,26 @@ class TestOutputContracts:
             cpu_pipeline._sampling_rate()
         with pytest.raises(RuntimeError, match="no tokenizer"):
             cpu_pipeline._tokenizer()
+
+
+def _chunk_max_seconds(pipe: ASRPipeline) -> float:
+    """The property, read off a stand-in that only carries `model.config`."""
+    getter = ASRPipeline.chunk_max_seconds.fget
+    assert getter is not None
+    return getter(pipe)
+
+
+class TestChunkLength:
+    """Long audio is cut at the model's own trained-for chunk length."""
+
+    def test_reads_the_model_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        pipe = cast(ASRPipeline, SimpleNamespace(model=SimpleNamespace(config=SimpleNamespace())))
+        monkeypatch.setattr(pipe.model.config, "inference_chunk_seconds", 28.0, raising=False)
+        assert _chunk_max_seconds(pipe) == 28.0
+
+    def test_older_checkpoints_keep_18s(self) -> None:
+        pipe = cast(ASRPipeline, SimpleNamespace(model=SimpleNamespace(config=SimpleNamespace())))
+        assert _chunk_max_seconds(pipe) == 18.0
 
 
 class TestConstruction:

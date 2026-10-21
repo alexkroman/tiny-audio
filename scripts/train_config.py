@@ -66,6 +66,9 @@ class DataConfig:
 
     datasets: list[DatasetConfig] = field(default_factory=list[DatasetConfig])
     sample_rate: int = 16000
+    # Longest clip the collator keeps (DataCollator). 19 s unless a data config
+    # raises it; inference chunks must stay under it (model.inference_chunk_seconds).
+    max_audio_seconds: float = 19.0
     dataset_cache_dir: str | None = None
     num_proc: int = 16
     epoch_expansion: int = 1
@@ -109,6 +112,7 @@ class ModelConfig:
 
     audio_model_id: str | None = None
     text_model_id: str | None = None
+    inference_chunk_seconds: float | None = None
     attn_implementation: str | None = None
     model_dtype: str | None = None
     transcribe_prompt: str | None = None

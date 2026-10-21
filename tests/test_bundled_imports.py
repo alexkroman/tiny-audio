@@ -15,7 +15,8 @@ from transformers.dynamic_module_utils import (
 )
 
 BUNDLED = sorted(p for p in Path("tiny_audio").glob("*.py") if p.name.startswith("asr_")) + [
-    Path("tiny_audio") / n for n in ("projectors.py", "alignment.py", "diarization.py")
+    Path("tiny_audio") / n
+    for n in ("projectors.py", "alignment.py", "diarization.py", "qwen3_asr_encoder.py")
 ]
 # requirements.txt: transformers, torch, torchaudio, peft (+ their deps safetensors, numpy,
 # huggingface_hub).
