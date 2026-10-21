@@ -10,13 +10,7 @@ import numpy as np
 import numpy.typing as npt
 from scipy import stats
 
-from scripts.analysis.common import (
-    Entity,
-    console,
-    entity_in_text,
-    extract_dataset_name,
-    normalize_text,
-)
+from scripts.analysis.common import console, extract_dataset_name
 from scripts.eval.audio import TextNormalizer
 from scripts.eval.speaker_metrics import (
     cp_errors,
@@ -62,13 +56,6 @@ class DatasetMetrics(TypedDict, total=False):
     attribution_gap: float
 
 
-class EntityStats(TypedDict):
-    """Reference entities seen, and how many the prediction reproduced."""
-
-    found: int
-    total: int
-
-
 class ModelMetrics(TypedDict, total=False):
     """One model's sweep; the `corpus_*` keys are set by `recompute_matched_corpus`."""
 
@@ -76,7 +63,6 @@ class ModelMetrics(TypedDict, total=False):
     sweep: Required[str]
     datasets: Required[dict[str, DatasetMetrics]]
     by_length: Required[dict[int, list[float]]]
-    entity_errors: Required[dict[str, EntityStats]]
     avg_latency: float
     corpus_wer: float
     corpus_ins_rate: float
@@ -299,7 +285,6 @@ def collect_model_metrics(
         "sweep": sweep_label,
         "datasets": {},
         "by_length": {},
-        "entity_errors": {},
     }
     for dir_path in model_dirs:
         if dir_path.name.endswith(LEGACY_SUFFIXES) or not (dir_path / "results.txt").exists():
@@ -386,24 +371,6 @@ def _shared_rows(
     return usable, excluded
 
 
-def _rescore_formatting(
-    m: ModelMetrics, usable: list[tuple[str, int]], ref_entities: dict[str, list[Entity]]
-) -> None:
-    """Entity recall over the paired rows only.
-
-    Scored at collection time they compared a 1,200-sample sweep against a
-    6,000-sample one, which put "PERSON 100% missed" (1 of 1) next to "58.3%"
-    (7 of 12) as if the two were commensurable.
-    """
-    m["entity_errors"] = {}
-    for ds, n in usable:
-        for gt_raw, pred_raw in m["datasets"][ds]["raw_pairs"][:n]:
-            for entity in ref_entities.get(normalize_text(gt_raw), ()):
-                stats = m["entity_errors"].setdefault(entity["label"], {"found": 0, "total": 0})
-                stats["total"] += 1
-                stats["found"] += entity_in_text(entity["text"], pred_raw)
-
-
 def _set_corpus_wer(m: ModelMetrics, refs: list[str], preds: list[str]) -> None:
     """Recompute corpus WER, its insertion/deletion/substitution split and per-utterance counts."""
     m.pop("corpus_wer", None)
@@ -444,9 +411,7 @@ def _set_corpus_cpwer(m: ModelMetrics, usable: list[tuple[str, int]]) -> None:
     m["corpus_cp_utt_ref_words"] = [r.ref_words for r in rows]
 
 
-def recompute_matched_corpus(
-    model_metrics: dict[str, ModelMetrics], ref_entities: dict[str, list[Entity]] | None = None
-) -> None:
+def recompute_matched_corpus(model_metrics: dict[str, ModelMetrics]) -> None:
     """Rebuild each model's `corpus_wer` over a subset every model shares.
 
     The per-model pooled WER is only meaningful when the models were scored on
@@ -475,7 +440,6 @@ def recompute_matched_corpus(
         preds = [p for ds, n in usable for p in m["datasets"][ds]["preds"][:n]]
         m["corpus_datasets"] = [ds for ds, _ in usable]
         m["corpus_excluded"] = excluded
-        _rescore_formatting(m, usable, ref_entities or {})
         _set_corpus_wer(m, refs, preds)
     # cpWER pools only datasets every model has speaker rows for, so the
     # per-utterance lists stay paired for the bootstrap.

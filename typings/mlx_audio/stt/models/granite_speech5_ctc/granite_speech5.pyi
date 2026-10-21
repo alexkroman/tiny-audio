@@ -1,0 +1,3 @@
+from mlx.core import array
+
+def compute_features(waveform: array, num_mel_bins: int = ...) -> array: ...

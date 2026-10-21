@@ -1,4 +1,4 @@
-"""Tests for the per-sample reports and the missed-entity table (scripts/analysis/)."""
+"""Tests for the per-sample reports (entity-errors, high-wer) in scripts/analysis/."""
 
 import json
 from pathlib import Path
@@ -101,7 +101,7 @@ class TestEntityErrors:
         return result.output
 
     def test_reports_only_missed_entities(self, outputs: Path) -> None:
-        """Every type counts here, numeric ones included, as in the compare table."""
+        """Every entity type counts here, numeric ones included."""
         output = self._run(outputs)
         assert "Missing: Angela Merkel (PERSON)" in output
         assert "Missing: 1961 (DATE), three (CARDINAL)" in output
@@ -136,48 +136,6 @@ class TestHighWer:
     def test_unknown_model_fails(self, outputs: Path) -> None:
         result = runner.invoke(app, ["high-wer", "nomodel", "-o", str(outputs)])
         assert result.exit_code == 1
-
-
-class TestEntityTableColumns:
-    """The table reports recall for every entity type, numeric ones included."""
-
-    @pytest.fixture
-    def entity_section(self, outputs: Path, monkeypatch: pytest.MonkeyPatch) -> str:
-        """Just the missed-entity table, so other tables' columns cannot satisfy an assert.
-
-        `MIN_CLASS_SUPPORT` is lowered because these assert on which COLUMNS
-        appear, not on whether a handful of entities is enough to report.
-        """
-        monkeypatch.setattr("scripts.analysis.tables.MIN_CLASS_SUPPORT", 1)
-        result = runner.invoke(app, ["compare", "modela", "--output-dir", str(outputs)])
-        assert result.exit_code == 0, result.output
-        assert "Missed Entity Errors" in result.output
-        return result.output.split("Missed Entity Errors")[1]
-
-    def test_semantic_types_are_shown(self, entity_section: str) -> None:
-        assert "PERSON" in entity_section
-        assert "GPE" in entity_section
-
-    def test_numeric_types_are_shown(self, entity_section: str) -> None:
-        """No ITN table any more, so numeric entities are reported here too."""
-        assert "DATE" in entity_section
-        assert "CARDINAL" in entity_section
-
-    def test_average_counts_every_type(self, entity_section: str) -> None:
-        """3 of 6 reference entities missed: Angela Merkel, the date and the count."""
-        row = next(line for line in entity_section.splitlines() if "modela" in line)
-        # Cell-wise: "50.00%" contains "0.00%", so a substring check proves nothing.
-        cells = [c.strip() for c in row.strip("│").split("│")]
-        # Average, GPE, PERSON, CARDINAL, DATE
-        assert cells == ["modela", "50.00%", "0.00%", "50.00%", "100.00%", "100.00%"]
-
-    def test_thin_support_skips_the_table(
-        self, outputs: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr("scripts.analysis.tables.MIN_CLASS_SUPPORT", 99)
-        result = runner.invoke(app, ["compare", "modela", "--output-dir", str(outputs)])
-        assert result.exit_code == 0, result.output
-        assert "Entity table skipped" in result.output
 
 
 def test_compare_without_a_sweep_fails(tmp_path: Path) -> None:

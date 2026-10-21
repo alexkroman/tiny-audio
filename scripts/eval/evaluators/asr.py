@@ -41,7 +41,7 @@ from scripts.eval.audio import (
     prepare_wav_bytes,
 )
 from scripts.eval.speaker_metrics import serialize_turns
-from scripts.inference import merge_lora_adapters
+from scripts.inference import DTYPE_CONFIG_FIELDS, merge_lora_adapters
 from tiny_audio.asr_attention import active_attn_implementation, resolve_attn_implementation
 from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
@@ -105,8 +105,8 @@ def print_generation_config(model: ASRModel, model_path: str) -> None:
 # in fp32 on every `-top4` eval and the 12.6M projector in fp32 on all of them.
 # Those two fields exist to hold fp32 MASTER WEIGHTS for AdamW -- the same
 # training-only argument `_resolve_local_runtime` makes for `model_dtype`,
-# which had only been half-applied.
-DTYPE_CONFIG_FIELDS = ("model_dtype", "projector_dtype", "encoder_dtype")
+# which had only been half-applied. (Defined in scripts/inference.py, which
+# `ta serve` loads through too.)
 
 
 def _resolve_local_runtime() -> tuple[int | str, str]:

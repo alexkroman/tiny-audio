@@ -12,11 +12,13 @@ import pytest
 from eval_outputs import write_run
 
 from scripts.analysis.metrics import (
+    ModelMetrics,
     collect_model_metrics,
     dataset_wer,
     latest_sweep,
     match_dataset_rows,
     recompute_matched_corpus,
+    set_error_rates,
 )
 from scripts.eval.audio import TextNormalizer
 from scripts.eval.speaker_metrics import speaker_metrics
@@ -81,7 +83,7 @@ class TestMatchedCorpus:
             "a": collect_model_metrics("modelA", tmp_path, []),
             "b": collect_model_metrics("modelB", tmp_path, []),
         }
-        recompute_matched_corpus(mm, {})
+        recompute_matched_corpus(mm)
         assert mm["a"].get("corpus_datasets") == ["ami"], "tedlium is not in modelB's sweep"
         assert mm["a"].get("corpus_wer") == pytest.approx(33.3, abs=0.2)
         assert mm["b"].get("corpus_wer") == pytest.approx(0.0, abs=0.2)
@@ -94,7 +96,7 @@ class TestMatchedCorpus:
             "a": collect_model_metrics("modelA", tmp_path, []),
             "b": collect_model_metrics("modelB", tmp_path, []),
         }
-        recompute_matched_corpus(mm, {})
+        recompute_matched_corpus(mm)
         assert len(mm["a"]["datasets"]["ami"]["refs"]) == 20
         assert mm["a"].get("corpus_datasets") == ["ami"]
         # Both corpora scored over the shared first 5 rows.
@@ -116,7 +118,7 @@ class TestMatchedCorpus:
             "a": collect_model_metrics("modelA", tmp_path, []),
             "b": collect_model_metrics("modelB", tmp_path, []),
         }
-        recompute_matched_corpus(mm, {})
+        recompute_matched_corpus(mm)
         assert mm["a"].get("corpus_datasets") == []
         assert "ami" in mm["a"].get("corpus_excluded", {})
         assert "corpus_wer" not in mm["a"]
@@ -141,7 +143,7 @@ class TestMatchedDatasetColumns:
         assert unmatched == {}
         assert dataset_wer(mm["a"]["datasets"]["ami"]) == pytest.approx(0.0, abs=0.01)
         assert len(mm["a"]["datasets"]["ami"]["refs"]) == 20, "rows stay whole"
-        recompute_matched_corpus(mm, {})
+        recompute_matched_corpus(mm)
         assert mm["a"].get("corpus_wer") == pytest.approx(
             dataset_wer(mm["a"]["datasets"]["ami"]), abs=0.01
         )
@@ -228,7 +230,7 @@ class TestNormalizerDrift:
             "a": collect_model_metrics("modelA", tmp_path, []),
             "b": collect_model_metrics("modelB", tmp_path, []),
         }
-        recompute_matched_corpus(mm, {})
+        recompute_matched_corpus(mm)
         assert mm["a"].get("corpus_excluded") == {}
         assert mm["a"].get("corpus_datasets") == ["ami"]
         # The stale line scored the dropped `ah` as a deletion; the raw pair
@@ -259,7 +261,7 @@ class TestNormalizerDrift:
             "a": collect_model_metrics("modelA", tmp_path, []),
             "b": collect_model_metrics("modelB", tmp_path, []),
         }
-        recompute_matched_corpus(mm, {})
+        recompute_matched_corpus(mm)
         assert "raw transcripts" in mm["a"].get("corpus_excluded", {})["ami"]
 
     def test_genuinely_different_rows_still_report_a_different_draw(self, tmp_path: Path) -> None:
@@ -277,7 +279,7 @@ class TestNormalizerDrift:
             "a": collect_model_metrics("modelA", tmp_path, []),
             "b": collect_model_metrics("modelB", tmp_path, []),
         }
-        recompute_matched_corpus(mm, {})
+        recompute_matched_corpus(mm)
         assert (
             mm["a"].get("corpus_excluded", {})["ami"] == "references differ (different eval rows)"
         )
@@ -352,7 +354,7 @@ class TestSpeakerTokens:
             "a": collect_model_metrics("modelA", tmp_path, []),
             "b": collect_model_metrics("modelB", tmp_path, []),
         }
-        recompute_matched_corpus(mm, {})
+        recompute_matched_corpus(mm)
         # Truncated to the one shared row, so the per-utterance lists pair up.
         assert mm["a"].get("corpus_cp_utt_errors") == [2]
         assert mm["b"].get("corpus_cp_utt_errors") == [0]
@@ -361,6 +363,37 @@ class TestSpeakerTokens:
     def test_untagged_dataset_has_no_cpwer(self, tmp_path: Path) -> None:
         write_run(tmp_path, "20260102_000000", "modelA", "ami", "ra", MATCH, 0.0)
         mm = {"a": collect_model_metrics("modelA", tmp_path, [])}
-        recompute_matched_corpus(mm, {})
+        recompute_matched_corpus(mm)
         assert "cpwer" not in mm["a"]["datasets"]["ami"]
         assert "corpus_cpwer" not in mm["a"]
+
+
+class TestErrorRateSplit:
+    """Insertion, deletion and substitution rates partition WER, as the compare tables show."""
+
+    def test_rates_add_up_to_wer(self, tmp_path: Path) -> None:
+        # One substitution (gamma -> delta) and one deletion (beta) over 3 words.
+        rows = [("alpha beta gamma", "alpha delta")] * 4
+        write_run(tmp_path, "20260101_000000", "modelA", "ami", "run", rows, 66.7)
+        ds = collect_model_metrics("modelA", tmp_path)["datasets"]["ami"]
+        set_error_rates(ds)
+        ins, dels, subs = ds.get("ins_rate"), ds.get("del_rate"), ds.get("sub_rate")
+        assert ins is not None
+        assert dels is not None
+        assert subs is not None
+        assert ins + dels + subs == pytest.approx(ds.get("wer_calculated"))
+        assert dels == pytest.approx(100 / 3)
+        assert subs == pytest.approx(100 / 3)
+
+    def test_nothing_to_score_sets_nothing(self, tmp_path: Path) -> None:
+        write_run(tmp_path, "20260101_000000", "modelA", "ami", "run", MATCH, 0.0)
+        ds = collect_model_metrics("modelA", tmp_path)["datasets"]["ami"]
+        ds.pop("del_rate", None)
+        set_error_rates(ds, n=0)
+        assert "del_rate" not in ds
+
+
+def test_no_models_is_a_noop() -> None:
+    models: dict[str, ModelMetrics] = {}
+    recompute_matched_corpus(models)
+    assert models == {}

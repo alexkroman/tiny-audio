@@ -824,7 +824,14 @@ dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
 # (TEDLIUM 591) are near-uncapped; AMI validation is 13,098 rows so the
 # cap binds hard there; the bump
 # matters most for CV / Gigaspeech dev / SPGI where eval splits are huge.
-max_eval_samples_per_dataset: 500
+#
+# Raised again 500 -> 1000 (2026-10-21), the same argument one more step:
+# another ~sqrt(2) off the eval-loss noise (~0.003 -> ~0.002), for a second
+# epoch where the question is whether eval stops improving at the epoch
+# boundary, as stage_1's 2-epoch run did. Batch 128 eval keeps the ~2x
+# longer eval pass small next to the ~2000 steps between evals. Splits
+# smaller than 1000 (TEDLIUM 591) contribute everything they have.
+max_eval_samples_per_dataset: 1000
 
 # ONE physical pass, exactly the rows the mix table above describes.
 #

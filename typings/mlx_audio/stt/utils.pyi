@@ -1,0 +1,3 @@
+from typing import Any
+
+def load_model(model_path: str, lazy: bool = ..., strict: bool = ..., **kwargs: Any) -> Any: ...
