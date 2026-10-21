@@ -159,7 +159,29 @@ def resolve_attn_implementation(requested: str | None, model_id: str | None = No
             "falling back to sdpa."
         )
         return "sdpa"
+    if not _flash_attention_runs():
+        return "sdpa"
     return requested
+
+
+@functools.cache
+def _flash_attention_runs() -> bool:
+    """Whether flash-attn's kernels actually run, forward and backward, on this GPU.
+
+    Importing proves only that the package is installed: its kernels are
+    compiled per GPU architecture, so a build without this card's (e.g. the
+    Blackwell RTX PRO 6000, sm_120) imports cleanly and fails at the first
+    attention call, mid-load or mid-step. Checked once per process.
+    """
+    try:
+        flash_attn = importlib.import_module("flash_attn")
+        q = torch.randn(1, 8, 2, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        flash_attn.flash_attn_func(q, q, q, causal=True).sum().backward()
+    # AssertionError: torch's own "not compiled with CUDA enabled".
+    except (RuntimeError, ImportError, AttributeError, AssertionError) as exc:
+        logger.warning("flash_attn is installed but its kernels fail here (%s); using sdpa", exc)
+        return False
+    return True
 
 
 def resolve_decoder_attn_implementation(requested: str | None, model_id: str) -> str | None:

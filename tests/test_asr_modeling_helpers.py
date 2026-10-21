@@ -4,10 +4,11 @@ Module-level functions are called directly; instance methods that only touch
 the tokenizer or projector are invoked unbound against a stand-in `self`.
 """
 
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
-from typing import NoReturn, cast
+from typing import Any, NoReturn, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -16,6 +17,7 @@ from conftest import stub
 from transformers import BatchEncoding
 
 from tiny_audio.asr_attention import (
+    _flash_attention_runs,
     _has_sliding_window_attention,
     _text_config,
     resolve_attn_implementation,
@@ -47,7 +49,47 @@ class TestResolveAttnImplementation:
     def test_fa2_with_cuda_and_flash_attn_is_kept(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
         monkeypatch.setattr("transformers.utils.is_flash_attn_2_available", lambda: True)
+        monkeypatch.setattr("tiny_audio.asr_attention._flash_attention_runs", lambda: True)
         assert resolve_attn_implementation("flash_attention_2") == "flash_attention_2"
+
+    def test_fa2_whose_kernels_fail_is_sdpa(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """flash-attn that imports but has no kernels for this GPU must not be used."""
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr("transformers.utils.is_flash_attn_2_available", lambda: True)
+        monkeypatch.setattr("tiny_audio.asr_attention._flash_attention_runs", lambda: False)
+        assert resolve_attn_implementation("flash_attention_2") == "sdpa"
+
+
+class TestFlashAttentionProbe:
+    """The probe runs a tiny forward and backward and reports whether both worked."""
+
+    def _probe(self, monkeypatch: pytest.MonkeyPatch, attn: Any) -> bool:
+        real_randn = torch.randn
+
+        def cpu_randn(*args: Any, **kwargs: Any) -> torch.Tensor:
+            kwargs.pop("device", None)
+            return real_randn(*args, **kwargs)
+
+        monkeypatch.setattr(torch, "randn", cpu_randn)
+        monkeypatch.setitem(sys.modules, "flash_attn", SimpleNamespace(flash_attn_func=attn))
+        _flash_attention_runs.cache_clear()
+        try:
+            return _flash_attention_runs()
+        finally:
+            _flash_attention_runs.cache_clear()
+
+    def test_working_kernels_pass(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def attn(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, **_kw: Any) -> torch.Tensor:
+            return q * k * v
+
+        assert self._probe(monkeypatch, attn) is True
+
+    def test_missing_kernel_image_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def attn(*_args: Any, **_kwargs: Any) -> torch.Tensor:
+            msg = "CUDA error: no kernel image is available for execution"
+            raise RuntimeError(msg)
+
+        assert self._probe(monkeypatch, attn) is False
 
     @pytest.mark.parametrize("requested", [None, "sdpa", "flash_attention_2"])
     def test_mps_forces_eager(self, monkeypatch: pytest.MonkeyPatch, requested: str | None) -> None:

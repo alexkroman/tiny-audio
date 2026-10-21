@@ -7,7 +7,6 @@ import pytest
 from typer.testing import CliRunner
 
 from scripts.analysis import app
-from scripts.analysis.common import ITN_COVERED_ENTITY_TYPES
 
 runner = CliRunner()
 
@@ -102,7 +101,7 @@ class TestEntityErrors:
         return result.output
 
     def test_reports_only_missed_entities(self, outputs: Path) -> None:
-        """Every type counts here, numeric ones included -- unlike the compare table."""
+        """Every type counts here, numeric ones included, as in the compare table."""
         output = self._run(outputs)
         assert "Missing: Angela Merkel (PERSON)" in output
         assert "Missing: 1961 (DATE), three (CARDINAL)" in output
@@ -140,11 +139,11 @@ class TestHighWer:
 
 
 class TestEntityTableColumns:
-    """The table reports semantic recall; numeric types belong to the ITN table."""
+    """The table reports recall for every entity type, numeric ones included."""
 
     @pytest.fixture
     def entity_section(self, outputs: Path, monkeypatch: pytest.MonkeyPatch) -> str:
-        """Just the missed-entity table, so ITN's own columns cannot satisfy an assert.
+        """Just the missed-entity table, so other tables' columns cannot satisfy an assert.
 
         `MIN_CLASS_SUPPORT` is lowered because these assert on which COLUMNS
         appear, not on whether a handful of entities is enough to report.
@@ -153,27 +152,24 @@ class TestEntityTableColumns:
         result = runner.invoke(app, ["compare", "modela", "--output-dir", str(outputs)])
         assert result.exit_code == 0, result.output
         assert "Missed Entity Errors" in result.output
-        return result.output.split("Missed Entity Errors")[1].split("ITN Formatting")[0]
+        return result.output.split("Missed Entity Errors")[1]
 
     def test_semantic_types_are_shown(self, entity_section: str) -> None:
         assert "PERSON" in entity_section
         assert "GPE" in entity_section
 
-    def test_itn_covered_types_are_dropped(self, entity_section: str) -> None:
-        for etype in ITN_COVERED_ENTITY_TYPES:
-            assert etype not in entity_section, f"{etype} is scored in the ITN table"
+    def test_numeric_types_are_shown(self, entity_section: str) -> None:
+        """No ITN table any more, so numeric entities are reported here too."""
+        assert "DATE" in entity_section
+        assert "CARDINAL" in entity_section
 
-    def test_average_excludes_dropped_types(self, entity_section: str) -> None:
-        """DATE and CARDINAL were missed; counting them would move the average.
-
-        One of four semantic entities (Angela Merkel) is missed: 25% on
-        average, 50% of PERSON, 0% of GPE. Counting the two numeric entities
-        would read 50% on average.
-        """
+    def test_average_counts_every_type(self, entity_section: str) -> None:
+        """3 of 6 reference entities missed: Angela Merkel, the date and the count."""
         row = next(line for line in entity_section.splitlines() if "modela" in line)
         # Cell-wise: "50.00%" contains "0.00%", so a substring check proves nothing.
         cells = [c.strip() for c in row.strip("│").split("│")]
-        assert cells == ["modela", "25.00%", "0.00%", "50.00%"]  # Average, GPE, PERSON
+        # Average, GPE, PERSON, CARDINAL, DATE
+        assert cells == ["modela", "50.00%", "0.00%", "50.00%", "100.00%", "100.00%"]
 
     def test_thin_support_skips_the_table(
         self, outputs: Path, monkeypatch: pytest.MonkeyPatch

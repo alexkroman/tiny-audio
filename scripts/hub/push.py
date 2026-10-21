@@ -80,9 +80,11 @@ def main(
         "asr_attention.py",
         "asr_text.py",
         "asr_types.py",
+        "asr_packing.py",
         "asr_processing.py",
         "asr_pipeline.py",
         "projectors.py",
+        "qwen3_asr_encoder.py",
         "alignment.py",
         "diarization.py",
     ):

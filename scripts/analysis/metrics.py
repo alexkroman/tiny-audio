@@ -25,7 +25,6 @@ from scripts.eval.speaker_metrics import (
     speaker_count,
     word_errors,
 )
-from scripts.itn import merge_scores, score_sample
 from scripts.utils import ResultSample, extract_model_from_dir, find_model_dirs, parse_results_file
 
 # Run directories the evaluators that wrote them no longer exist for.
@@ -78,11 +77,11 @@ class ModelMetrics(TypedDict, total=False):
     datasets: Required[dict[str, DatasetMetrics]]
     by_length: Required[dict[int, list[float]]]
     entity_errors: Required[dict[str, EntityStats]]
-    itn: Required[dict[str, dict[str, int]]]
-    itn_raw_samples: Required[int]
     avg_latency: float
     corpus_wer: float
     corpus_ins_rate: float
+    corpus_del_rate: float
+    corpus_sub_rate: float
     corpus_datasets: list[str]
     corpus_excluded: dict[str, str]
     corpus_utt_errors: list[int]
@@ -301,9 +300,6 @@ def collect_model_metrics(
         "datasets": {},
         "by_length": {},
         "entity_errors": {},
-        # Pattern-based ITN, scored on the raw (un-normalized) pair only.
-        "itn": {},
-        "itn_raw_samples": 0,
     }
     for dir_path in model_dirs:
         if dir_path.name.endswith(LEGACY_SUFFIXES) or not (dir_path / "results.txt").exists():
@@ -393,19 +389,15 @@ def _shared_rows(
 def _rescore_formatting(
     m: ModelMetrics, usable: list[tuple[str, int]], ref_entities: dict[str, list[Entity]]
 ) -> None:
-    """Entity recall and ITN over the paired rows only.
+    """Entity recall over the paired rows only.
 
     Scored at collection time they compared a 1,200-sample sweep against a
     6,000-sample one, which put "PERSON 100% missed" (1 of 1) next to "58.3%"
     (7 of 12) as if the two were commensurable.
     """
     m["entity_errors"] = {}
-    m["itn"] = {}
-    m["itn_raw_samples"] = 0
     for ds, n in usable:
         for gt_raw, pred_raw in m["datasets"][ds]["raw_pairs"][:n]:
-            m["itn_raw_samples"] += 1
-            merge_scores(m["itn"], score_sample(gt_raw, pred_raw))
             for entity in ref_entities.get(normalize_text(gt_raw), ()):
                 stats = m["entity_errors"].setdefault(entity["label"], {"found": 0, "total": 0})
                 stats["total"] += 1
@@ -413,9 +405,11 @@ def _rescore_formatting(
 
 
 def _set_corpus_wer(m: ModelMetrics, refs: list[str], preds: list[str]) -> None:
-    """Recompute corpus WER, insertion rate and per-utterance counts from `refs`/`preds`."""
+    """Recompute corpus WER, its insertion/deletion/substitution split and per-utterance counts."""
     m.pop("corpus_wer", None)
     m.pop("corpus_ins_rate", None)
+    m.pop("corpus_del_rate", None)
+    m.pop("corpus_sub_rate", None)
     if not refs:
         return
     out = jiwer.process_words(refs, preds)
@@ -423,6 +417,8 @@ def _set_corpus_wer(m: ModelMetrics, refs: list[str], preds: list[str]) -> None:
     if denom:
         m["corpus_wer"] = out.wer * 100
         m["corpus_ins_rate"] = out.insertions / denom * 100
+        m["corpus_del_rate"] = out.deletions / denom * 100
+        m["corpus_sub_rate"] = out.substitutions / denom * 100
     # Per-utterance error and reference-length counts, kept so the corpus delta
     # between two models can carry a confidence interval. They are recorded
     # HERE because this is the only place the paired row set exists: same
@@ -467,7 +463,8 @@ def recompute_matched_corpus(
     dataset whose references disagree after truncation is dropped rather than
     silently pooled.
 
-    Sets `corpus_wer`, `corpus_ins_rate`, `corpus_datasets` and
+    Sets `corpus_wer`, `corpus_ins_rate`, `corpus_del_rate`, `corpus_sub_rate`,
+    `corpus_datasets` and
     `corpus_excluded` on each model in place.
     """
     if not model_metrics:

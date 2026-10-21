@@ -28,14 +28,6 @@ ExcludeOption = Annotated[
     typer.Option("--exclude", help="Model name pattern to exclude (repeatable)"),
 ]
 
-# OntoNotes' seven numeric labels. The ITN table scores these spans off the raw
-# reference, covers classes NER never labels at all (phone numbers, URLs,
-# versions), and separates a formatting miss from a recognition miss -- so the
-# entity table leaves them out and reports semantic recall only.
-ITN_COVERED_ENTITY_TYPES = frozenset(
-    {"CARDINAL", "DATE", "MONEY", "ORDINAL", "PERCENT", "QUANTITY", "TIME"}
-)
-
 
 class Entity(TypedDict):
     """One spaCy entity in a reference transcript."""

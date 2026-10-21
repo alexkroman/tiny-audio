@@ -315,6 +315,7 @@ class ASRProcessor(ProcessorMixin):
         encoder_conv_layers: list[ConvLayerSpec] | None = None,
         audio_token: str | None = None,
         lead_in_seconds: float = 0.0,
+        encoder_chunk_frames: int = 0,
     ):
         """Initialize the ASR processor.
 
@@ -326,6 +327,8 @@ class ASRProcessor(ProcessorMixin):
             audio_token: Placeholder token scattered with audio embeddings.
                 Must match `ASRConfig.audio_token` / `ASRModel.audio_token`;
                 defaults to AUDIO_TOKEN.
+            lead_in_seconds: Silence prepended to every clip.
+            encoder_chunk_frames: `ASRConfig.encoder_chunk_frames` (0: no chunking).
         """
         self.feature_extractor = feature_extractor
         self.tokenizer = tokenizer
@@ -340,6 +343,7 @@ class ASRProcessor(ProcessorMixin):
             encoder_conv_layers or DEFAULT_ENCODER_CONV_LAYERS
         )
         self.lead_in_seconds: float = float(lead_in_seconds)
+        self.encoder_chunk_frames: int = encoder_chunk_frames
 
     def _render_prompt(self, num_audio_tokens: int, text: str | None) -> torch.Tensor:
         """Tokenize one chat prompt carrying exactly `num_audio_tokens` placeholders."""
@@ -407,7 +411,9 @@ class ASRProcessor(ProcessorMixin):
             # documents as fixed on the model side, and it only shows up on a
             # ragged batch, so batch-1 eval never sees it.
             mel_lengths = audio_inputs["attention_mask"].sum(dim=-1).reshape(-1).long()
-            encoder_lengths = compute_encoder_output_length(mel_lengths, self.encoder_conv_layers)
+            encoder_lengths = compute_encoder_output_length(
+                mel_lengths, self.encoder_conv_layers, self.encoder_chunk_frames
+            )
             token_counts = self.projector.get_output_length(encoder_lengths).tolist()
 
         rows = [self._render_prompt(n, text) for n in token_counts]

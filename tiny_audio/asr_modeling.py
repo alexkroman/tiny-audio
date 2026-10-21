@@ -47,8 +47,14 @@ if TYPE_CHECKING:
         resolve_attn_implementation,
         resolve_decoder_attn_implementation,
     )
-    from .asr_config import GENERATION_DEFAULTS, ASRConfig, compute_encoder_output_length
+    from .asr_config import (
+        GENERATION_DEFAULTS,
+        ASRConfig,
+        compute_encoder_output_length,
+        is_qwen3_asr_encoder,
+    )
     from .asr_layers import unfreeze_encoder_top_layers
+    from .asr_packing import pack_rows
     from .asr_processing import (
         DEFAULT_TRANSCRIBE_PROMPT,
         ASRProcessor,
@@ -65,6 +71,7 @@ if TYPE_CHECKING:
         StateDictT,
     )
     from .projectors import MLPAudioProjector
+    from .qwen3_asr_encoder import Qwen3ASRAudioEncoder
 
     # None at runtime on a transformers without the architecture; see below.
     GraniteSpeech5Encoder: type[_GraniteSpeech5Encoder] | None
@@ -75,8 +82,14 @@ else:
             resolve_attn_implementation,
             resolve_decoder_attn_implementation,
         )
-        from .asr_config import GENERATION_DEFAULTS, ASRConfig, compute_encoder_output_length
+        from .asr_config import (
+            GENERATION_DEFAULTS,
+            ASRConfig,
+            compute_encoder_output_length,
+            is_qwen3_asr_encoder,
+        )
         from .asr_layers import unfreeze_encoder_top_layers
+        from .asr_packing import pack_rows
         from .asr_processing import (
             DEFAULT_TRANSCRIBE_PROMPT,
             ASRProcessor,
@@ -85,14 +98,21 @@ else:
         )
         from .asr_types import LoadStateDictResult, OutputLengthProjector, StateDictT
         from .projectors import MLPAudioProjector
+        from .qwen3_asr_encoder import Qwen3ASRAudioEncoder
     except ImportError:  # flat layout on the Hub: sibling modules, no package
         from asr_attention import (
             active_attn_implementation,
             resolve_attn_implementation,
             resolve_decoder_attn_implementation,
         )
-        from asr_config import GENERATION_DEFAULTS, ASRConfig, compute_encoder_output_length
+        from asr_config import (
+            GENERATION_DEFAULTS,
+            ASRConfig,
+            compute_encoder_output_length,
+            is_qwen3_asr_encoder,
+        )
         from asr_layers import unfreeze_encoder_top_layers
+        from asr_packing import pack_rows
         from asr_processing import (
             DEFAULT_TRANSCRIBE_PROMPT,
             ASRProcessor,
@@ -101,6 +121,7 @@ else:
         )
         from asr_types import LoadStateDictResult, OutputLengthProjector, StateDictT
         from projectors import MLPAudioProjector
+        from qwen3_asr_encoder import Qwen3ASRAudioEncoder
 
     # Newer than the transformers floor in pyproject.toml. Kept optional so a
     # checkpoint that does not need it still loads on an older install; the
@@ -544,7 +565,12 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         }
 
         encoder: nn.Module
-        if "whisper" in config.audio_model_id.lower():
+        if is_qwen3_asr_encoder(config.audio_model_id):
+            # Only the audio tower of the ASR checkpoint; see qwen3_asr_encoder.py.
+            encoder = Qwen3ASRAudioEncoder.from_pretrained(
+                config.audio_model_id, dtype, encoder_kwargs["attn_implementation"]
+            )
+        elif "whisper" in config.audio_model_id.lower():
             full_model = WhisperModel.from_pretrained(config.audio_model_id, **encoder_kwargs)
             encoder = full_model.encoder
             del full_model
@@ -1092,6 +1118,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             projector=self.projector,
             encoder_conv_layers=self.config.encoder_conv_layers,
             audio_token=self.audio_token,
+            encoder_chunk_frames=self.config.encoder_chunk_frames,
         )
 
     def load_lora_checkpoint(self, checkpoint_dir: str | PathLike[str]) -> bool:
@@ -1204,6 +1231,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
         return compute_encoder_output_length(
             audio_attention_mask.sum(dim=-1),
             self.config.encoder_conv_layers,
+            self.config.encoder_chunk_frames,
         )
 
     def _encode_audio(
@@ -1303,6 +1331,23 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
             inputs_embeds = _splice_audio(inputs_embeds, is_audio_token, audio_embeds)
 
+        # Padding-free packing (asr_packing.py): only the real tokens reach the
+        # decoder, so no attention or MLP compute is spent on padding.
+        if (
+            labels is not None
+            and attention_mask is not None
+            and self._can_pack(position_ids, past_key_values)
+        ):
+            packed = pack_rows(inputs_embeds, attention_mask, labels)
+            inputs_embeds, labels = packed.inputs_embeds, packed.labels
+            position_ids, attention_mask = packed.position_ids, None
+            kwargs.update(
+                cu_seq_lens_q=packed.cu_seq_lens,
+                cu_seq_lens_k=packed.cu_seq_lens,
+                max_length_q=packed.max_length,
+                max_length_k=packed.max_length,
+            )
+
         # Ask for the dataclass output explicitly. Every consumer below and in
         # generate() reads `outputs.loss` / `outputs.logits` by attribute, so
         # this only makes an existing assumption visible -- but it also keeps
@@ -1377,6 +1422,19 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             **kwargs,
         )
         return outputs
+
+    def _can_pack(self, position_ids: torch.Tensor | None, past_key_values: object) -> bool:
+        """Whether a labelled, padded batch can run padding-free: uncached and on FA2.
+
+        Only flash_attention_2 keeps packed rows apart (by their cumulative
+        lengths); SDPA or eager would let them attend to each other.
+        """
+        return (
+            bool(getattr(self.config, "pack_sequences", False))
+            and position_ids is None
+            and past_key_values is None
+            and active_attn_implementation(self.language_model.config) == "flash_attention_2"
+        )
 
     def prepare_inputs_for_generation(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         """Prepare inputs for generation, handling audio features for cached decoding."""
@@ -1762,7 +1820,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
 
         # Copy source files for auto-loading
         src_dir = Path(__file__).parent
-        siblings = ("projectors.py", "alignment.py", "diarization.py")
+        siblings = ("projectors.py", "alignment.py", "diarization.py", "qwen3_asr_encoder.py")
         for src in [*src_dir.glob("asr_*.py"), *(src_dir / name for name in siblings)]:
             shutil.copy(src, save_dir / src.name)
 

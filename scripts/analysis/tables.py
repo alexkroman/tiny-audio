@@ -5,11 +5,10 @@ from collections.abc import Callable, Iterable
 
 from rich.table import Table
 
-from scripts.analysis.common import ITN_COVERED_ENTITY_TYPES, console, sort_key, sort_key_desc
+from scripts.analysis.common import console, sort_key, sort_key_desc
 from scripts.analysis.metrics import DatasetMetrics, EntityStats, ModelMetrics, dataset_wer
-from scripts.itn import ITN_CLASSES
 
-# Minimum reference spans before an ITN class or entity type gets its own
+# Minimum reference entities before an entity type gets its own
 # column. At n<15 a single span is worth >6.7 points, so the cell reads as a
 # measurement while being dominated by sampling. Raise it as the eval set grows.
 MIN_CLASS_SUPPORT = 15
@@ -193,30 +192,27 @@ def _print_support_notes(support: Counter[str], shown: list[str], noun: str, kin
 
 
 def print_entity_table(model_metrics: Models) -> None:
-    """% of semantic reference entities absent from the prediction.
+    """% of reference entities absent from the prediction.
 
-    Numeric types are left to the ITN table (see ITN_COVERED_ENTITY_TYPES).
     Types below MIN_CLASS_SUPPORT are hidden: a single entity moves such a cell
     by >6 points, which is how "PERSON 100% missed" (1 of 1) came to sit next
     to "58.3%" (7 of 12) as though they were the same kind of number.
     """
     support = _support(m["entity_errors"] for m in model_metrics.values())
-    for etype in ITN_COVERED_ENTITY_TYPES:
-        support.pop(etype, None)
     if not support:
         return
     keep = {t for t, n in support.items() if n >= MIN_CLASS_SUPPORT}
     if not keep:
         best = ", ".join(f"{t}={n}" for t, n in support.most_common(4))
         console.print(
-            f"\n[yellow]Entity table skipped: no semantic type reaches {MIN_CLASS_SUPPORT} "
+            f"\n[yellow]Entity table skipped: no entity type reaches {MIN_CLASS_SUPPORT} "
             f"reference entities on the compared rows (best: {best}).[/yellow]\n"
             f"[dim]{KEYWORDS_HINT}[/dim]"
         )
         return
     types = [t for t in ENTITY_TYPE_ORDER if t in keep] + sorted(keep - set(ENTITY_TYPE_ORDER))
     table = _new_table(
-        "Missed Entity Errors (semantic types; numeric types in ITN)",
+        "Missed Entity Errors",
         ["Average", *types],
         bold_first=1,
     )
@@ -231,58 +227,6 @@ def print_entity_table(model_metrics: Models) -> None:
     _print_rows(table, rows)
     _print_support_notes(support, types, "entities", "type")
     console.print(
-        "[dim]% of reference entities absent from the prediction. "
-        "Numeric types (dates, money, counts) are scored in the ITN table below, "
-        "which separates a formatting miss from a recognition miss.[/dim]"
+        "[dim]% of reference entities absent from the prediction, both sides "
+        "normalized, so a formatting difference alone is not a miss.[/dim]"
     )
-
-
-def _itn_row(name: str, stats: dict[str, dict[str, int]], classes: list[str]) -> list[str]:
-    """One ITN table row: overall exact and loose-only rates, count, then per-class exact."""
-    total = sum(v["total"] for v in stats.values())
-    exact = sum(v["exact"] for v in stats.values())
-    loose = sum(v["loose"] for v in stats.values())
-    cells = [
-        name,
-        _pct(100 * exact / total if total else None),
-        _pct(100 * (loose - exact) / total if total else None),
-        str(total),
-    ]
-    for cls in classes:
-        v = stats.get(cls, {"total": 0, "exact": 0})
-        cells.append(_pct(100 * v["exact"] / v["total"] if v["total"] else None, digits=1))
-    return cells
-
-
-def print_itn_table(model_metrics: Models) -> None:
-    """Formatting of numbers, times, URLs, ... scored on the raw (un-normalized) text.
-
-    Only runs that persisted raw transcripts contribute; older runs carry no
-    formatting signal and are listed as missing rather than scored. Classes
-    below MIN_CLASS_SUPPORT reference spans are hidden; support is pooled across
-    models because every model is scored on the same references.
-    """
-    scored = [d for d in model_metrics.values() if d["itn_raw_samples"]]
-    skipped = sorted(d["display_name"] for d in model_metrics.values() if not d["itn_raw_samples"])
-    if scored:
-        support = _support(d["itn"] for d in scored)
-        classes = [c for c, _ in ITN_CLASSES if support[c] >= MIN_CLASS_SUPPORT]
-        table = _new_table(
-            "ITN Formatting (% of reference spans reproduced exactly, raw text)",
-            ["Exact", "Fmt-only err", "n", *classes],
-            bold_first=1,
-        )
-        rows = [_itn_row(d["display_name"], d["itn"], classes) for d in scored]
-        # Higher Exact% is better; sort_key_desc keeps "-" rows last.
-        _print_rows(table, rows, descending=True)
-        console.print(
-            "[dim]Exact = value and formatting both reproduced. "
-            "Fmt-only err = value present, formatting differs (e.g. '1250' for '1,250'). "
-            "The remainder is recognition error.[/dim]"
-        )
-        _print_support_notes(support, classes, "spans", "class")
-    if skipped:
-        console.print(
-            f"\n[dim]No raw transcripts for ITN scoring: {', '.join(skipped)} "
-            "(re-run `ta eval` to capture them).[/dim]"
-        )

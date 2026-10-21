@@ -95,9 +95,10 @@ VRAM_RECOMMENDED_KEY = f"recommended (x{OVERHEAD_FACTOR})"
 # Re-derive if a run's observed peak diverges: the inputs are all in the
 # wandb system metrics plus the static breakdown this script prints.
 ACTIVATION_CALIBRATION = 2.55
-# DataCollator._MAX_AUDIO_SECONDS -- every batch pads to its own longest row
-# and multiasr puts enough mass near the ceiling that the worst case is the
-# one to plan for.
+# DataCollator's default clip ceiling; data.max_audio_seconds overrides it,
+# and the encoder-tape estimate below reads that. Every batch pads to its own
+# longest row and multiasr puts enough mass near the ceiling that the worst
+# case is the one to plan for.
 MAX_AUDIO_SECONDS = 19.0
 # Frames per second entering the encoder's block stack, before
 # `encoder_conv_layers` subsampling. Granite's feature extractor emits 100 Hz
@@ -428,7 +429,8 @@ def _encoder_activation_bytes(
     # mel pairs to 50 Hz, so ~950 frames enter the block stack and
     # encoder_conv_layers halves twice to ~237. Using seq_len here instead
     # gave 82 and undercounted the tape ~3x.
-    enc_seq = int(MAX_AUDIO_SECONDS * ENCODER_FRAME_RATE_HZ)
+    max_audio_s = float(cfg.data.get("max_audio_seconds") or MAX_AUDIO_SECONDS)
+    enc_seq = int(max_audio_s * ENCODER_FRAME_RATE_HZ)
     # Same default as ASRConfig: unset means DEFAULT_ENCODER_CONV_LAYERS,
     # not "no subsampling".
     # Lazy, like the transformers/tiny_audio imports in build_plan.
@@ -602,7 +604,12 @@ def build_plan(experiment: str | None, overrides: list[str], seq_len: int) -> Pl
     audio_id = str(cfg.model.audio_model_id)
     text_id = str(cfg.model.text_model_id)
     enc_cfg = auto_config.from_pretrained(audio_id)
-    enc_inner = getattr(enc_cfg, "encoder_config", None) or enc_cfg
+    # Granite nests its encoder at `encoder_config`, Qwen3-ASR at `audio_config`.
+    enc_inner = (
+        getattr(enc_cfg, "encoder_config", None)
+        or getattr(enc_cfg, "audio_config", None)
+        or enc_cfg
+    )
     dec_cfg = auto_config.from_pretrained(text_id)
     text_cfg = dec_cfg.get_text_config() if hasattr(dec_cfg, "get_text_config") else dec_cfg
     encoder_dim = hidden_dim(enc_inner)

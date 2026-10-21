@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from .alignment import QwenForcedAligner
     from .asr_modeling import ASRModel
     from .asr_processing import (
+        CHUNK_MAX_S,
         audible_chunks,
         chunk_bounds,
         collate_chunks,
@@ -31,6 +32,7 @@ else:
         from .alignment import QwenForcedAligner
         from .asr_modeling import ASRModel
         from .asr_processing import (
+            CHUNK_MAX_S,
             audible_chunks,
             chunk_bounds,
             collate_chunks,
@@ -45,6 +47,7 @@ else:
         from alignment import QwenForcedAligner
         from asr_modeling import ASRModel
         from asr_processing import (
+            CHUNK_MAX_S,
             audible_chunks,
             chunk_bounds,
             collate_chunks,
@@ -128,6 +131,16 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             tokenizer=tokenizer,  # pyright: ignore[reportArgumentType]
             **kwargs,
         )
+
+    @property
+    def chunk_max_seconds(self) -> float:
+        """Longest chunk to cut long audio into: the model's trained-for length.
+
+        `ASRConfig.inference_chunk_seconds`; checkpoints saved before it existed
+        fall back to the 18 s they were trained for.
+        """
+        value = getattr(self.model.config, "inference_chunk_seconds", None)
+        return float(value) if value else CHUNK_MAX_S
 
     def _sampling_rate(self) -> int:
         """The feature extractor's sample rate (`__init__` always sets the extractor)."""
@@ -262,7 +275,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
             return super().__call__(inputs, **kwargs)
         array, sr = audio["array"], audio["sampling_rate"]
 
-        bounds = chunk_bounds(array, sr)
+        bounds = chunk_bounds(array, sr, self.chunk_max_seconds)
         if not kwargs:
             texts = self._transcribe_chunks(audible_chunks(array, bounds, sr), sr)
             return {"text": " ".join(t for t in texts if t)}
@@ -380,7 +393,7 @@ class ASRPipeline(transformers.AutomaticSpeechRecognitionPipeline):
         self, array: npt.NDArray[np.float32], sr: int, **kwargs: Any
     ) -> dict[str, Any]:
         """`{"text", "words"}` for the whole recording: chunk, transcribe, align, offset."""
-        bounds = chunk_bounds(array, sr)
+        bounds = chunk_bounds(array, sr, self.chunk_max_seconds)
         texts = self._transcribe_chunks(audible_chunks(array, bounds, sr), sr, **kwargs)
         result: dict[str, Any] = {"text": " ".join(t for t in texts if t)}
 

@@ -13,9 +13,8 @@
 # The model is the published recipe at laptop size: the Granite Speech 470M
 # encoder, its projector settings and the default LoRA setup, with
 # Qwen3.5-0.8B, the smallest Qwen3.5, as the decoder. The default recipe
-# moved to Whisper-large-v3 + Qwen3-1.7B on 2026-10-20; this preset keeps the
-# encoder the numbers above were measured with (Whisper-large is ~1.4x the
-# size and always encodes a padded 30 s window).
+# moved to Qwen3-ASR-1.7B's encoder + SmolLM3-3B on 2026-10-20; this preset
+# keeps the encoder the numbers above were measured with.
 #
 # Peak GPU memory is 8-10 GB, so it fits a 16 GB Mac. Runs on Apple Silicon,
 # a CUDA GPU (including a free Colab T4), or slowly on CPU. The trained
@@ -36,6 +35,10 @@ model:
   # Granite already emits 12.5 Hz; its top layers were CTC-trained there.
   projector_pool_stride: 1
   text_model_id: Qwen/Qwen3.5-0.8B
+  # Trained on the collator's default 19 s clips (librispeech_dev sets no
+  # max_audio_seconds), so it keeps the matching 18 s inference chunks rather
+  # than the default recipe's 28.
+  inference_chunk_seconds: 18.0
 
 data:
   num_proc: 1

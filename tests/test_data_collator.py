@@ -440,7 +440,7 @@ class TestBuildCollators:
                 tokenizer=tokenizer,
                 feature_extractor=feature_extractor,
                 projector=MockProjector(),
-                config=SimpleNamespace(encoder_conv_layers=None),
+                config=SimpleNamespace(encoder_conv_layers=None, encoder_chunk_frames=0),
                 audio_token="<audio>",
             ),
         )
@@ -469,7 +469,7 @@ class TestBuildCollators:
                 tokenizer=tokenizer,
                 feature_extractor=feature_extractor,
                 projector=MockProjector(),
-                config=SimpleNamespace(encoder_conv_layers=None),
+                config=SimpleNamespace(encoder_conv_layers=None, encoder_chunk_frames=0),
                 audio_token="<audio>",
             ),
         )
@@ -488,3 +488,29 @@ class TestBuildCollators:
         assert augmenter.corpus._files == [tmp_path / "noise" / "hum.wav"]
         assert augmenter.reverb_corpus is not None
         assert augmenter.reverb_corpus._files == [tmp_path / "noise" / "hum.wav"]
+
+
+def test_max_audio_seconds_is_configurable(
+    tokenizer: PreTrainedTokenizerBase,
+    feature_extractor: WhisperFeatureExtractor,
+    projector: MockProjector,
+) -> None:
+    """A data config can raise the clip ceiling (multiasr: 30 s); 19 s is the default."""
+    long_clip = create_sample("a long clip", duration_sec=25.0)
+    default = DataCollator(
+        tokenizer=tokenizer,
+        feature_extractor=feature_extractor,
+        sample_rate=16000,
+        projector=projector,
+    )
+    raised = DataCollator(
+        tokenizer=tokenizer,
+        feature_extractor=feature_extractor,
+        sample_rate=16000,
+        projector=projector,
+        max_audio_seconds=30.0,
+    )
+    assert default.max_audio_seconds == 19.0
+    assert raised._extract_audio_arrays([long_clip])[1]
+    with pytest.raises(ValueError, match="No valid audio"):
+        default._extract_audio_arrays([long_clip])

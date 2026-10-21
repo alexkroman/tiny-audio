@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import typer
+from omegaconf import OmegaConf
 
 from scripts.deploy import plan as plan_module
 from scripts.deploy import runpod
@@ -189,6 +190,30 @@ class TestDiskPlan:
         assert five == pytest.approx(one * 5)
         # The full Qwen3-0.6B decoder trains, so one checkpoint is GiB-scale.
         assert one > 1.0
+
+
+class TestEncoderActivationTape:
+    """A trainable encoder's tape scales with the configured clip ceiling."""
+
+    def _tape(self, max_audio_seconds: float | None) -> float:
+        data = {} if max_audio_seconds is None else {"max_audio_seconds": max_audio_seconds}
+        cfg = OmegaConf.create(
+            {
+                "training": {"per_device_train_batch_size": 8},
+                "model": {"encoder_conv_layers": [[0, 2, 2], [0, 2, 2]]},
+                "data": data,
+            }
+        )
+        return plan_module._encoder_activation_bytes(cfg, 4, 1024, 2)
+
+    def test_frozen_encoder_has_no_tape(self) -> None:
+        cfg = OmegaConf.create({"training": {}, "model": {}, "data": {}})
+        assert plan_module._encoder_activation_bytes(cfg, 0, 1024, 2) == 0.0
+
+    def test_longer_clips_mean_a_longer_tape(self) -> None:
+        default, raised = self._tape(None), self._tape(30.0)
+        assert default > 0
+        assert raised > default
 
 
 class TestBuildTrainingScript:

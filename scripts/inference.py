@@ -21,7 +21,7 @@ from transformers.masking_utils import sdpa_mask
 from tiny_audio.alignment import QwenForcedAligner
 from tiny_audio.asr_modeling import ASRModel
 from tiny_audio.asr_pipeline import ASRPipeline
-from tiny_audio.asr_processing import CHUNK_MAX_S, collate_chunks
+from tiny_audio.asr_processing import collate_chunks
 from tiny_audio.asr_types import PreparedChunk
 from tiny_audio.diarization import NemotronDiarizer
 
@@ -485,7 +485,9 @@ class GraphedDecoder:
         # 157); a row that hits it unfinished is redone on the full tier.
         # Calibrated on the longest chunk the pipeline cuts (prompt length
         # grows with audio), so any chunk up to that length fits.
-        longest = pipe.prepare_chunk(np.zeros(int(CHUNK_MAX_S * 16000), np.float32), 16000)
+        longest = pipe.prepare_chunk(
+            np.zeros(int(pipe.chunk_max_seconds * 16000), np.float32), 16000
+        )
         self.short_max_frames: int = int(longest["attention_mask"].shape[-1])
         self.short_enabled: bool = prompt_tokens(pipe, longest) + SHORT_BUDGET <= SHORT_CACHE_LEN
         self._caches: dict[tuple[int, int], StaticCache] = {}

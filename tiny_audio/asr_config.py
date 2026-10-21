@@ -49,23 +49,50 @@ def is_time_major_encoder(audio_model_id: str | None) -> bool:
     return any(m in (audio_model_id or "").lower() for m in _TIME_MAJOR_ENCODER_MARKERS)
 
 
+# Qwen3-ASR's encoder (tiny_audio/qwen3_asr_encoder.py) runs its convolutions on
+# independent 1 s chunks of 100 mel frames, three (pad 1, kernel 3, stride 2)
+# layers each, so a full chunk yields 13 frames: transformers'
+# `_get_feat_extract_output_lengths` for that model, restated here.
+QWEN3_ASR_CHUNK_FRAMES = 100
+QWEN3_ASR_CONV_LAYERS: list[ConvLayerSpec] = [(1, 3, 2), (1, 3, 2), (1, 3, 2)]
+
+
+def is_qwen3_asr_encoder(audio_model_id: str | None) -> bool:
+    """Whether `audio_model_id` names a Qwen3-ASR checkpoint (its encoder is used)."""
+    return "qwen3-asr" in (audio_model_id or "").lower()
+
+
 @overload
 def compute_encoder_output_length(
-    mel_length: int, conv_layers: Sequence[ConvLayerSpec] | None = None
+    mel_length: int,
+    conv_layers: Sequence[ConvLayerSpec] | None = None,
+    chunk_frames: int | None = None,
 ) -> int: ...
 @overload
 def compute_encoder_output_length(
-    mel_length: "torch.Tensor", conv_layers: Sequence[ConvLayerSpec] | None = None
+    mel_length: "torch.Tensor",
+    conv_layers: Sequence[ConvLayerSpec] | None = None,
+    chunk_frames: int | None = None,
 ) -> "torch.Tensor": ...
 def compute_encoder_output_length(
-    mel_length: "int | torch.Tensor", conv_layers: Sequence[ConvLayerSpec] | None = None
+    mel_length: "int | torch.Tensor",
+    conv_layers: Sequence[ConvLayerSpec] | None = None,
+    chunk_frames: int | None = None,
 ) -> "int | torch.Tensor":
     """Apply encoder conv layer formulas to compute output length.
 
     Works with both Python ints and torch tensors of mel lengths; the formula
     `(L + 2*p - (k-1) - 1) // s + 1` per layer is identical for both.
+
+    With `chunk_frames`, the encoder convolves independent chunks of that many
+    mel frames (Qwen3-ASR): every full chunk contributes the same count and the
+    remainder its own, and an empty remainder contributes zero.
     """
     layers = conv_layers if conv_layers is not None else DEFAULT_ENCODER_CONV_LAYERS
+    if chunk_frames:
+        per_chunk = compute_encoder_output_length(chunk_frames, layers)
+        rest = compute_encoder_output_length(mel_length % chunk_frames, layers)
+        return (mel_length // chunk_frames) * per_chunk + rest
     length = mel_length
     for padding, kernel_size, stride in layers:
         length = (length + 2 * padding - (kernel_size - 1) - 1) // stride + 1
@@ -112,6 +139,18 @@ class ASRConfig(transformers.PretrainedConfig):
         # Encoder conv layers: list of (padding, kernel_size, stride) tuples
         # Default is Whisper/GLM-ASR structure: conv1(k=3,s=1,p=1) + conv2(k=3,s=2,p=1)
         encoder_conv_layers: list[ConvLayerSpec] | None = None,
+        # Mel frames per independently convolved encoder chunk (Qwen3-ASR's
+        # 100); None picks it from `audio_model_id`, 0 means no chunking.
+        encoder_chunk_frames: int | None = None,
+        # Pack labelled batches padding-free when the decoder runs FA2
+        # (asr_packing.py). Ignored under SDPA/eager, where it would be wrong.
+        pack_sequences: bool = True,
+        # Longest chunk the pipeline cuts long audio into. Must stay under the
+        # clip length the model trained on: a model trained on <=19 s skipped
+        # and paraphrased 25-30 s chunks (E22 8.00 -> 9.41, 2026-10-09). 18 s
+        # matches that 19 s training cap and is what older checkpoints, whose
+        # config.json lacks this key, keep using.
+        inference_chunk_seconds: float = 18.0,
         audio_sample_rate: int = 16000,
         # Whether to forward the mel padding mask into the audio encoder.
         # This matters a lot for Granite: it uses block attention over fixed
@@ -235,8 +274,16 @@ class ASRConfig(transformers.PretrainedConfig):
         self.encoder_conv_layers: list[ConvLayerSpec] = (
             encoder_conv_layers or DEFAULT_ENCODER_CONV_LAYERS
         )
+        self.pack_sequences: bool = pack_sequences
+        self.inference_chunk_seconds: float = inference_chunk_seconds
+        self.encoder_chunk_frames: int = (
+            (QWEN3_ASR_CHUNK_FRAMES if is_qwen3_asr_encoder(audio_model_id) else 0)
+            if encoder_chunk_frames is None
+            else encoder_chunk_frames
+        )
+        # Qwen3-ASR's encoder takes the mel mask to drop padding itself.
         self.encoder_attention_mask: bool = (
-            is_time_major_encoder(audio_model_id)
+            (is_time_major_encoder(audio_model_id) or is_qwen3_asr_encoder(audio_model_id))
             if encoder_attention_mask is None
             else encoder_attention_mask
         )

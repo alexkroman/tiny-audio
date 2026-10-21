@@ -215,7 +215,22 @@ def compare(
         lambda ds: ds.get("ins_rate"),
         lambda v: f"{v:.2f}%",
     )
+    tables.print_dataset_table(
+        model_metrics,
+        datasets,
+        f"Deletion Rate (Dropped Words) ({coverage})",
+        ("Corpus", lambda m: m.get("corpus_del_rate")),
+        lambda ds: ds.get("del_rate"),
+        lambda v: f"{v:.2f}%",
+    )
+    tables.print_dataset_table(
+        model_metrics,
+        datasets,
+        f"Substitution Rate (Wrong Words) ({coverage})",
+        ("Corpus", lambda m: m.get("corpus_sub_rate")),
+        lambda ds: ds.get("sub_rate"),
+        lambda v: f"{v:.2f}%",
+    )
     print_corpus_cis(model_metrics, "WER", _wer_series)
     tables.print_word_count_table(model_metrics)
     tables.print_entity_table(model_metrics)
-    tables.print_itn_table(model_metrics)

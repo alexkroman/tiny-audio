@@ -89,6 +89,8 @@ class DataCollator:
         audio_token: str = "<audio>",
         augmenter: BatchAugmenter | None = None,
         prompt: str | None = None,
+        encoder_chunk_frames: int = 0,
+        max_audio_seconds: float = 19.0,
     ) -> None:
         """Keep the tokenizer, feature extractor and projector a batch is built from."""
         # Training batches only: the eval collator is built without one.
@@ -106,6 +108,8 @@ class DataCollator:
         self.encoder_conv_layers: Sequence[ConvLayerSpec] = (
             encoder_conv_layers or DEFAULT_ENCODER_CONV_LAYERS
         )
+        self.encoder_chunk_frames = encoder_chunk_frames
+        self.max_audio_seconds = max_audio_seconds
         # Must match ASRModel.audio_token -- the collator emits this string and
         # forward() locates the scatter positions by its token id.
         self.audio_token = audio_token
@@ -126,6 +130,11 @@ class DataCollator:
             tokenizer=tokenizer, max_length=4096
         )
 
+    # The default ceiling; `data.max_audio_seconds` overrides it per run
+    # (multiasr: 30 s since 2026-10-20, when padding-free packing made a long
+    # clip cost only its own tokens -- see tiny_audio/asr_packing.py). The
+    # history below is why it was 19 s.
+    #
     # Whisper's feature extractor pads/truncates to a fixed 30s window. Audio
     # longer than this is silently truncated while the label is kept whole,
     # training the model to transcribe content it never sees. Drop those rows.
@@ -185,7 +194,7 @@ class DataCollator:
         # _MAX_AUDIO_SECONDS), so they skip the full-array scan and label
         # normalization below.
         duration_s = audio.size / self.sample_rate
-        if not self._MIN_AUDIO_SECONDS <= duration_s <= self._MAX_AUDIO_SECONDS:
+        if not self._MIN_AUDIO_SECONDS <= duration_s <= self.max_audio_seconds:
             return False
         if not np.isfinite(audio).all():
             return False
@@ -280,7 +289,9 @@ class DataCollator:
         audio_attention_mask: torch.Tensor = audio_out["attention_mask"]
         input_features: torch.Tensor = audio_out["input_features"]
         mel_lengths = audio_attention_mask.sum(dim=-1)
-        encoder_lengths = compute_encoder_output_length(mel_lengths, self.encoder_conv_layers)
+        encoder_lengths = compute_encoder_output_length(
+            mel_lengths, self.encoder_conv_layers, self.encoder_chunk_frames
+        )
         token_counts_tensor = self.projector.get_output_length(encoder_lengths).to(torch.long)
         audio_token_counts: list[int] = token_counts_tensor.tolist()
 
@@ -306,6 +317,8 @@ def build_collators(
         "sample_rate": data_cfg.sample_rate,
         "projector": model.projector,
         "encoder_conv_layers": model.config.encoder_conv_layers,
+        "encoder_chunk_frames": model.config.encoder_chunk_frames,
+        "max_audio_seconds": float(data_cfg.get("max_audio_seconds") or 19.0),
         "audio_token": model.audio_token,
         # data.single_prompt: every row, train and eval, under the shipped
         # inference prompt, so no prompt can stand for a kind of audio.
