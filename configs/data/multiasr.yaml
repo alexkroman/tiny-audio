@@ -74,6 +74,9 @@
 #
 # Two counts: raw load_dataset() rows, and rows surviving every filter
 # (duration <0.8s / >19.0s, empty normalized label, CV down_votes, the
+# [2026-10-22: the floor is now 0.1 s, so AMI (and NOTSOFAR / EdAcc) deliver
+# ~30% more rows than the effective counts below, and the Gigaspeech audiobook
+# exclusion is gone (+253K rows); the table predates both.]
 # Gigaspeech audiobook exclusion, the TEDLIUM leading-<unk> drop, and the
 # LibriHeavy duration pre-filter added below).
 # ┌──────────────────────────┬───────────┬───────────┬─────────┐
@@ -529,46 +532,14 @@ datasets:
     text_punct: true
     train_splits: [train]
     eval_splits: []
-    # Exclude the audiobook tier. Measured 2026-09-18 via the HF
-    # datasets-server `statistics` endpoint:
-    #             audiobook   youtube   podcast
-    #   m/train     26.2%      42.1%     31.7%   (62,770-row partial scan)
-    #   dev/valid    0.0%      55.3%     44.7%   (FULL 6,750-row scan)
-    # The split we are scored on contains zero audiobook, yet a quarter of
-    # the Gigaspeech rows we train on are audiobook -- a register that is 0%
-    # of the eval, and one the mix already over-supplies via ~885K LibriHeavy
-    # audiobook rows.
-    #
-    # This is free, which is why it is worth doing even though the Gigaspeech
-    # WER gap is not statistically significant (+0.41 at n=500, CI
-    # [-0.04, +0.85]). MEASURED on the 2026-09-19 run: 253,247 of 910,140
-    # m/train rows are audiobook (27.8%), leaving 656,893 -- still above the
-    # 600K target_samples cap below, which _resample_to_target applies AFTER
-    # this filter. So Gigaspeech contributes exactly 600K rows either way and
-    # row count, mix share and download are all UNCHANGED. The ~167K
-    # out-of-register rows that used to land in the 600K sample are swapped
-    # for in-register ones, not removed; there is no volume to make up.
-    #
-    # Headroom is only 56,893 rows (9.5%). Exclude a second tier here and the
-    # cap stops binding, at which point _resample_to_target silently
-    # repeat-pads rows to reach 600K -- check the dropped/kept counts in the
-    # exclude_where log line before adding one.
-    #
-    # `source` is a ClassLabel (ids 0=audiobook, 1=podcast, 2=youtube), not a
-    # string column; _prepare_split resolves these names to ids. Comparing
-    # rows against the names directly matches nothing -- that bug made this
-    # filter drop 0/910140 rows on its first run.
-    #
-    # Must be applied before the keep_cols pruning in _prepare_split, which
-    # is why the filter is declared here and executed early; see
-    # `exclude_where` in scripts/train.py.
-    #
-    # UNCAPPED 2026-09-22 (was target_samples: 600000). M's natural size is
-    # 910,140; 656,893 after the audiobook exclusion, so this adds the
-    # 56,893 in-register rows the cap used to trim. Still the M tier, not L.
-    exclude_where:
-      column: source
-      values: [audiobook]
+    # Audiobook tier INCLUDED again (2026-10-22). It was excluded 2026-09-18
+    # (253,247 of 910,140 m/train rows, 27.8%) because GigaSpeech dev is 0%
+    # audiobook and LibriHeavy already supplies read speech; that cut was never
+    # shown to help (Giga gap +0.41 at n=500, CI [-0.04, +0.85]). Uncapped since
+    # 2026-09-22, so this ADDS the 253K rows (656,893 -> 910,140) rather than
+    # swapping them: Giga's share of the mix grows. The `exclude_where`
+    # mechanism (scripts/train.py) remains for other filters; note `source` is
+    # a ClassLabel (0=audiobook, 1=podcast, 2=youtube) if it is reinstated.
 
   # Gigaspeech dev split — official repo ships dev/test as separate configs
   # (same pattern as the fixie mirror). The `dev` config exposes its data
@@ -830,8 +801,15 @@ dataset_cache_dir: ${hydra:runtime.cwd}/datasets_cache
 # epoch where the question is whether eval stops improving at the epoch
 # boundary, as stage_1's 2-epoch run did. Batch 128 eval keeps the ~2x
 # longer eval pass small next to the ~2000 steps between evals. Splits
-# smaller than 1000 (TEDLIUM 591) contribute everything they have.
-max_eval_samples_per_dataset: 1000
+# smaller than the cap (TEDLIUM 591) contribute everything they have.
+#
+# Raised 1000 -> 3000 (2026-10-22), for coverage rather than noise: the cap
+# is now a seeded random sample of each split (DatasetLoader.load), so more
+# rows means more meetings / calls / speakers. MEASURED cost at 1000: ~7.6k
+# clips in ~30 s (W&B s8jyxw2i, eval batch 128); 3000 is ~21.6k clips,
+# ~85 s per eval, ~1% of a one-pass run. Changing the eval set moves absolute
+# eval loss: re-score a reference checkpoint before comparing across runs.
+max_eval_samples_per_dataset: 3000
 
 # ONE physical pass, exactly the rows the mix table above describes.
 #
@@ -842,6 +820,8 @@ max_eval_samples_per_dataset: 1000
 # capped source draws every eligible row first and repeat-pads only the
 # shortfall; uncapped sources are repeated 2x, as a second epoch would have.
 # Per-step mix share is unchanged. The loader raises if both are set.
+# While no source sets target_samples, expansion=2 is an exact replay, which
+# overfit the full fine-tune in its second pass (s8jyxw2i; production.yaml).
 epoch_expansion: 1
 
 # Training-batch degradation (scripts/train_augment.py), matched to the Open
@@ -886,7 +866,16 @@ reverb_prob: 0.1
 reverb_corpus:
   philgzl/dns5: "data/rir-*.parquet"
 noise_prob: 0.35
-noise_snr_db: [-5.0, 20.0]
+# 0 dB floor (2026-10-22, was URGENT's -5). Targets are unchanged, so a clip
+# mixed below 0 dB (noise louder than speech, often babble) still demands the
+# full sentence when the words are inaudible: the loss rewards guessing fluent
+# text from the decoder's prior. That is the failure granite-qwen-500 shows on
+# short, quiet, low-contrast clips (38 rows of fluent unrelated text, median
+# 3.6 s), and the first degraded run already measured its cost on clean audio
+# (AMI 13 -> 29, GigaSpeech 121 -> 165 hallucinated clips; notes below). The
+# trade: training below 0 dB bought 5.1 WER on URGENT's sub-0 dB clips, so
+# expect to give some of that back; compare URGENT noisy vs clean when scoring.
+noise_snr_db: [0.0, 20.0]
 noise_corpus:
   # DNS5 AudioSet + Freesound noise (CC BY 4.0), shards in name order.
   # URGENT's validation took the first 1/8 by name of each bandwidth group;

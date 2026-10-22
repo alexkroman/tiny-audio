@@ -556,3 +556,45 @@ class TestEvalCollator:
         monkeypatch.setattr("transformers.Trainer.get_eval_dataloader", parent)
         assert trainer.get_eval_dataloader() == "eval"
         assert trainer.data_collator == "train"
+
+
+class TestEvalCap:
+    """max_eval_samples_per_dataset takes a seeded random sample, not the head."""
+
+    @staticmethod
+    def _val(cap: int, n: int, seed: int = 42) -> list[str]:
+        """Texts of the eval split DatasetLoader.load builds from ``n`` rows under ``cap``."""
+        fake = Dataset.from_dict(
+            {
+                "audio": [{"array": np.zeros(160, dtype=np.float32), "sampling_rate": 16000}] * n,
+                "text": [f"r{i}" for i in range(n)],
+            }
+        ).cast_column("audio", Audio(sampling_rate=16000))
+        entry = {
+            "path": "fake/eval",
+            "audio_column": "audio",
+            "text_column": "text",
+            "train_splits": [],
+            "eval_splits": ["validation"],
+        }
+        cfg = _make_cfg([entry])
+        cfg.data.max_eval_samples_per_dataset = cap
+        cfg.training.seed = seed
+        with patch("scripts.train.load_dataset", return_value=fake):
+            _, val = DatasetLoader(cfg).load()
+        assert val is not None
+        return list(val["text"])
+
+    def test_capped_split_is_sampled_across_the_whole_split(self) -> None:
+        """Splits are stored grouped by meeting/speaker; the head is one group."""
+        texts = self._val(cap=20, n=200)
+        assert len(texts) == 20
+        assert texts != [f"r{i}" for i in range(20)], "cap must not take the head slice"
+        assert max(int(t[1:]) for t in texts) >= 100, "sample should reach past the head"
+
+    def test_sample_is_identical_across_loads(self) -> None:
+        """Every checkpoint scores the same rows, so eval stays a paired comparison."""
+        assert self._val(cap=20, n=200) == self._val(cap=20, n=200)
+
+    def test_split_under_cap_is_kept_whole_and_in_order(self) -> None:
+        assert self._val(cap=50, n=30) == [f"r{i}" for i in range(30)]

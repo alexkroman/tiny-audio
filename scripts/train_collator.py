@@ -156,13 +156,20 @@ class DataCollator:
     # headroom for auto_find_batch_size (observed batch=70 at max=30s →
     # expected ~100+ at max=19s for the same mix without WHAM).
     _MAX_AUDIO_SECONDS = 19.0
-    # Sub-0.8s clips are dominated by boundary-cut segments and isolated
-    # backchannels ("yeah", "ok", "umhum") where the audio span and the
-    # reference transcript don't actually line up — eval-side analysis on
-    # Peoples / CV / Switchboard / AMI showed these as the bulk of >=50%
-    # WER samples, with model output reflecting adjacent content rather
-    # than the labeled token.
-    _MIN_AUDIO_SECONDS = 0.8
+    # A technical floor, not a data policy (2026-10-22, was 0.8 s). Granite's
+    # feature extractor crashes under 257 samples (16 ms: its STFT reflect-pads
+    # 256), and under 70 ms the encoder emits zero audio tokens, leaving a
+    # label with no audio to attend to. 0.1 s guarantees at least one token.
+    #
+    # The old 0.8 s floor dropped ~31% of AMI rows (its backchannels: "yeah",
+    # "ok", single words) on the claim that their labels do not line up with
+    # the audio. Granite's own CTC head disagrees for AMI: on 11.6k AMI test
+    # clips it matched the label exactly 86-87% of the time from 0.2 s up, as
+    # often as at 0.5-0.8 s, collapsing only under 0.2 s. With no clip under
+    # 0.8 s in training, the model had never seen a short clip answered
+    # briefly, and filled short weak audio with fluent unrelated text
+    # (granite-qwen-500: 38 such rows, median 3.6 s).
+    _MIN_AUDIO_SECONDS = 0.1
 
     @staticmethod
     def _load_mono_audio(feature: dict[str, Any]) -> npt.NDArray[Any]:

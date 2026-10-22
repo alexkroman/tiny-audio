@@ -332,9 +332,16 @@ class TestExtractAudioArraysFilters:
         arrays, _ = collator._extract_audio_arrays([ok])
         assert len(arrays) == 1
 
+    def test_keeps_short_backchannels(self, collator: DataCollator) -> None:
+        # AMI's sub-0.8 s backchannels align with their audio from 0.2 s up, and
+        # without them the model never learns a short clip gets a short answer.
+        yeah = create_sample("yeah", duration_sec=0.3)
+        arrays, kept = collator._extract_audio_arrays([yeah])
+        assert len(arrays) == 1
+        assert kept[0]["text"] == "yeah"
+
     def test_drops_audio_under_min_duration(self, collator: DataCollator) -> None:
-        # Sub-floor clips are boundary-cut segments and isolated backchannels
-        # where the audio span and the reference transcript don't line up.
+        # Sub-floor clips yield zero audio tokens (or crash the STFT).
         good = create_sample("normal length", duration_sec=1.0)
         too_short = create_sample("yeah", duration_sec=DataCollator._MIN_AUDIO_SECONDS / 2)
         arrays, kept = collator._extract_audio_arrays([good, too_short])

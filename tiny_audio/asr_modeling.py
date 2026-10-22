@@ -992,7 +992,7 @@ class ASRModel(PreTrainedModel, GenerationMixin):
             # statistics anyway. Granite Speech 5.0 carries 16 BatchNorm1d and
             # zero Dropout, and for non-Whisper extractors the collator pads to
             # the batch longest (`DataCollator._audio_padding`) with
-            # group_by_length off, so clips spanning 0.8-19.0s leave a large
+            # group_by_length off, so clips spanning 0.1-30s leave a large
             # pad fraction. Granite's conv module zeroes pad positions and THEN
             # runs BatchNorm1d over the full padded (B, C, T); BN reduces over
             # B*T, so those zeros are counted as data -- deflating the mean and

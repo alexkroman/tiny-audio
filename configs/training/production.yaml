@@ -47,23 +47,34 @@ decoder_learning_rate: 2e-5
 # does not silently inherit `learning_rate` (1e-3) as its encoder LR.
 encoder_learning_rate: 1e-5
 
-# 0.01: this key is the DECODER group's weight decay (scripts/train.py sets
-# `dec_wd = base_wd`). stage_1's full fine-tune ran 0.01 after 0.0 opened a
-# ~0.17 eval-train gap by step 28k (run 4j97atjp). The LoRA recipe used 0.0,
-# standard for adapters. If the rare-token-drift signature appears, route
-# embed_tokens to the no-decay group rather than reverting this.
-weight_decay: 0.01
-# The projector is the ONLY group carrying decay. ~15% shrink over this
-# schedule at lr 1e-3, and it is the only force opposing the projector's
-# output-scale growth (~48x embed_tokens RMS by step 13k on an earlier run,
-# then plateaued, with no measured loss cost).
-projector_weight_decay: 0.01
+# 0.0 (2026-10-22, was 0.01): this key is the DECODER group's weight decay
+# (scripts/train.py sets `dec_wd = base_wd`). At decoder lr 2e-5, AdamW's
+# decoupled decay of 0.01 shrinks the weights by lr x wd = 2e-7 per step,
+# ~0.2% over a one-pass cosine schedule: too weak to regularize, and it pulls
+# toward zero rather than toward the pretrained weights. 0.0 is the HF Trainer
+# and TRL default. stage_1 once ran 0.01 after 0.0 opened a ~0.17 eval-train
+# gap by step 28k (run 4j97atjp), but decay this weak is an unlikely cause of
+# a gap that size; one pass (num_train_epochs below) is what holds the gap
+# now. If eval-train opens up again, look there first. embed_tokens/lm_head sit
+# in the no-decay group either way (decay_parameter_ids).
+weight_decay: 0.0
+# 0.0 (2026-10-22, was 0.01): no group carries decay now. At lr 1e-3, 0.01
+# shrank the projector ~9% over a one-pass schedule, the only force opposing
+# its output-scale growth. That growth (~48x embed_tokens RMS by step 13k on
+# an earlier run) plateaued with no measured loss cost, so the decay was
+# guarding against nothing observed. Check the projector output RMS over
+# embed_tokens RMS on the final weights (no longer logged during training): if
+# it climbed far past ~48x instead of plateauing, this is the lever to restore.
+projector_weight_decay: 0.0
 encoder_weight_decay: 0.0
 
-# Adam eps: bf16 default 1e-8 can underflow in `1 / sqrt(v_hat + eps)` once
-# second moments get small. 1e-6 stays well within bf16's ~7-bit mantissa
-# range. Matches LLaMA / Mistral / Qwen pretraining convention for bf16.
-adam_epsilon: 1e-6
+# Adam eps 1e-8 (2026-10-22, was 1e-6): the PyTorch/HF default and the usual
+# fine-tuning value. The old 1e-6 guarded against bf16 underflow, but the
+# trained weights and AdamW state here are float32 (model_dtype: float32), so
+# that risk does not apply. 1e-6 did damp updates for parameters whose
+# gradient RMS sits near 1e-6 (rarely seen embed_tokens rows); if the
+# rare-token-drift signature appears, this is one lever to revisit.
+adam_epsilon: 1e-8
 
 # 1.0, the HF Trainer default and stage_1's full fine-tune cap. Post-warmup
 # grad norm on the LoRA stack ran median 0.634 / max 2.268 at batch 96, so
@@ -85,18 +96,23 @@ lr_scheduler_type: cosine
 
 # Training
 max_steps: -1
-# TWO passes (2026-10-21, was one). `data.epoch_expansion`
+# ONE pass (2026-10-22; two for a day). `data.epoch_expansion`
 # (configs/data/multiasr.yaml) stays 1; the loader raises if both it and this
 # are >1, because they compound.
 #
-# ~3.5M loader rows (more now that the 30 s cap keeps LibriHeavy's long tail)
-# at effective batch 256 is ~14k optimizer steps per pass, ~28k total.
+# MEASURED: one pass is ~18.2k optimizer steps at effective batch 256
+# (s8jyxw2i), not the ~14k first estimated.
 #
-# Watch the epoch boundary: stage_1's 2-epoch run (ppbo0oqn, Qwen3-0.6B full
-# fine-tune) hit its best eval loss exactly at the end of epoch 1 and bounced
-# ~0.01 worse for the whole second pass while train loss kept falling, the
-# overfit signature that made it one epoch. Keep the epoch-1 checkpoint.
-num_train_epochs: 2
+# Why one: the 2-epoch run s8jyxw2i (granite NC + Qwen3-0.6B full fine-tune)
+# hit its best eval loss, 0.3998, at step 18k (epoch 0.99). At the boundary
+# train loss stepped 0.26 -> 0.24 within 50 steps, and eval loss rose at every
+# checkpoint after it, to 0.4213 at 30k. Grad norm held ~0.85 throughout, so
+# this is memorization of replayed rows, not instability. stage_1's 2-epoch
+# run (ppbo0oqn) showed the same signature. Every source in the mix is
+# uncapped, so a second pass is an exact replay, and the meeting x4 / EdAcc x3
+# source_weights already repeat those rows within one pass. For more compute,
+# add unique data rather than passes.
+num_train_epochs: 1
 seed: 44
 
 # 64 per device x 1 accumulation, sized for Qwen3.5-2B on an RTX PRO 6000
@@ -105,13 +121,17 @@ seed: 44
 # 1e-3 / 1e-4 and max_grad_norm 1.0 mean what they meant there and the run
 # compares cleanly against it.
 #
-# QWEN3-0.6B FULL FINE-TUNE (2026-10-21): 256 x 1. MEASURED at 64 x 1: ~27%
-# of the 95 GiB card. Split as ~12 GiB static (float32 decoder weights +
-# grads + AdamW ~10, bf16 encoder ~1, projector) plus ~14 GiB of activations
-# (~0.22 GiB per clip), 256 projects to ~68 GiB (~72%), leaving headroom for
-# batches heavy in 30 s clips (packing makes memory follow a batch's total
-# tokens). One reading, not a run's peak: record the W&B peak here, and if it
-# OOMs step down to 192 BEFORE rerunning (the seeded order replays an OOM).
+# QWEN3-0.6B FULL FINE-TUNE: 304 x 1 (2026-10-22, was 256). MEASURED at
+# 256 x 1 over the whole of W&B s8jyxw2i (RTX PRO 6000, 95.6 GiB): peak
+# 73.4 GiB (77%), median 70-73 GiB every hour, and the peak came in a
+# training step, not eval. Peak sits only ~2.5 GiB over median: packing makes
+# memory follow a batch's total tokens, and 256-clip batches average out.
+# With the 64 x 1 reading (~27%, ~26 GiB) that fits ~10 GiB static + ~0.25
+# GiB per clip, so 304 projects to ~86 GiB peak (~90%), and 320 to ~90 GiB
+# (~94%), too close for an OOM the seeded order would replay on resume.
+# Record the 304 peak here; if it OOMs, step down to 288 BEFORE rerunning.
+# The GPU was already saturated at 256 (98% util, 95% SM active), so expect
+# fewer optimizer steps per pass (~15.3k vs 18.2k), not more samples/sec.
 #
 # SMOLLM3-3B (2026-10-20): 64 x 1 OOMed on the RTX PRO 6000 (93.6 GiB in
 # use, 92.7 allocated by PyTorch, failing a 1.39 GiB allocation). Its 36
@@ -144,16 +164,17 @@ seed: 44
 # ~1.87x the 2B's 1.12) plus 10.9 GiB static; W&B rjid9zj6 (H100, batch 30)
 # peaked at 97.3% and the planner undershoots it by ~5%. It ran 28 x 2 on
 # an H100 and was planned at 32 x 2 on the RTX PRO 6000.
-per_device_train_batch_size: 256
+per_device_train_batch_size: 304
 # Half of train: eval holds no activations for backward, but shares the card
 # with the full training state.
 per_device_eval_batch_size: 128
-# 1: effective batch 256 (2026-10-21; it was 64, the batch every LR here was
-# tuned at). LRs are UNCHANGED: the frozen run found samples seen, not steps,
-# to be the currency (eval CE overlaid at matched samples despite ~1.6x the
-# steps), so 4x fewer, 4x larger steps are expected to track at matched
-# samples. Warmup stays 1000 STEPS, which is now 4x more samples. If loss
-# lags the batch-64 curves at matched samples, sqrt-scale the LRs (x2).
+# 1: effective batch 304 (2026-10-22; 256 on 2026-10-21, and 64 before that,
+# the batch every LR here was tuned at). LRs are UNCHANGED: the frozen run
+# found samples seen, not steps, to be the currency (eval CE overlaid at
+# matched samples despite ~1.6x the steps), so ~4.75x fewer, larger steps are
+# expected to track at matched samples. Warmup stays 1000 STEPS, which is now
+# ~4.75x more samples. If loss lags the batch-64 curves at matched samples,
+# sqrt-scale the LRs (~x2.2).
 # The frozen run showed samples, not optimizer steps, are the currency:
 # eval CE for y1tulo4j overlaid top4 (jscyrgkt) at matched samples despite
 # ~1.6x the steps.
