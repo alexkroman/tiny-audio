@@ -1,6 +1,6 @@
 """Padding-free packing of a labelled decoder batch for FlashAttention's varlen kernels.
 
-Training batches are padded to their longest row, and the clips run 0.8-19 s,
+Training batches are padded to their longest row, and the clips run 0.1-30 s,
 so a large share of every step's decoder compute (attention AND MLP) went to
 padding. Packing keeps only the real tokens: the batch's rows are concatenated
 into one `(1, total_tokens)` sequence, and FlashAttention's variable-length

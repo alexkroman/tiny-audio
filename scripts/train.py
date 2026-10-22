@@ -524,11 +524,18 @@ class DatasetLoader:
             # splits (e.g. AMI, Switchboard) because the global
             # max_eval_samples cap filled up on early-list splits (TEDLIUM
             # + head of Peoples val) before reaching them.
+            #
+            # Seeded shuffle before the cap: eval splits are stored grouped by
+            # meeting / call / speaker, so a head slice of AMI validation
+            # (~13k segments, ~18 meetings) was ~1-2 meetings, and IHM and SDM
+            # are the same meetings on different mics. The fixed seed keeps
+            # the rows identical across checkpoints, so eval stays a paired
+            # comparison.
             eval_cap_per_dataset = self.config.get("max_eval_samples_per_dataset")
             for val_split in val_splits:
                 ds = self._prepare_split(d_cfg, val_split)
-                if eval_cap_per_dataset:
-                    ds = ds.select(range(min(len(ds), eval_cap_per_dataset)))
+                if eval_cap_per_dataset and len(ds) > eval_cap_per_dataset:
+                    ds = ds.shuffle(seed=self.seed).select(range(eval_cap_per_dataset))
                 val_datasets.append(ds)
 
         train_ds = (

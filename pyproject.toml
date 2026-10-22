@@ -238,6 +238,14 @@ include_trailing_comma = true
 include = ["tiny_audio", "scripts", "tests", "demo", "docs", "typings"]
 exclude = ["**/node_modules", "**/__pycache__", "outputs", ".venv", "venv"]
 typeCheckingMode = "strict"
+# Resolve imports from the project venv, not whatever `python` is first on
+# PATH. An editor's language server otherwise picked Homebrew's Python 3.11
+# (transformers 4.57, where Trainer.create_optimizer takes no `model`) and
+# reported errors `poetry run pyright` never saw. CI's venv is in-project
+# (`virtualenvs.in-project true`); locally, run `poetry config
+# virtualenvs.in-project true` or symlink `.venv` to `poetry env info -p`.
+venvPath = "."
+venv = ".venv"
 # Minimal stubs for modules that cannot be installed everywhere (the Spaces
 # runtime's `spaces`, PyObjC's macOS-only frameworks, linux-only liger) and for
 # fabric, whose source is untyped.
