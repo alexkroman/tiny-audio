@@ -86,8 +86,10 @@ jobs:
       - name: Install FFmpeg
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
 
+      # `mlx` adds MLX's Linux CPU build, so tests/test_mlx_inference.py runs
+      # here instead of being skipped (conftest skips it where MLX is absent).
       - name: Install dependencies
-        run: poetry install --with dev --no-interaction
+        run: poetry install --with dev,mlx --no-interaction
 
       # `ta dev test` enforces the coverage floor from
       # `[tool.coverage.report] fail_under` via pytest-cov.

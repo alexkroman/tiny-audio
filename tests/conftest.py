@@ -18,8 +18,9 @@ from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
 from tiny_audio.asr_pipeline import ASRPipeline
 
-# MLX exists only on macOS (`poetry install --with mlx`); elsewhere, including
-# Linux CI, its test module is not collected rather than failing to import.
+# MLX comes from the optional `mlx` group (`poetry install --with mlx`; CI's test
+# job installs it, as MLX's CPU build on Linux). Without it, its test module is
+# not collected rather than failing to import.
 collect_ignore: list[str] = (
     [] if importlib.util.find_spec("mlx") is not None else ["test_mlx_inference.py"]
 )

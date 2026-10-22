@@ -1,4 +1,4 @@
-"""Tests for scripts/mlx_inference.py (MLX is macOS-only: conftest skips it elsewhere)."""
+"""Tests for scripts/mlx_inference.py (needs the `mlx` group; conftest skips it without)."""
 
 import json
 from pathlib import Path

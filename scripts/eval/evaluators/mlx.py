@@ -23,7 +23,7 @@ class MLXEvaluator(Evaluator):
         """Load `model_path` (Hub repo or local checkpoint) for MLX; one worker.
 
         MLX is imported here, not at module level, so `ta eval` and its
-        evaluator registry still import on Linux, where MLX does not exist.
+        evaluator registry still import without the optional `mlx` group.
         """
         # One model, decoded one clip at a time on the GPU's single command
         # queue: threads would only contend for it.

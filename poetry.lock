@@ -271,7 +271,7 @@ files = [
     {file = "annotated_doc-0.0.5-py3-none-any.whl", hash = "sha256:117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101"},
     {file = "annotated_doc-0.0.5.tar.gz", hash = "sha256:c7e58ce09192557605d8bbd92836d7e1d520ac9580096042c0bfd197efacf1bb"},
 ]
-markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\""}
+markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\" or sys_platform == \"linux\""}
 
 [[package]]
 name = "annotated-types"
@@ -307,7 +307,7 @@ files = [
     {file = "anyio-4.15.1-py3-none-any.whl", hash = "sha256:6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101"},
     {file = "anyio-4.15.1.tar.gz", hash = "sha256:9f28306018cbd6d329e64a36d58256edff76dd996fe423bc957326e578b82a94"},
 ]
-markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\""}
+markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\" or sys_platform == \"linux\""}
 
 [package.dependencies]
 idna = ">=2.8"
@@ -847,7 +847,7 @@ files = [
     {file = "cffi-2.1.1-cp315-cp315t-win_arm64.whl", hash = "sha256:d18e5ac0f2f03f4f518d3e23db0f0cad7faa1da8620e9c09461d443bbf6e6692"},
     {file = "cffi-2.1.1.tar.gz", hash = "sha256:dd31f52ea1086513bb9df30f8fcee9b8918323ae067a3d5b78bc826a000712be"},
 ]
-markers = {dev = "sys_platform == \"linux\" and platform_machine != \"ppc64le\" and platform_machine != \"s390x\" and platform_python_implementation != \"PyPy\"", mlx = "sys_platform == \"darwin\""}
+markers = {dev = "sys_platform == \"linux\" and platform_machine != \"ppc64le\" and platform_machine != \"s390x\" and platform_python_implementation != \"PyPy\"", mlx = "sys_platform == \"darwin\" or sys_platform == \"linux\""}
 
 [package.dependencies]
 pycparser = {version = "*", markers = "implementation_name != \"PyPy\""}
@@ -1076,7 +1076,7 @@ files = [
     {file = "click-8.5.0-py3-none-any.whl", hash = "sha256:255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360"},
     {file = "click-8.5.0.tar.gz", hash = "sha256:ba0d2089de75ea0310e2dde03160e6ca10009947fb95a182f9b54021bb272e34"},
 ]
-markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\""}
+markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\" or sys_platform == \"linux\""}
 
 [[package]]
 name = "cloudpickle"
@@ -1102,7 +1102,7 @@ files = [
     {file = "colorama-0.4.6-py2.py3-none-any.whl", hash = "sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6"},
     {file = "colorama-0.4.6.tar.gz", hash = "sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44"},
 ]
-markers = {main = "platform_system == \"Windows\"", hybrid-kernels = "sys_platform == \"linux\" and platform_system == \"Windows\"", mlx = "sys_platform == \"darwin\" and platform_system == \"Windows\""}
+markers = {main = "platform_system == \"Windows\"", hybrid-kernels = "sys_platform == \"linux\" and platform_system == \"Windows\"", mlx = "(sys_platform == \"darwin\" or sys_platform == \"linux\") and platform_system == \"Windows\""}
 
 [[package]]
 name = "columnar"
@@ -1627,7 +1627,7 @@ files = [
     {file = "filelock-4.2.0-py3-none-any.whl", hash = "sha256:2ff5690882e8cdb00ef31fb3d01a3094c29f30985426c59495afb1733f3b7238"},
     {file = "filelock-4.2.0.tar.gz", hash = "sha256:7a60906c75227cf04d0c273afadc8219400f11aeb13cc69591d4f6cdc6c8036e"},
 ]
-markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\""}
+markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\" or sys_platform == \"linux\""}
 
 [[package]]
 name = "fla-core"
@@ -1831,7 +1831,7 @@ files = [
     {file = "fsspec-2025.3.0-py3-none-any.whl", hash = "sha256:efb87af3efa9103f94ca91a7f8cb7a4df91af9f74fc106c9c7ea0efd7277c1b3"},
     {file = "fsspec-2025.3.0.tar.gz", hash = "sha256:a935fd1ea872591f2b5148907d103488fc523295e6c64b835cfad8c3eca44972"},
 ]
-markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\""}
+markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\" or sys_platform == \"linux\""}
 
 [package.dependencies]
 aiohttp = {version = "<4.0.0a0 || >4.0.0a0,<4.0.0a1 || >4.0.0a1", optional = true, markers = "extra == \"http\""}
@@ -1987,7 +1987,7 @@ files = [
     {file = "h11-0.16.0-py3-none-any.whl", hash = "sha256:63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86"},
     {file = "h11-0.16.0.tar.gz", hash = "sha256:4e35b956cf45792e4caa5885e69fba00bdbc6ffafbfa020300e549b208ee5ff1"},
 ]
-markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\""}
+markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\" or sys_platform == \"linux\""}
 
 [[package]]
 name = "hf-gradio"
@@ -2034,7 +2034,7 @@ files = [
     {file = "hf_xet-1.7.0-cp38-abi3-win_arm64.whl", hash = "sha256:acc3851cf2576a8fb2ae926da863f4efabe21303cf292e9a44332802ab0dcc6a"},
     {file = "hf_xet-1.7.0.tar.gz", hash = "sha256:d406ec79053c0871817f700c2ac8c36ba0d87f9c34b7458b0f0063bb218b0466"},
 ]
-markers = {main = "platform_machine == \"x86_64\" or platform_machine == \"amd64\" or platform_machine == \"AMD64\" or platform_machine == \"arm64\" or platform_machine == \"ARM64\" or platform_machine == \"aarch64\"", hybrid-kernels = "sys_platform == \"linux\" and (platform_machine == \"x86_64\" or platform_machine == \"amd64\" or platform_machine == \"AMD64\" or platform_machine == \"arm64\" or platform_machine == \"ARM64\" or platform_machine == \"aarch64\")", mlx = "sys_platform == \"darwin\" and (platform_machine == \"x86_64\" or platform_machine == \"amd64\" or platform_machine == \"AMD64\" or platform_machine == \"arm64\" or platform_machine == \"ARM64\" or platform_machine == \"aarch64\")"}
+markers = {main = "platform_machine == \"x86_64\" or platform_machine == \"amd64\" or platform_machine == \"AMD64\" or platform_machine == \"arm64\" or platform_machine == \"ARM64\" or platform_machine == \"aarch64\"", hybrid-kernels = "sys_platform == \"linux\" and (platform_machine == \"x86_64\" or platform_machine == \"amd64\" or platform_machine == \"AMD64\" or platform_machine == \"arm64\" or platform_machine == \"ARM64\" or platform_machine == \"aarch64\")", mlx = "(sys_platform == \"darwin\" or sys_platform == \"linux\") and (platform_machine == \"x86_64\" or platform_machine == \"amd64\" or platform_machine == \"AMD64\" or platform_machine == \"arm64\" or platform_machine == \"ARM64\" or platform_machine == \"aarch64\")"}
 
 [package.extras]
 tests = ["pytest"]
@@ -2072,7 +2072,7 @@ files = [
     {file = "httpcore2-2.13.1-py3-none-any.whl", hash = "sha256:e1e05d4f25f7d7d496bfb96748f6f4b67657b03da069b3a68c36069f3db73d0a"},
     {file = "httpcore2-2.13.1.tar.gz", hash = "sha256:e0aa977abe17e69a3b820a24542a6fa88702676d83880b8d194dcd18408e5103"},
 ]
-markers = {main = "sys_platform != \"emscripten\"", hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\""}
+markers = {main = "sys_platform != \"emscripten\"", hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\" or sys_platform == \"linux\""}
 
 [package.dependencies]
 h11 = ">=0.16"
@@ -2120,7 +2120,7 @@ files = [
     {file = "httpx2-2.13.1-py3-none-any.whl", hash = "sha256:6dff50fabc270ee5fd25d845d0b078ed20564579744d6d962850975996d2f9a4"},
     {file = "httpx2-2.13.1.tar.gz", hash = "sha256:e48744a19e3af5ee48313d0ce5fe941d5422fae5705ea922a4aabf94d7800dfa"},
 ]
-markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\""}
+markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\" or sys_platform == \"linux\""}
 
 [package.dependencies]
 anyio = {version = ">=4.10", markers = "sys_platform != \"emscripten\""}
@@ -2162,7 +2162,7 @@ files = [
     {file = "huggingface_hub-2.2.0-py3-none-any.whl", hash = "sha256:1667f145dc56dc210d60966069397df9ecfca9607a5d43db88b308c89dae56b3"},
     {file = "huggingface_hub-2.2.0.tar.gz", hash = "sha256:5d1b47537394e4215cb858aa12fd493d0f7ef7f58990f5dcd24bc173107b2871"},
 ]
-markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\""}
+markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\" or sys_platform == \"linux\""}
 
 [package.dependencies]
 click = ">=8.4.2,<9.0.0"
@@ -2251,7 +2251,7 @@ files = [
     {file = "idna-3.20-py3-none-any.whl", hash = "sha256:ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c"},
     {file = "idna-3.20.tar.gz", hash = "sha256:a7db850025b95ded1eae8a46181a1a6c56c92c96f0e2b005d9ff8dc0210cab44"},
 ]
-markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\""}
+markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\" or sys_platform == \"linux\""}
 
 [package.extras]
 all = ["coverage (>=7.10.0)", "hypothesis (>=6.141.1)", "mypy (>=1.11.2)", "pytest (>=8.3.2)", "ruff (>=0.16.0)", "ty (>=0.0.37)"]
@@ -2451,7 +2451,7 @@ files = [
     {file = "jinja2-3.1.6-py3-none-any.whl", hash = "sha256:85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67"},
     {file = "jinja2-3.1.6.tar.gz", hash = "sha256:0137fb05990d35f1275a587e9aee6d56da821fc83491a0fb838183be43f66d6d"},
 ]
-markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\""}
+markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\" or sys_platform == \"linux\""}
 
 [package.dependencies]
 MarkupSafe = ">=2.0"
@@ -2655,7 +2655,7 @@ files = [
     {file = "markdown_it_py-4.2.0-py3-none-any.whl", hash = "sha256:9f7ebbcd14fe59494226453aed97c1070d83f8d24b6fc3a3bcf9a38092641c4a"},
     {file = "markdown_it_py-4.2.0.tar.gz", hash = "sha256:04a21681d6fbb623de53f6f364d352309d4094dd4194040a10fd51833e418d49"},
 ]
-markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\""}
+markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\" or sys_platform == \"linux\""}
 
 [package.dependencies]
 mdurl = ">=0.1,<1.0"
@@ -2829,7 +2829,7 @@ files = [
     {file = "markupsafe-3.0.4-cp39-cp39-win_arm64.whl", hash = "sha256:6669c1bf34080161ce49c589cc512ef24d4c704ac9d2b2d3667f519c60418378"},
     {file = "markupsafe-3.0.4.tar.gz", hash = "sha256:2e9ad7dd851bf45fab9f75cbff4cb493fee9979e8d8c7c9c3ee119022518edd6"},
 ]
-markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\""}
+markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\" or sys_platform == \"linux\""}
 
 [[package]]
 name = "mccabe"
@@ -2928,7 +2928,7 @@ files = [
     {file = "mdurl-0.1.2-py3-none-any.whl", hash = "sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8"},
     {file = "mdurl-0.1.2.tar.gz", hash = "sha256:bb413d29f5eea38f31dd4754dd7377d4465116fb207585f97bf925588687c1ba"},
 ]
-markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\""}
+markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\" or sys_platform == \"linux\""}
 
 [[package]]
 name = "miniaudio"
@@ -2937,7 +2937,7 @@ description = "python bindings for the miniaudio library and its decoders (mp3, 
 optional = false
 python-versions = ">=3.8"
 groups = ["mlx"]
-markers = "sys_platform == \"darwin\""
+markers = "sys_platform == \"darwin\" or sys_platform == \"linux\""
 files = [
     {file = "miniaudio-1.71-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:19dc58e4c50ffc48db2ce988019c28f05ca0eaa7c10b45b5c99b70107e610c8a"},
     {file = "miniaudio-1.71-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:aee8e4eec8d7bde4ee78066561329235a04231a221c9b247f1ffaf850551087d"},
@@ -3039,7 +3039,7 @@ description = "A framework for machine learning on Apple silicon."
 optional = false
 python-versions = ">=3.10"
 groups = ["mlx"]
-markers = "sys_platform == \"darwin\""
+markers = "sys_platform == \"darwin\" or sys_platform == \"linux\""
 files = [
     {file = "mlx-0.32.4-cp310-cp310-macosx_14_0_arm64.whl", hash = "sha256:60ba41564e8b5018c9d8a5f8ce7a5aaf70c96d8dd98c1a54b854cbada362d471"},
     {file = "mlx-0.32.4-cp310-cp310-macosx_15_0_arm64.whl", hash = "sha256:e635385a4f778b248ea6f61fbeb285b6bb14a1891d75cfbfd5af12e010298308"},
@@ -3106,6 +3106,7 @@ files = [
 ]
 
 [package.dependencies]
+mlx-cpu = {version = "0.32.4", optional = true, markers = "platform_system == \"Linux\" and extra == \"cpu\""}
 mlx-metal = {version = "0.32.4", markers = "platform_system == \"Darwin\""}
 
 [package.extras]
@@ -3122,7 +3123,7 @@ description = "MLX-Audio is a package for inference of text-to-speech (TTS) and 
 optional = false
 python-versions = ">=3.10"
 groups = ["mlx"]
-markers = "sys_platform == \"darwin\""
+markers = "sys_platform == \"darwin\" or sys_platform == \"linux\""
 files = [
     {file = "mlx_audio-0.6.1-py3-none-any.whl", hash = "sha256:4c5e4ef3f2a453dcc1c84c9aaf1e43701f62f5a32632aff50bfa6be9047d0f10"},
     {file = "mlx_audio-0.6.1.tar.gz", hash = "sha256:94259999694c707129c1f6a30cc1e164e525d0471c9311c5af88f37f20682300"},
@@ -3151,13 +3152,28 @@ stt = ["zstandard (>=0.23.0)"]
 tts = ["mistral-common[audio]"]
 
 [[package]]
+name = "mlx-cpu"
+version = "0.32.4"
+description = "A framework for machine learning on Apple silicon."
+optional = false
+python-versions = ">=3.10"
+groups = ["mlx"]
+markers = "sys_platform == \"linux\" and platform_system == \"Linux\""
+files = [
+    {file = "mlx_cpu-0.32.4-py3-none-manylinux_2_35_aarch64.whl", hash = "sha256:1289e85e64af1fd16380bf331438bfe4afe875d27afc3e0bcf35f427c488fadd"},
+    {file = "mlx_cpu-0.32.4-py3-none-manylinux_2_35_x86_64.whl", hash = "sha256:0e0a24fa2ce8b6b94d2e6a90604e8813aa8e29fcb918bb2aa01cfb6d133d8cee"},
+    {file = "mlx_cpu-0.32.4-py3-none-win_amd64.whl", hash = "sha256:1631a01b3017c6ee846b8080d9b3fc762fd016dea15a843ee9b0c64cfda5b73f"},
+    {file = "mlx_cpu-0.32.4-py3-none-win_arm64.whl", hash = "sha256:fbe0d4d8a6d170945cf975256c108aeac1e8b8a91033d13653e7db09c7452bbb"},
+]
+
+[[package]]
 name = "mlx-lm"
 version = "0.32.2"
 description = "LLMs with MLX and the Hugging Face Hub"
 optional = false
 python-versions = ">=3.11"
 groups = ["mlx"]
-markers = "sys_platform == \"darwin\""
+markers = "sys_platform == \"darwin\" or sys_platform == \"linux\""
 files = [
     {file = "mlx_lm-0.32.2-py3-none-any.whl", hash = "sha256:5c0991248cfff5872503d74f466d2532dd8cb7fb3670cb9be7a06d7305dadc04"},
     {file = "mlx_lm-0.32.2.tar.gz", hash = "sha256:1af8a92f6a141c3e2bf5b0369ac4464203a8e2189c47b9e40d3e921e5b3a1fe9"},
@@ -3188,7 +3204,7 @@ description = "A framework for machine learning on Apple silicon."
 optional = false
 python-versions = ">=3.10"
 groups = ["mlx"]
-markers = "sys_platform == \"darwin\" and platform_system == \"Darwin\""
+markers = "(sys_platform == \"darwin\" or sys_platform == \"linux\") and platform_system == \"Darwin\""
 files = [
     {file = "mlx_metal-0.32.4-py3-none-macosx_14_0_arm64.whl", hash = "sha256:8019b2db622599267d66cc168b2f0dbf5af929790a6c3b3913e00eabc42a7947"},
     {file = "mlx_metal-0.32.4-py3-none-macosx_15_0_arm64.whl", hash = "sha256:9f0a3cc26d89724434d9684932fc6f3e4e83669d2a895d858ed2c8a55eb84e8b"},
@@ -3825,7 +3841,7 @@ files = [
     {file = "numpy-2.5.4-cp315-cp315t-win_arm64.whl", hash = "sha256:7a14a461d9340f1b46b8648578aed9cdb8b3b018a8fac6c1dde2c9192a01a87f"},
     {file = "numpy-2.5.4.tar.gz", hash = "sha256:9a94cf751c9ad8ebaa835bcd3d40dacf8534ad086b88c38029b65123c7999d2a"},
 ]
-markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\""}
+markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\" or sys_platform == \"linux\""}
 
 [[package]]
 name = "numpy-typing-compat"
@@ -4312,7 +4328,7 @@ files = [
     {file = "packaging-26.3-py3-none-any.whl", hash = "sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c"},
     {file = "packaging-26.3.tar.gz", hash = "sha256:94edc256424af38762eb31306eed28beb9f0efc50a8837492c9d6fd6004aed79"},
 ]
-markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\""}
+markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\" or sys_platform == \"linux\""}
 
 [[package]]
 name = "pandas"
@@ -4829,7 +4845,7 @@ files = [
     {file = "protobuf-7.36.2-py3-none-any.whl", hash = "sha256:bdb3a345d48db958e6ce1f18e508beb0cc981d64f24088427549c866cd039f1e"},
     {file = "protobuf-7.36.2.tar.gz", hash = "sha256:497d0463ff3316681da6c0b9e8d06cb465d61abce00b613ab42226175644d1bb"},
 ]
-markers = {mlx = "sys_platform == \"darwin\""}
+markers = {mlx = "sys_platform == \"darwin\" or sys_platform == \"linux\""}
 
 [[package]]
 name = "psutil"
@@ -4972,7 +4988,7 @@ files = [
     {file = "pycparser-3.11-py3-none-any.whl", hash = "sha256:51d5a8ba2be0bbe440b99d2112604c95bbbc3c2748a64260186c541e1729cd80"},
     {file = "pycparser-3.11.tar.gz", hash = "sha256:d875f09c3507d00e1aba0eecc6dcadc1352f30fff09dc6bff2f1c2935e97c2bc"},
 ]
-markers = {main = "implementation_name != \"PyPy\"", dev = "sys_platform == \"linux\" and platform_machine != \"ppc64le\" and platform_machine != \"s390x\" and platform_python_implementation != \"PyPy\" and implementation_name != \"PyPy\"", mlx = "sys_platform == \"darwin\" and implementation_name != \"PyPy\""}
+markers = {main = "implementation_name != \"PyPy\"", dev = "sys_platform == \"linux\" and platform_machine != \"ppc64le\" and platform_machine != \"s390x\" and platform_python_implementation != \"PyPy\" and implementation_name != \"PyPy\"", mlx = "(sys_platform == \"darwin\" or sys_platform == \"linux\") and implementation_name != \"PyPy\""}
 
 [[package]]
 name = "pydantic"
@@ -5169,7 +5185,7 @@ files = [
     {file = "pygments-2.21.0-py3-none-any.whl", hash = "sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9"},
     {file = "pygments-2.21.0.tar.gz", hash = "sha256:610ca751c9bc2492b38eb9a38a7fbc93edbbb2d7182edaf34e66ae493dee5c8c"},
 ]
-markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\""}
+markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\" or sys_platform == \"linux\""}
 
 [package.extras]
 windows-terminal = ["colorama (>=0.4.6)"]
@@ -5805,7 +5821,7 @@ files = [
     {file = "pyyaml-6.0.3-cp39-cp39-win_amd64.whl", hash = "sha256:2e71d11abed7344e42a8849600193d15b6def118602c4c176f748e4583246007"},
     {file = "pyyaml-6.0.3.tar.gz", hash = "sha256:d76623373421df22fb4cf8817020cbb7ef15c725b9d5e45f17e189bfc384190f"},
 ]
-markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\""}
+markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\" or sys_platform == \"linux\""}
 
 [[package]]
 name = "rapidfuzz"
@@ -6082,7 +6098,7 @@ files = [
     {file = "regex-2026.9.29-cp315-cp315t-win_arm64.whl", hash = "sha256:e8c65ef3862a8ad6e86492b6ed9327805dd66904c012bd3649dc67d822ed6c34"},
     {file = "regex-2026.9.29.tar.gz", hash = "sha256:8b5fcc4771732191b2b7d1dd68d8f0353f47f8d90b6150f6dce58bf1112442cb"},
 ]
-markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\""}
+markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\" or sys_platform == \"linux\""}
 
 [[package]]
 name = "requests"
@@ -6162,7 +6178,7 @@ files = [
     {file = "rich-15.0.0-py3-none-any.whl", hash = "sha256:33bd4ef74232fb73fe9279a257718407f169c09b78a87ad3d296f548e27de0bb"},
     {file = "rich-15.0.0.tar.gz", hash = "sha256:edd07a4824c6b40189fb7ac9bc4c52536e9780fbbfbddf6f1e2502c31b068c36"},
 ]
-markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\""}
+markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\" or sys_platform == \"linux\""}
 
 [package.dependencies]
 markdown-it-py = ">=2.2.0"
@@ -6261,7 +6277,7 @@ files = [
     {file = "safetensors-0.8.0-cp310-abi3-win_arm64.whl", hash = "sha256:f7838e5135a406ad3e02efdcb8cf2e5397d368b0154537c4fec682dbc544d452"},
     {file = "safetensors-0.8.0.tar.gz", hash = "sha256:fabaf3e0f18a6618d9b36560682562157f77c2b71fcffc7b432be2baed9d753d"},
 ]
-markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\""}
+markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\" or sys_platform == \"linux\""}
 
 [package.extras]
 all = ["safetensors[convert]", "safetensors[jax]", "safetensors[numpy]", "safetensors[paddlepaddle]", "safetensors[quality]", "safetensors[testing]", "safetensors[torch]"]
@@ -6408,7 +6424,7 @@ files = [
     {file = "scipy-1.18.1-cp315-cp315t-win_arm64.whl", hash = "sha256:eda632a7981f69730d6281f451db9c1c370993a2c0d7ddb43e2a809a2862b83a"},
     {file = "scipy-1.18.1.tar.gz", hash = "sha256:52c4b7422442aba924d03ad4019852b08a92e64ea187b933135687bfe2747307"},
 ]
-markers = {mlx = "sys_platform == \"darwin\""}
+markers = {mlx = "sys_platform == \"darwin\" or sys_platform == \"linux\""}
 
 [package.dependencies]
 numpy = ">=2.0.0,<2.8"
@@ -6476,7 +6492,7 @@ description = "Unsupervised text tokenizer and detokenizer."
 optional = false
 python-versions = ">=3.9"
 groups = ["mlx"]
-markers = "sys_platform == \"darwin\""
+markers = "sys_platform == \"darwin\" or sys_platform == \"linux\""
 files = [
     {file = "sentencepiece-0.2.2-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:bc7b0b1da20f856bfac5f84b2673fe534b167e41980b27442ca8f78c2b7eb77e"},
     {file = "sentencepiece-0.2.2-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:8b2db2056c97224e122054fd794543cde5d24b7cae28424f6e3eb79bbe08e42b"},
@@ -6590,7 +6606,7 @@ files = [
     {file = "shellingham-1.5.4-py2.py3-none-any.whl", hash = "sha256:7ecfff8f2fd72616f7481040475a65b2bf8af90a56c89140852d1120324e8686"},
     {file = "shellingham-1.5.4.tar.gz", hash = "sha256:8dbca0739d487e5bd35ab3ca4b36e11c4078f3a234bfce294b0a0291363404de"},
 ]
-markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\""}
+markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\" or sys_platform == \"linux\""}
 
 [[package]]
 name = "six"
@@ -6635,7 +6651,7 @@ description = "Play and Record Sound with Python"
 optional = false
 python-versions = ">=3.7"
 groups = ["mlx"]
-markers = "sys_platform == \"darwin\""
+markers = "sys_platform == \"darwin\" or sys_platform == \"linux\""
 files = [
     {file = "sounddevice-0.5.6-py3-none-any.whl", hash = "sha256:de099612311ad81e55d31ccbd83f43ea6bf4d87b48f9b6ea55a1fbcde0eee4e0"},
     {file = "sounddevice-0.5.6-py3-none-macosx_10_6_x86_64.macosx_10_6_universal2.whl", hash = "sha256:e3aef00ad8b1d1740eb66d9a7671eab88a4d2b8fa4ab33498d742e63b65c309c"},
@@ -6897,7 +6913,7 @@ files = [
     {file = "tokenizers-0.23.3-cp314-cp314t-win_amd64.whl", hash = "sha256:1554a6eed34d9d6a78d23360f4e06df8dffab1ae08c7e8488e0b3e3b36cc266f"},
     {file = "tokenizers-0.23.3.tar.gz", hash = "sha256:cded33237c77caeef62944d32aa9a7ef42bdce2b3497e18d137e072a8c4be438"},
 ]
-markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\""}
+markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\" or sys_platform == \"linux\""}
 
 [package.dependencies]
 huggingface-hub = ">=0.16.4,<3.0"
@@ -7167,7 +7183,7 @@ files = [
     {file = "tqdm-4.70.1-py3-none-any.whl", hash = "sha256:c293e525e6fef9c20e8728fd4612df02a0aa31bb5fe91ecd93e123b1b7bffa73"},
     {file = "tqdm-4.70.1.tar.gz", hash = "sha256:cefd0eca11b2a37a3aee776544d4f4ae913f02688135b5556b8788dfa474afc4"},
 ]
-markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\""}
+markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\" or sys_platform == \"linux\""}
 
 [package.dependencies]
 colorama = {version = "*", markers = "platform_system == \"Windows\""}
@@ -7187,7 +7203,7 @@ python-versions = ">=3.10.0"
 groups = ["main", "hybrid-kernels", "mlx"]
 files = []
 develop = false
-markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\""}
+markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\" or sys_platform == \"linux\""}
 
 [package.dependencies]
 huggingface-hub = ">=1.31.0,<3.0"
@@ -7322,7 +7338,7 @@ files = [
     {file = "truststore-0.10.5-py3-none-any.whl", hash = "sha256:9aaaedaefaf06d8b206278cf8b5012bc897f485a874503501e12d776df78951c"},
     {file = "truststore-0.10.5.tar.gz", hash = "sha256:30d36967ccaded5cbb38d602c433f53600036c79d502f4533a49b60a03bbefcd"},
 ]
-markers = {main = "sys_platform != \"emscripten\"", hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\""}
+markers = {main = "sys_platform != \"emscripten\"", hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\" or sys_platform == \"linux\""}
 
 [[package]]
 name = "twine"
@@ -7361,7 +7377,7 @@ files = [
     {file = "typer-0.27.3-py3-none-any.whl", hash = "sha256:e50022f28b82a86313e54501317a1db64bf8f8d036ff8cfe5ca7e47675454aff"},
     {file = "typer-0.27.3.tar.gz", hash = "sha256:d0396f770a560ab1b0a8504e13b5f254b728cedb05c61cf0359e944e50ce8901"},
 ]
-markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\""}
+markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\" or sys_platform == \"linux\""}
 
 [package.dependencies]
 annotated-doc = ">=0.0.2"
@@ -7397,7 +7413,7 @@ files = [
     {file = "typing_extensions-4.16.0-py3-none-any.whl", hash = "sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8"},
     {file = "typing_extensions-4.16.0.tar.gz", hash = "sha256:dc983d19a509c94dba722ee6abd33940f7c05a89e243c47e907eb4db6f1a43e5"},
 ]
-markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\""}
+markers = {hybrid-kernels = "sys_platform == \"linux\"", mlx = "sys_platform == \"darwin\" or sys_platform == \"linux\""}
 
 [[package]]
 name = "typing-inspection"
@@ -8306,4 +8322,4 @@ files = [
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.13"
-content-hash = "8c19778d6a0c7b7231f30583ef130ca9d29e21fc89885a4aa1b21cbc3cdbd6ab"
+content-hash = "2f44692204c47c1a1cf7c0edc38271806878c632e341d75859b4363a89901748"

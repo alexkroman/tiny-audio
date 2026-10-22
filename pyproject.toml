@@ -205,17 +205,22 @@ flash-linear-attention = { version = ">=0.5.0", markers = "sys_platform == 'linu
 tilelang = { version = ">=0.1.9", markers = "sys_platform == 'linux'" }
 
 # Apple-silicon inference (`ta eval --mlx`, scripts/mlx_inference.py): mlx-audio's
-# Granite Speech 5.0 encoder port and mlx-lm's Qwen3. MLX exists only on macOS,
-# so the group is optional and every marker is darwin; pods and CI never see it.
-# typings/ carries the stubs that let pyright check the code on Linux.
+# Granite Speech 5.0 encoder port and mlx-lm's Qwen3. Optional: pods never install
+# it. Linux gets MLX's CPU build (`mlx[cpu]`) so CI runs the MLX tests for real
+# rather than skipping them; `ta eval --mlx` itself is for Apple silicon.
 #   poetry install --with mlx
 [tool.poetry.group.mlx]
 optional = true
 
 [tool.poetry.group.mlx.dependencies]
-mlx = { version = ">=0.32.2", markers = "sys_platform == 'darwin'" }
-mlx-lm = { version = ">=0.32.0", markers = "sys_platform == 'darwin'" }
-mlx-audio = { version = ">=0.5.9", markers = "sys_platform == 'darwin'" }
+mlx = [
+  { version = ">=0.32.2", markers = "sys_platform == 'darwin'" },
+  { version = ">=0.32.2", extras = [
+    "cpu",
+  ], markers = "sys_platform == 'linux'" },
+]
+mlx-lm = { version = ">=0.32.0", markers = "sys_platform == 'darwin' or sys_platform == 'linux'" }
+mlx-audio = { version = ">=0.5.9", markers = "sys_platform == 'darwin' or sys_platform == 'linux'" }
 
 [tool.black]
 line-length = 100
