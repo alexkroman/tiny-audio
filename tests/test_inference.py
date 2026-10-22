@@ -13,8 +13,10 @@ from transformers.integrations.sdpa_attention import sdpa_attention_forward
 
 from scripts import inference
 from scripts.inference import (
+    DTYPE_CONFIG_FIELDS,
     GraphedDecoder,
     _gqa_decode_sdpa,
+    _inference_dtypes,
     _mps_safe_sdpa,
     contiguous_lm_head_input,
     missing_fast_kernels,
@@ -335,3 +337,15 @@ def test_gated_delta_step_fake_gives_tracing_the_output_shape() -> None:
         state = torch.empty(2, 6, 8, 16)
         out = inference.gated_delta_step_(q, k, v, g, beta, state, 0.25, True)
     assert out.shape == v.shape
+
+
+class TestInferenceDtypes:
+    """Serving stores every module in bf16 on accelerators, whatever the config saved."""
+
+    def test_accelerators_override_all_three_fields(self) -> None:
+        for kind in ("cuda", "mps"):
+            overrides = _inference_dtypes(torch.device(kind))
+            assert overrides == dict.fromkeys(DTYPE_CONFIG_FIELDS, "bfloat16")
+
+    def test_cpu_keeps_the_saved_config(self) -> None:
+        assert _inference_dtypes(torch.device("cpu")) == {}

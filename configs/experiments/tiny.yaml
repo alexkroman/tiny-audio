@@ -35,6 +35,13 @@ model:
   # Granite already emits 12.5 Hz; its top layers were CTC-trained there.
   projector_pool_stride: 1
   text_model_id: Qwen/Qwen3.5-0.8B
+  # LoRA on a frozen decoder, pinned here since the default recipe moved to
+  # a full fine-tune (2026-10-21): fully fine-tuning 0.8B does not fit the
+  # 8-10 GB this preset was measured at.
+  use_lora: true
+  # bf16 storage is right for a frozen, LoRA-adapted decoder (the default's
+  # float32 is for its full fine-tune) and keeps this preset in its budget.
+  model_dtype: bfloat16
   # Trained on the collator's default 19 s clips (librispeech_dev sets no
   # max_audio_seconds), so it keeps the matching 18 s inference chunks rather
   # than the default recipe's 28.
@@ -44,6 +51,11 @@ data:
   num_proc: 1
 
 training:
+  # The LoRA recipe's freeze policy and LR (the default is a full fine-tune).
+  freeze_language_model: true
+  freeze_text_embed_tokens: true
+  decoder_learning_rate: 1e-4
+  weight_decay: 0.0
   # 3,200 clips, ~1.2 passes over dev-clean. 73 clips (librispeech_dummy)
   # is too few: the LoRA'd decoder memorizes the sentences and ignores the
   # audio, reaching near-zero loss and >100% WER on unseen speech.

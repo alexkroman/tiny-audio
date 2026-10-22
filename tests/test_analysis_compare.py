@@ -7,7 +7,7 @@ from eval_outputs import write_run
 from typer.testing import CliRunner
 
 from scripts.analysis import app, common
-from scripts.analysis.compare import _cpwer_series, _verdict, _wer_series, print_corpus_cis
+from scripts.analysis.compare import _cpwer_series, _verdict, print_corpus_cis
 from scripts.analysis.metrics import ModelMetrics, collect_model_metrics
 
 runner = CliRunner()
@@ -40,16 +40,14 @@ class TestCompare:
         assert result.exit_code == 0, result.output
         out = result.output
         assert "Accuracy by WER (corpus = 2/2 datasets" in out
-        assert "Corpus WER delta vs modelA" in out
         # Insertions, deletions, substitutions in that order; the ITN table is gone.
         assert out.index("Insertion Rate") < out.index("Deletion Rate")
         assert out.index("Deletion Rate") < out.index("Substitution Rate")
         assert "ITN Formatting" not in out
-        # modelB misses one word in four on every row: a 25-point gap, every resample.
-        assert any(
-            "modelB" in line and "+25.00" in line and line.rstrip().endswith("│ separated │")
-            for line in out.splitlines()
-        )
+        assert "Entity" not in out  # the entity table is gone
+        # The WER bootstrap table is gone; the per-dataset WER table carries the gap.
+        assert "Corpus WER delta" not in out
+        assert any("modelB" in line and "25.00%" in line for line in out.splitlines())
 
     def test_a_model_without_a_sweep_exits(self, outputs: Path) -> None:
         result = runner.invoke(app, ["compare", "modelA", "nobody", "-o", str(outputs)])
@@ -73,7 +71,6 @@ def test_verdict(lo: float, hi: float, verdict: str) -> None:
 
 def test_series_need_their_corpus_metric(tmp_path: Path) -> None:
     empty = collect_model_metrics("m", tmp_path)  # no runs: no corpus keys
-    assert _wer_series(empty) is None
     assert _cpwer_series(empty) is None
     full: ModelMetrics = {
         **empty,
@@ -87,8 +84,34 @@ def test_series_need_their_corpus_metric(tmp_path: Path) -> None:
 def test_corpus_cis_need_two_models(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
     only: ModelMetrics = {
         **collect_model_metrics("m", tmp_path),
-        "corpus_wer": 1.0,
-        "corpus_utt_errors": [1],
+        "corpus_cpwer": 1.0,
+        "corpus_cp_utt_errors": [1],
+        "corpus_cp_utt_ref_words": [8],
     }
-    print_corpus_cis({"m": only}, "WER", _wer_series)
+    print_corpus_cis({"m": only}, "cpWER", _cpwer_series)
     assert capsys.readouterr().out == ""
+
+
+def test_corpus_cis_skip_a_model_scored_on_other_rows(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """A model whose per-utterance series has another length is left out, not mis-paired."""
+    base = collect_model_metrics("m", tmp_path)
+    best: ModelMetrics = {
+        **base,
+        "display_name": "best",
+        "corpus_cpwer": 1.0,
+        "corpus_cp_utt_errors": [0, 1],
+        "corpus_cp_utt_ref_words": [8, 8],
+    }
+    other: ModelMetrics = {
+        **base,
+        "display_name": "other",
+        "corpus_cpwer": 9.0,
+        "corpus_cp_utt_errors": [3],
+        "corpus_cp_utt_ref_words": [8],
+    }
+    print_corpus_cis({"best": best, "other": other}, "cpWER", _cpwer_series)
+    out = capsys.readouterr().out
+    assert "Corpus cpWER delta vs best" in out
+    assert "other" not in out.split("Corpus cpWER delta vs best")[1]

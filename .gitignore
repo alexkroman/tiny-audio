@@ -184,6 +184,8 @@ cache/
 logs/
 checkpoints/
 models/
+# ...but not type stubs that mirror a package's `models` module (mlx-lm, mlx-audio).
+!typings/**/models/
 outputs/
 samples/
 # local dataset caches

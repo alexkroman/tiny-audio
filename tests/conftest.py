@@ -6,6 +6,7 @@ import offline_assets  # noqa: F401  # pyright: ignore[reportUnusedImport]
 
 # isort: split
 
+import importlib.util
 import os
 from typing import Any
 from unittest.mock import MagicMock, NonCallableMock
@@ -16,6 +17,13 @@ import torch
 from tiny_audio.asr_config import ASRConfig
 from tiny_audio.asr_modeling import ASRModel
 from tiny_audio.asr_pipeline import ASRPipeline
+
+# MLX comes from the optional `mlx` group (`poetry install --with mlx`; CI's test
+# job installs it, as MLX's CPU build on Linux). Without it, its test module is
+# not collected rather than failing to import.
+collect_ignore: list[str] = (
+    [] if importlib.util.find_spec("mlx") is not None else ["test_mlx_inference.py"]
+)
 
 # Disable tokenizers parallelism to avoid fork warnings in tests
 os.environ["TOKENIZERS_PARALLELISM"] = "false"

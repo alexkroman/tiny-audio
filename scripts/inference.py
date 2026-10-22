@@ -383,6 +383,25 @@ def merge_lora_adapters(model: ASRModel) -> bool:
     return True
 
 
+# ASRConfig fields holding a module's STORAGE dtype. Recipes that train a
+# module keep it float32 for AdamW's master weights and save that into
+# config.json; inference has no optimizer, so loaders override all three
+# (scripts/eval/evaluators/asr.py explains why `dtype=` kwargs do not land).
+DTYPE_CONFIG_FIELDS = ("model_dtype", "projector_dtype", "encoder_dtype")
+
+
+def _inference_dtypes(device: torch.device) -> dict[str, str]:
+    """bf16 storage on CUDA and MPS; on CPU the saved config stands.
+
+    Without it, `ta serve` decoded a fully fine-tuned decoder in its saved
+    float32: twice the bytes per token, and flash_attention_2 (the saved
+    attn_implementation) rejects float32 with no autocast to cast the inputs.
+    """
+    if device.type in ("cuda", "mps"):
+        return dict.fromkeys(DTYPE_CONFIG_FIELDS, "bfloat16")
+    return {}
+
+
 def load_serving_pipeline(
     model_id: str,
     *,
@@ -416,7 +435,7 @@ def load_serving_pipeline(
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
-    model = ASRModel.from_pretrained(model_id)
+    model = ASRModel.from_pretrained(model_id, **_inference_dtypes(device))
     merge_lora_adapters(model)
     # PreTrainedModel.to is functools.wraps'd, which pyright cannot bind as a method.
     cast(nn.Module, model).to(device)

@@ -13,7 +13,6 @@ from scripts.analysis.common import (
     ExcludeOption,
     OutputDirOption,
     console,
-    load_ref_entities,
 )
 from scripts.analysis.metrics import (
     ModelMetrics,
@@ -38,13 +37,6 @@ def _verdict(lo: float, hi: float) -> str:
 
 # (corpus rate, per-utterance errors, per-utterance reference words)
 CorpusSeries = tuple[float, list[int], list[int]]
-
-
-def _wer_series(m: ModelMetrics) -> CorpusSeries | None:
-    """The model's corpus WER series, or None when it has no per-utterance counts."""
-    if "corpus_wer" not in m or not m.get("corpus_utt_errors"):
-        return None
-    return m["corpus_wer"], m.get("corpus_utt_errors", []), m.get("corpus_utt_ref_words", [])
 
 
 def _cpwer_series(m: ModelMetrics) -> CorpusSeries | None:
@@ -138,7 +130,7 @@ def _collect(
 def _pair_rows(model_metrics: dict[str, ModelMetrics]) -> None:
     """Restrict the corpus and every dataset column to rows all models share."""
     # Corpus WER is only comparable across models scored on the same rows.
-    recompute_matched_corpus(model_metrics, load_ref_entities())
+    recompute_matched_corpus(model_metrics)
     sample = next(iter(model_metrics.values()))
     for ds, why in sorted(sample.get("corpus_excluded", {}).items()):
         console.print(f"[yellow]Corpus excludes {ds}: {why}[/yellow]")
@@ -231,6 +223,4 @@ def compare(
         lambda ds: ds.get("sub_rate"),
         lambda v: f"{v:.2f}%",
     )
-    print_corpus_cis(model_metrics, "WER", _wer_series)
     tables.print_word_count_table(model_metrics)
-    tables.print_entity_table(model_metrics)

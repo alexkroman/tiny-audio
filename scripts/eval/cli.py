@@ -31,6 +31,7 @@ from scripts.eval.evaluators.asr import (
     SmallestEvaluator,
 )
 from scripts.eval.evaluators.base import EvalResult, Evaluator, Metrics
+from scripts.eval.evaluators.mlx import MLXEvaluator
 
 app: typer.Typer = typer.Typer(add_completion=False)
 console: Console = Console()
@@ -274,9 +275,19 @@ def _build_tiny_audio_evaluator(
     num_workers: int,
     user_prompt: str | None,
     local_code: bool,
+    mlx: bool = False,
 ) -> tuple[str, Evaluator]:
-    """Build an evaluator for a tiny_audio checkpoint: `ta serve` URL, streaming or local."""
+    """Build an evaluator for a tiny_audio checkpoint: `ta serve` URL, streaming, MLX or local."""
     model_id = get_model_name(model)
+    if mlx:
+        if endpoint or streaming or user_prompt is not None:
+            msg = (
+                "--mlx runs the checkpoint's own prompt, offline: "
+                "drop --endpoint, --streaming and --user-prompt"
+            )
+            raise typer.BadParameter(msg)
+        # Its own name, so `ta analysis compare` keeps MLX and PyTorch runs apart.
+        return f"{model_id}-mlx", MLXEvaluator(model_path=model)
     if endpoint:
         # HTTP threads, no model in this process: safe at any count, on a Mac too.
         # The server batches the in-flight requests together on its GPU.
@@ -313,6 +324,7 @@ def _build_evaluator(
     user_prompt: str | None,
     local_code: bool = False,
     diarizer_url: str | None = None,
+    mlx: bool = False,
 ) -> tuple[str, Evaluator]:
     """Construct the evaluator once for a whole sweep. Returns (model_id, evaluator).
 
@@ -368,6 +380,7 @@ def _build_evaluator(
         num_workers=num_workers,
         user_prompt=user_prompt,
         local_code=local_code,
+        mlx=mlx,
     )
 
 
@@ -468,6 +481,15 @@ def main(
             "Local models only.",
         ),
     ] = False,
+    mlx: Annotated[
+        bool,
+        typer.Option(
+            "--mlx",
+            help="Run a tiny_audio checkpoint with MLX on Apple silicon (Granite Speech 5.0 "
+            "encoder, fully fine-tuned Qwen3 decoder). Uses the Hub repo's latest revision "
+            "and converts it once per revision. Needs `poetry install --with mlx`.",
+        ),
+    ] = False,
     model_name: Annotated[
         str | None,
         typer.Option(
@@ -518,6 +540,7 @@ def main(
         user_prompt=user_prompt,
         local_code=local_code,
         diarizer_url=diarizer_url,
+        mlx=mlx,
     )
 
     for dataset_name in expand_datasets(
