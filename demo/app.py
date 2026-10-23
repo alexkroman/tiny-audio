@@ -322,6 +322,23 @@ def build_output_tabs() -> tuple[gr.Tabs, gr.Textbox, gr.HTML, gr.Dataframe, gr.
     return tabs, output_text, conversation_output, timestamps_output, diarization_output
 
 
+def merge_lora(model: Any) -> bool:
+    """Fold the decoder's LoRA adapters into its base weights; whether there were any.
+
+    The pipeline otherwise decodes through live peft adapters: extra fp32
+    matmuls on six projections per layer, every token. Merging took decode from
+    20.6 to 36.7 tok/s on a Mac, and paired transcripts came back identical
+    (scripts/inference.py `merge_lora_adapters` has the measurement). The Space
+    only uploads demo/, so this is the same few lines rather than an import.
+    A PeftModel forwards `merge_and_unload` to its tuner; a plain decoder has none.
+    """
+    merge = getattr(model.language_model, "merge_and_unload", None)
+    if merge is None:
+        return False
+    model.language_model = merge()
+    return True
+
+
 def local_runner(model_path: str) -> Callable[[str, dict[str, Any]], dict[str, Any]]:
     """Run the pipeline in this process (on the GPU, on ZeroGPU)."""
     from transformers import pipeline  # noqa: PLC0415 -- server mode runs without it
@@ -333,6 +350,7 @@ def local_runner(model_path: str) -> Callable[[str, dict[str, Any]], dict[str, A
         trust_remote_code=True,
         device=pick_device(),
     )
+    merge_lora(pipe.model)
     # Load the aligner and diarizer now, not on the first request: on ZeroGPU
     # each request runs in a forked worker, so a model first loaded there is
     # thrown away afterwards and reloaded on every call.

@@ -8,3 +8,5 @@ transformers @ git+https://github.com/huggingface/transformers@91ea1192a00e0ebb6
 torch
 torchaudio
 peft
+# Nemotron's streaming feature extractor (return_speakers=True) imports it.
+librosa

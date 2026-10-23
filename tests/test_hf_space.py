@@ -43,6 +43,15 @@ class FakeHfApi:
         """Record a Space variable as ``("variable", repo_id, key, value)``."""
         FakeHfApi.space_calls.append(("variable", repo_id, key, value))
 
+    def get_space_variables(self, repo_id: str) -> dict[str, object]:
+        """Return the Space's variables: ENDPOINT_URL, as on a Space that last called a server."""
+        FakeHfApi.space_calls.append(("get-variables", repo_id))
+        return {"ENDPOINT_URL": object()}
+
+    def delete_space_variable(self, repo_id: str, key: str) -> None:
+        """Record a deleted Space variable as ``("delete-variable", repo_id, key)``."""
+        FakeHfApi.space_calls.append(("delete-variable", repo_id, key))
+
     def request_space_hardware(self, repo_id: str, hardware: SpaceHardware) -> None:
         """Record a hardware request as ``("hardware", repo_id, hardware)``."""
         FakeHfApi.space_calls.append(("hardware", repo_id, hardware))
@@ -107,7 +116,11 @@ def test_deploy_creates_space_and_uploads(
         }
     ]
     assert "https://huggingface.co/spaces/me/demo" in capsys.readouterr().out
-    assert FakeHfApi.space_calls == []
+    assert FakeHfApi.space_calls == [
+        ("get-variables", "me/demo"),
+        ("delete-variable", "me/demo", "ENDPOINT_URL"),
+        ("hardware", "me/demo", SpaceHardware.ZERO_A10G),
+    ]
 
 
 @pytest.mark.usefixtures("uploads")

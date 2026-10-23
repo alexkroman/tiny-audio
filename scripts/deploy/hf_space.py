@@ -53,7 +53,8 @@ def deploy(
         str | None,
         typer.Option(
             "--endpoint-url",
-            help="`ta serve` URL for the Space to call; also moves it to free CPU hardware",
+            help="`ta serve` URL for the Space to call on free CPU hardware; "
+            "without it the model runs in the Space on ZeroGPU",
         ),
     ] = None,
 ) -> None:
@@ -98,6 +99,13 @@ def deploy(
             "If the server requires a key, add it as a TINY_AUDIO_API_KEY secret: "
             f"https://huggingface.co/spaces/{repo_id}/settings"
         )
+    else:
+        # A leftover ENDPOINT_URL would keep the app calling a server instead of
+        # loading the model, so clear it along with moving to ZeroGPU.
+        if "ENDPOINT_URL" in api.get_space_variables(repo_id):
+            api.delete_space_variable(repo_id, "ENDPOINT_URL")
+        api.request_space_hardware(repo_id, SpaceHardware.ZERO_A10G)
+        typer.echo(f"\nSpace runs the model on {SpaceHardware.ZERO_A10G.value} hardware.")
 
     typer.echo("\nSuccessfully deployed to Hugging Face Space!")
     typer.echo(f"Your Space is available at: https://huggingface.co/spaces/{repo_id}")

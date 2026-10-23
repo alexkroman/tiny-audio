@@ -96,3 +96,39 @@ def test_playlist_upload_is_not_followed(tmp_path: Path) -> None:
         playlist.read_bytes(),
         "application/octet-stream",
     )
+
+
+class _Decoder:
+    """A decoder stand-in; `merged` is what `merge_and_unload` hands back."""
+
+
+class _PeftDecoder:
+    """A PeftModel stand-in whose `merge_and_unload` returns the plain decoder."""
+
+    def __init__(self, merged: _Decoder) -> None:
+        self.merged = merged
+
+    def merge_and_unload(self) -> _Decoder:
+        """Return the merged decoder."""
+        return self.merged
+
+
+class _Model:
+    """An ASRModel stand-in holding only `language_model`."""
+
+    def __init__(self, language_model: object) -> None:
+        self.language_model = language_model
+
+
+def test_merge_lora_swaps_in_the_merged_decoder() -> None:
+    merged = _Decoder()
+    model = _Model(_PeftDecoder(merged))
+    assert app.merge_lora(model)
+    assert model.language_model is merged
+
+
+def test_merge_lora_leaves_a_plain_decoder_alone() -> None:
+    decoder = _Decoder()
+    model = _Model(decoder)
+    assert not app.merge_lora(model)
+    assert model.language_model is decoder
