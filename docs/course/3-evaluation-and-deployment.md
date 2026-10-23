@@ -98,7 +98,7 @@ Then look at the data three ways:
 | Option                          | Cost          | When                                                 |
 | ------------------------------- | ------------- | ---------------------------------------------------- |
 | **Hub repo**                    | Free          | Already done: training pushed your checkpoints there |
-| **Hugging Face Space** (Gradio) | Free on CPU   | A public demo anyone can try in a browser            |
+| **Hugging Face Space** (Gradio) | ZeroGPU       | A public demo anyone can try in a browser            |
 | **`ta serve` on RunPod**        | Paid GPU      | A production HTTP API with batched GPU inference     |
 | **Local server**                | Your hardware | Privacy, or wiring into your own app                 |
 
@@ -219,8 +219,9 @@ environment variable, so the same code serves any Tiny Audio model.
 1. In the Space's **Settings → Variables**, add `MODEL_ID` = `your-username/tiny-audio-yourname`.
    The Space restarts. (Without this it serves the published model.)
 
-The first build takes a few minutes on the free CPU tier. Inference on CPU is slow but works. Share
-the link.
+`ta deploy` puts the Space on ZeroGPU (hosting a ZeroGPU Space needs a Hugging Face PRO account;
+without one, pick CPU in the Space's settings: slow, but it works). The first build takes a few
+minutes. Share the link.
 
 To test locally before deploying:
 

@@ -1,5 +1,5 @@
 ---
-license: mit
+license: cc-by-nc-sa-4.0
 language:
   - en
 datasets:
@@ -8,12 +8,13 @@ datasets:
   - fixie-ai/common_voice_17_0
   - speechcolab/gigaspeech
   - kensho/spgispeech
-  - facebook/voxpopuli
   - edinburghcstr/ami
   - sanchit-gandhi/tedlium-data
+  - edinburghcstr/edacc
+  - mazesmazes/notsofar-train
 base_model:
-  - ibm-granite/granite-speech-5.0-470m-turboctc
-  - Qwen/Qwen3.5-2B
+  - ibm-granite/granite-speech-5.0-470m-turboctc-nc
+  - Qwen/Qwen3-0.6B
 pipeline_tag: automatic-speech-recognition
 tags:
   - asr
@@ -25,166 +26,17 @@ tags:
   - speaker-diarization
   - qwen
   - granite-speech
-  - lora
 library_name: transformers
 metrics:
   - wer
-model-index:
-  - name: tiny-audio
-    results:
-      - task:
-          type: automatic-speech-recognition
-          name: Automatic Speech Recognition
-        dataset:
-          name: "LibriSpeech test-clean, subset of up to 1,000 samples"
-          type: openslr/librispeech_asr
-          config: clean
-          split: test
-        metrics:
-          - type: wer
-            value: 1.84
-            name: WER (normalized, subset of up to 1,000 samples)
-      - task:
-          type: automatic-speech-recognition
-          name: Automatic Speech Recognition
-        dataset:
-          name: "LibriSpeech test-other, subset of up to 1,000 samples"
-          type: openslr/librispeech_asr
-          config: other
-          split: test
-        metrics:
-          - type: wer
-            value: 6.38
-            name: WER (normalized, subset of up to 1,000 samples)
-      - task:
-          type: automatic-speech-recognition
-          name: Automatic Speech Recognition
-        dataset:
-          name: "SPGISpeech, subset of up to 1,000 samples"
-          type: kensho/spgispeech
-          config: test
-          split: test
-        metrics:
-          - type: wer
-            value: 2.29
-            name: WER (normalized, subset of up to 1,000 samples)
-      - task:
-          type: automatic-speech-recognition
-          name: Automatic Speech Recognition
-        dataset:
-          name: "TED-LIUM, subset of up to 1,000 samples"
-          type: sanchit-gandhi/tedlium-data
-          config: default
-          split: test
-        metrics:
-          - type: wer
-            value: 3.71
-            name: WER (normalized, subset of up to 1,000 samples)
-      - task:
-          type: automatic-speech-recognition
-          name: Automatic Speech Recognition
-        dataset:
-          name: "LoquaciousSet (held out), subset of up to 1,000 samples"
-          type: speechbrain/LoquaciousSet
-          config: small
-          split: test
-        metrics:
-          - type: wer
-            value: 6.2
-            name: WER (normalized, subset of up to 1,000 samples)
-      - task:
-          type: automatic-speech-recognition
-          name: Automatic Speech Recognition
-        dataset:
-          name: "VoxPopuli, subset of up to 1,000 samples"
-          type: facebook/voxpopuli
-          config: en
-          split: test
-        metrics:
-          - type: wer
-            value: 7.11
-            name: WER (normalized, subset of up to 1,000 samples)
-      - task:
-          type: automatic-speech-recognition
-          name: Automatic Speech Recognition
-        dataset:
-          name: "Common Voice 17, subset of up to 1,000 samples"
-          type: fixie-ai/common_voice_17_0
-          config: en
-          split: test
-        metrics:
-          - type: wer
-            value: 7.18
-            name: WER (normalized, subset of up to 1,000 samples)
-      - task:
-          type: automatic-speech-recognition
-          name: Automatic Speech Recognition
-        dataset:
-          name: "AMI (IHM), subset of up to 1,000 samples"
-          type: edinburghcstr/ami
-          config: ihm
-          split: test
-        metrics:
-          - type: wer
-            value: 8.99
-            name: WER (normalized, subset of up to 1,000 samples)
-      - task:
-          type: automatic-speech-recognition
-          name: Automatic Speech Recognition
-        dataset:
-          name: "GigaSpeech (dev), subset of up to 1,000 samples"
-          type: fixie-ai/gigaspeech
-          config: dev
-          split: dev
-        metrics:
-          - type: wer
-            value: 9.06
-            name: WER (normalized, subset of up to 1,000 samples)
-      - task:
-          type: automatic-speech-recognition
-          name: Automatic Speech Recognition
-        dataset:
-          name: "Earnings22 (held out), subset of up to 1,000 samples"
-          type: sanchit-gandhi/earnings22_robust_split
-          config: default
-          split: test
-        metrics:
-          - type: wer
-            value: 10.58
-            name: WER (normalized, subset of up to 1,000 samples)
-      - task:
-          type: automatic-speech-recognition
-          name: Automatic Speech Recognition
-        dataset:
-          name: "People's Speech, subset of up to 1,000 samples"
-          type: fixie-ai/peoples_speech
-          config: clean
-          split: test
-        metrics:
-          - type: wer
-            value: 17.59
-            name: WER (normalized, subset of up to 1,000 samples)
-      - task:
-          type: automatic-speech-recognition
-          name: Automatic Speech Recognition
-        dataset:
-          name: "AMI (SDM), subset of up to 1,000 samples"
-          type: edinburghcstr/ami
-          config: sdm
-          split: test
-        metrics:
-          - type: wer
-            value: 23.53
-            name: WER (normalized, subset of up to 1,000 samples)
 ---
 
 # Tiny Audio
 
 **A tiny, hackable, open-source speech LLM.**
 
-It transcribes English with punctuation, capitalization, word timestamps, and speaker labels: 1.8%
-WER on LibriSpeech test-clean and 7.4% across 12 benchmarks (11,822 samples pooled). Built and
-trained with [Tiny Audio](https://github.com/alexkroman/tiny-audio).
+It transcribes English with punctuation, capitalization, word timestamps, and speaker labels. Built
+and trained with [Tiny Audio](https://github.com/alexkroman/tiny-audio).
 
 **[Try the live demo](https://huggingface.co/spaces/mazesmazes/tiny-audio)** ·
 **[Train your own](https://github.com/alexkroman/tiny-audio)** ·
@@ -199,12 +51,11 @@ projector:
 Audio (16 kHz) → speech encoder (frozen) → MLP projector (trained) → LLM decoder → Text
 ```
 
-The published model pairs the Granite Speech 5.0 470M encoder (kept frozen) with the Qwen3.5-2B
-decoder. The MLP projector stacks neighbouring encoder frames and maps them into the decoder's
-embedding space; it is the only part trained from scratch, and the decoder is adapted with LoRA.
-Only the projector and LoRA adapters are trained: ~80M parameters. The encoder, projector, and
-decoder are each swappable from config in the
-[training repo](https://github.com/alexkroman/tiny-audio).
+The published model pairs the non-causal Granite Speech 5.0 470M encoder (kept frozen) with the
+Qwen3-0.6B decoder. The MLP projector maps encoder frames into the decoder's embedding space; it is
+the only part trained from scratch, and the whole decoder is fine-tuned alongside it: ~604M trained
+parameters (596M decoder, 8.4M projector). The encoder, projector, and decoder are each swappable
+from config in the [training repo](https://github.com/alexkroman/tiny-audio).
 
 ## Intended Use
 
@@ -238,36 +89,13 @@ the model writes punctuation, capitalization, and numbers itself.
 
 ## Benchmarks
 
-Word error rate (%, lower is better) on 11,822 samples (up to 1,000 per dataset), scored with the
+Benchmark results for this release have not been published yet. To score it yourself with the
 [Tiny Audio eval harness](https://github.com/alexkroman/tiny-audio/tree/main/scripts/eval)
-(`ta eval`) against the `ta serve` HTTP API on an RTX 4090, after text normalization.
-
-| Dataset                     |      WER |
-| --------------------------- | -------: |
-| LibriSpeech test-clean      |     1.84 |
-| SPGISpeech                  |     2.29 |
-| TED-LIUM                    |     3.71 |
-| LoquaciousSet †             |     6.20 |
-| LibriSpeech test-other      |     6.38 |
-| VoxPopuli                   |     7.11 |
-| Common Voice                |     7.18 |
-| AMI (IHM)                   |     8.99 |
-| GigaSpeech                  |     9.06 |
-| Earnings22 †                |    10.58 |
-| People's Speech             |    17.59 |
-| AMI (SDM)                   |    23.53 |
-| **Mean (12 sets)**          | **8.71** |
-| **Pooled (11,822 samples)** | **7.42** |
-
-† Held out: no data from this source was used in training.
-
-To reproduce a row, or score AssemblyAI, Deepgram, ElevenLabs, or Apple's on-device recognizer on
-the same samples:
+(`ta eval`):
 
 ```bash
 git clone https://github.com/alexkroman/tiny-audio.git && cd tiny-audio && poetry install
 poetry run ta eval -m mazesmazes/tiny-audio -d loquacious -n 100
-ASSEMBLYAI_API_KEY=... poetry run ta eval -m assemblyai -d loquacious -n 100
 ```
 
 ## More Than Plain Text
@@ -292,9 +120,9 @@ for r in pipe(["audio1.wav", "audio2.wav", "audio3.wav"], batch_size=4):
 
 `return_timestamps=True` times every word with
 [Qwen3-ForcedAligner-0.6B](https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B-hf) and returns them
-under a `words` key. Audio of any length works: the pipeline transcribes it in 8-18 s chunks cut at
-pauses (the model trained on clips up to 19 s), aligns each chunk against its own transcript in
-batches, and places every word on the recording's timeline.
+under a `words` key. Audio of any length works: the pipeline transcribes it in chunks of up to 28 s
+cut at pauses (the model trained on clips up to 30 s), aligns each chunk against its own transcript
+in batches, and places every word on the recording's timeline.
 
 ```python
 result = pipe("audio.wav", return_timestamps=True)
@@ -377,24 +205,23 @@ request format.
 | ---------------- | ------------------------------------------------------------------ |
 | Input            | Audio (16kHz mono)                                                 |
 | Output           | Punctuated, capitalized text with formatted numbers                |
-| Max Audio Length | ~19 s per plain call; any length with timestamps or speakers       |
-| Vocabulary       | Qwen3.5 tokenizer                                                  |
+| Max Audio Length | Any length; audio over 28 s is transcribed in chunks cut at pauses |
+| Vocabulary       | Qwen3 tokenizer                                                    |
 | Languages        | English only                                                       |
 | Generation       | Greedy decoding (num_beams=1, do_sample=False), max 256 new tokens |
 | Optional output  | Word-level timestamps; speaker-labelled words and speaker segments |
-| Memory           | ~6 GB of GPU or Apple Silicon memory (bf16 weights)                |
+| Weights          | ~2.1 GB in bf16 (encoder + projector + decoder)                    |
 
 ## Training Details
 
-|                   |                                                                                                                                                                 |
-| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Data**          | LibriHeavy (medium), People's Speech (clean), Common Voice 17, GigaSpeech (M), SPGISpeech (M), VoxPopuli, AMI (IHM + SDM), TED-LIUM: one pass, ~3.8M utterances |
-| **Hardware**      | Single NVIDIA H100 80GB                                                                                                                                         |
-| **Steps**         | 58,861                                                                                                                                                          |
-| **Batch Size**    | 64                                                                                                                                                              |
-| **Optimizer**     | AdamW (fused), cosine schedule, 1,000 warmup steps, no weight decay                                                                                             |
-| **Learning Rate** | 1e-3 (projector), 1e-4 (LoRA)                                                                                                                                   |
-| **Precision**     | bf16 (projector held in fp32)                                                                                                                                   |
+|                   |                                                                                                                                                     |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Data**          | LibriHeavy (medium), People's Speech (clean), Common Voice 17, GigaSpeech (M), SPGISpeech (M), AMI (IHM + SDM), TED-LIUM, NOTSOFAR, EdAcc: one pass |
+| **Steps**         | 16,159                                                                                                                                              |
+| **Batch Size**    | 304                                                                                                                                                 |
+| **Optimizer**     | AdamW (fused), cosine schedule, 1,000 warmup steps, no weight decay                                                                                 |
+| **Learning Rate** | 1e-3 (projector), 2e-5 (decoder)                                                                                                                    |
+| **Precision**     | bf16 mixed precision (weights held in fp32)                                                                                                         |
 
 The training recipe is the default config,
 [`configs/config.yaml`](https://github.com/alexkroman/tiny-audio/blob/main/configs/config.yaml) with
@@ -404,9 +231,8 @@ The training recipe is the default config,
 
 - **English only**: Not trained on other languages.
 - **Sample rate**: Expects 16kHz audio (other rates are resampled automatically).
-- **Audio length**: A plain `pipe(audio)` call decodes the clip in one pass and works best up to
-  about 19 seconds (the training length). For longer audio pass `return_timestamps=True` or
-  `return_speakers=True`, which transcribe in 8-18 s chunks automatically.
+- **Audio length**: Audio longer than 28 seconds is cut into chunks at pauses and transcribed chunk
+  by chunk, so context does not carry across chunk boundaries.
 - **Speaker diarization**: At most 8 speakers per recording. The count is detected automatically;
   `num_speakers` and `max_speakers` can cap it, but `min_speakers` is not supported (passing it
   raises a `ValueError`). Needs transformers `main` until the next release.
@@ -420,22 +246,22 @@ The training recipe is the default config,
 | File                                                               | Description                                              |
 | ------------------------------------------------------------------ | -------------------------------------------------------- |
 | `config.json`                                                      | Model configuration                                      |
-| `model.safetensors`                                                | Projector weights (~50MB)                                |
-| `adapter_config.json` / `adapter_model.safetensors`                | LoRA adapters for the decoder (~270MB)                   |
+| `model.safetensors`                                                | Projector and fine-tuned decoder weights (~2.4 GB, fp32) |
 | `preprocessor_config.json`                                         | Audio preprocessing config                               |
 | `tokenizer.json` / `tokenizer_config.json` / `chat_template.jinja` | Tokenizer                                                |
 | `asr_*.py`, `projectors.py`, `alignment.py`, `diarization.py`      | Custom model code (loaded with `trust_remote_code=True`) |
 
-Only the projector and LoRA weights are stored here. The encoder (Granite Speech) and decoder
-(Qwen3.5-2B) are downloaded from their own Hugging Face repos.
+The encoder (Granite Speech) is downloaded from its own Hugging Face repo. `config.json` loads the
+weights in bf16, as the eval harness runs them.
 
-The previous GLM-ASR + Qwen3-0.6B model is still available at revision `glm-asr-qwen3-0.6b`:
+Earlier models are still available by revision: `granite-qwen-frozen-4` (Granite Speech 470M +
+Qwen3.5-2B with LoRA, MIT) and `glm-asr-qwen3-0.6b` (GLM-ASR + Qwen3-0.6B):
 
 ```python
 pipe = pipeline(
     "automatic-speech-recognition",
     model="mazesmazes/tiny-audio",
-    revision="glm-asr-qwen3-0.6b",
+    revision="granite-qwen-frozen-4",
     trust_remote_code=True,
 )
 ```
@@ -456,15 +282,18 @@ If you use this model, please cite:
 
 ## Acknowledgments
 
-- [Granite Speech](https://huggingface.co/ibm-granite/granite-speech-5.0-470m-turboctc) for the
+- [Granite Speech](https://huggingface.co/ibm-granite/granite-speech-5.0-470m-turboctc-nc) for the
   audio encoder
-- [Qwen3.5](https://huggingface.co/Qwen/Qwen3.5-2B) for the language model
+- [Qwen3](https://huggingface.co/Qwen/Qwen3-0.6B) for the language model
 - [Qwen3-ForcedAligner](https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B-hf) for word timestamps
 - [Nemotron-3-Diarization](https://huggingface.co/nvidia/Nemotron-3-Diarization) for speaker
   diarization
-- The LibriHeavy, People's Speech, Common Voice, GigaSpeech, SPGISpeech, VoxPopuli, AMI, and
-  TED-LIUM teams for training data
+- The LibriHeavy, People's Speech, Common Voice, GigaSpeech, SPGISpeech, AMI, TED-LIUM, NOTSOFAR,
+  and EdAcc teams for training data
 
 ## License
 
-MIT
+CC BY-NC-SA 4.0 (non-commercial, share-alike), inherited from the
+[Granite Speech 5.0 470M non-causal encoder](https://huggingface.co/ibm-granite/granite-speech-5.0-470m-turboctc-nc)
+this model is built on. For commercial use, see the MIT-licensed `granite-qwen-frozen-4` revision
+above. The Tiny Audio training code is MIT.

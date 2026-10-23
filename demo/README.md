@@ -8,7 +8,7 @@ sdk_version: "6.26.0"
 python_version: "3.12"
 app_file: app.py
 pinned: true
-license: mit
+license: cc-by-nc-sa-4.0
 short_description: Fast English ASR with word timestamps and speaker labels
 thumbnail: https://huggingface.co/spaces/mazesmazes/tiny-audio/resolve/main/thumbnail.png
 models:
@@ -22,16 +22,22 @@ tags:
   - word-timestamps
   - speaker-diarization
   - granite-speech
-  - qwen3.5
-  - lora
+  - qwen3
+suggested_hardware: zero-a10g
+preload_from_hub:
+  - mazesmazes/tiny-audio
+  - ibm-granite/granite-speech-5.0-470m-turboctc-nc
+  - Qwen/Qwen3-0.6B
+  - Qwen/Qwen3-ForcedAligner-0.6B-hf
+  - nvidia/Nemotron-3-Diarization
 ---
 
 ## Demo Overview
 
 This Space demonstrates an Automatic Speech Recognition (ASR) model that combines:
 
-- **Granite Speech 5.0 470M encoder** for audio feature extraction
-- **Qwen3.5-2B decoder** with LoRA adapters for text generation
+- **Granite Speech 5.0 470M non-causal encoder** for audio feature extraction
+- **Qwen3-0.6B decoder**, fully fine-tuned, for text generation
 
 ## Features
 
@@ -42,13 +48,12 @@ This Space demonstrates an Automatic Speech Recognition (ASR) model that combine
 
 ## Model Architecture
 
-The model bridges audio and text with a trained projector and LoRA adapters:
+The model bridges audio and text with a trained projector and a fine-tuned decoder:
 
-1. **Audio Encoder**: Granite Speech 5.0 470M TurboCTC encoder (frozen)
+1. **Audio Encoder**: Granite Speech 5.0 470M TurboCTC non-causal encoder (frozen)
 1. **Projection Layer**: 2-layer MLP mapping audio features into the decoder's embedding space
-   (~12.6M params)
-1. **Text Decoder**: Qwen3.5-2B (frozen) with rank-64 LoRA adapters (~67M params), trained jointly
-   with the projector
+   (~8.4M params)
+1. **Text Decoder**: Qwen3-0.6B (~596M params), fully fine-tuned jointly with the projector
 
 ## Usage
 
@@ -60,10 +65,9 @@ The model bridges audio and text with a trained projector and LoRA adapters:
 
 ## Limitations
 
-- Plain transcription works best on clips up to about 19 seconds (the training length); with
-  timestamps or diarization on, longer audio is transcribed in chunks automatically
-- Requests run on a GPU server on RunPod; while it is starting up or offline, requests fail with a
-  "try again" message
+- Audio longer than 28 seconds is transcribed in chunks cut at pauses
+- Requests run on ZeroGPU, which reserves GPU time from your daily quota in proportion to the
+  audio's length (20-120 s), so roughly up to five minutes of speech per request
 - Optimized for English language
 - Best performance with clear speech and minimal background noise
 
