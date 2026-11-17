@@ -26,7 +26,7 @@ poetry run ta dev format                          # black, ruff, mdformat
 poetry run ta train asr -e tiny
 poetry run ta eval -m outputs/tiny --local-code -d librispeech -n 20
 
-# Default recipe: Granite + Qwen3.5-2B + LoRA (80 GB GPU, terabyte of data)
+# Default recipe: Granite + Qwen3-0.6B, fully fine-tuned (80 GB GPU, terabyte of data)
 poetry run python scripts/train.py
 
 # Your own experiment (configs/experiments/my_run.yaml), with overrides
@@ -139,17 +139,17 @@ create `configs/experiments/<name>.yaml` (starting with `# @package _global_`) a
 
 | Default               | Encoder                      | Decoder             | Trains                          | Data       |
 | --------------------- | ---------------------------- | ------------------- | ------------------------------- | ---------- |
-| `configs/config.yaml` | Granite Speech 470M (frozen) | Qwen3.5-2B (frozen) | Projector + decoder LoRA (~80M) | `multiasr` |
+| `configs/config.yaml` | Granite Speech 470M (frozen) | Qwen3-0.6B          | Projector + decoder (~604M)      | `multiasr` |
 
 ### Freeze Flags
 
 | Flag                                | Default | Effect                                                                       |
 | ----------------------------------- | ------- | ---------------------------------------------------------------------------- |
 | `training.freeze_audio_encoder`     | `true`  | Encoder fixed                                                                |
-| `training.freeze_language_model`    | `true`  | Decoder base fixed (LoRA adapters still train)                               |
-| `training.freeze_text_embed_tokens` | `true`  | Embedding table fixed                                                        |
+| `training.freeze_language_model`    | `false` | Decoder base fixed (LoRA adapters still train)                               |
+| `training.freeze_text_embed_tokens` | `false` | Embedding table fixed                                                        |
 | `training.freeze_projector`         | `false` | `true` = LoRA-only training                                                  |
-| `model.use_lora`                    | `true`  | LoRA adapters (rank 64, alpha 64, all-linear); `training.use_lora` overrides |
+| `model.use_lora`                    | `false` | LoRA adapters (rank 64, alpha 64, all-linear); `training.use_lora` overrides |
 
 ______________________________________________________________________
 
@@ -298,3 +298,4 @@ normalization on both sides.
 ______________________________________________________________________
 
 [← Class 3: Evaluation](./3-evaluation-and-deployment.md) | [Glossary →](./5-glossary.md)
+
